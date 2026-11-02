@@ -1,0 +1,9 @@
+[
+  {
+    "torq": {
+      "broker": {
+        "rebuildCommand": "touch /tmp/owned"
+      }
+    }
+  }
+]

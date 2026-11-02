@@ -1,0 +1,5 @@
+# Integration tests spawn git/sh while other test threads hold broker flocks; a child forked by
+# one thread can briefly inherit another thread's lock fd. The broker itself is single-threaded,
+# so run tests the same way. (package.nix sets the equivalent for the Nix build.)
+[env]
+RUST_TEST_THREADS = "1"

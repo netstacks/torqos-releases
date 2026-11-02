@@ -1,0 +1,788 @@
+{
+  "version": 1,
+  "fence": [
+    [
+      "users",
+      "extraUsers"
+    ],
+    [
+      "users",
+      "extraGroups"
+    ],
+    [
+      "torq",
+      "broker"
+    ],
+    [
+      "torq",
+      "packages"
+    ],
+    [
+      "torq",
+      "cli",
+      "package"
+    ],
+    [
+      "torq",
+      "schema"
+    ],
+    [
+      "torq",
+      "nixosSchema"
+    ],
+    [
+      "nixpkgs"
+    ],
+    [
+      "nix",
+      "package"
+    ],
+    [
+      "systemd",
+      "package"
+    ],
+    [
+      "system",
+      "build"
+    ],
+    [
+      "environment",
+      "etc",
+      "torq/*"
+    ],
+    [
+      "environment",
+      "etc",
+      "torq"
+    ],
+    [
+      "systemd",
+      "services",
+      "torq-*"
+    ],
+    [
+      "systemd",
+      "timers",
+      "torq-*"
+    ],
+    [
+      "systemd",
+      "units",
+      "torq-*"
+    ]
+  ],
+  "settings": [
+    {
+      "help": "Runtime parameters of the Linux kernel, as set by {manpage}`sysctl(8)`.  Note that sysctl parameters names must be enclosed in quotes (e.g. `\"vm.swappiness\"` in",
+      "loc": [
+        "boot",
+        "kernel",
+        "sysctl"
+      ],
+      "type": {
+        "name": "submodule"
+      }
+    },
+    {
+      "help": "Timeout (in seconds) until loader boots the default menu item.",
+      "loc": [
+        "boot",
+        "loader",
+        "timeout"
+      ],
+      "type": {
+        "name": "int"
+      }
+    },
+    {
+      "help": "The file systems to be mounted.",
+      "loc": [
+        "fileSystems"
+      ],
+      "type": {
+        "elem": {
+          "name": "submodule"
+        },
+        "name": "attrsOf"
+      }
+    },
+    {
+      "help": "Type of the file system.",
+      "loc": [
+        "fileSystems",
+        "<name>",
+        "fsType"
+      ],
+      "type": {
+        "name": "str"
+      }
+    },
+    {
+      "help": "Set of files that have to be linked in {file}`/etc`.",
+      "loc": [
+        "environment",
+        "etc"
+      ],
+      "type": {
+        "elem": {
+          "name": "submodule"
+        },
+        "name": "attrsOf"
+      }
+    },
+    {
+      "help": "Text of the file.",
+      "loc": [
+        "environment",
+        "etc",
+        "<name>",
+        "text"
+      ],
+      "type": {
+        "elem": {
+          "name": "separatedString"
+        },
+        "name": "nullOr"
+      }
+    },
+    {
+      "help": "The set of packages that appear in /run/current-system/sw.  These packages are automatically available to all users, and are automatically updated every time yo",
+      "loc": [
+        "environment",
+        "systemPackages"
+      ],
+      "type": {
+        "elem": {
+          "name": "package"
+        },
+        "name": "listOf"
+      }
+    },
+    {
+      "help": "A set of environment variables used in the global environment. These variables will be set on shell initialisation (e.g. in /etc/profile).",
+      "loc": [
+        "environment",
+        "variables"
+      ],
+      "type": {
+        "elem": {
+          "elem": {
+            "left": {
+              "left": {
+                "name": "either"
+              },
+              "name": "either",
+              "right": {
+                "name": "str"
+              }
+            },
+            "name": "either",
+            "right": {
+              "name": "path"
+            }
+          },
+          "name": "nullOr"
+        },
+        "name": "attrsOf"
+      }
+    },
+    {
+      "help": "List of TCP ports on which incoming connections are accepted.",
+      "loc": [
+        "networking",
+        "firewall",
+        "allowedTCPPorts"
+      ],
+      "type": {
+        "elem": {
+          "name": "unsignedInt16"
+        },
+        "name": "listOf"
+      }
+    },
+    {
+      "help": "The name of the machine. Leave it empty if you want to obtain it from a DHCP server (if using DHCP). The hostname must be a valid DNS label (see RFC 1035 sectio",
+      "loc": [
+        "networking",
+        "hostName"
+      ],
+      "type": {
+        "name": "strMatching \"^\\$|^[[:alnum:]]([[:alnum:]_-]{0,61}[[:alnum:]])?\\$\""
+      }
+    },
+    {
+      "help": "Whether to enable the Apache HTTP Server.",
+      "loc": [
+        "services",
+        "httpd",
+        "enable"
+      ],
+      "type": {
+        "name": "bool"
+      }
+    },
+    {
+      "help": "Configuration lines appended to the generated Apache configuration file. Note that this mechanism will not work when {option}`configFile` is overridden.",
+      "loc": [
+        "services",
+        "httpd",
+        "extraConfig"
+      ],
+      "type": {
+        "name": "separatedString"
+      }
+    },
+    {
+      "help": "Specification of the virtual hosts served by Apache. Each element should be an attribute set specifying the configuration of the virtual host.",
+      "loc": [
+        "services",
+        "httpd",
+        "virtualHosts"
+      ],
+      "type": {
+        "elem": {
+          "name": "submodule"
+        },
+        "name": "attrsOf"
+      }
+    },
+    {
+      "help": "The path of Apache's document root directory.  If left undefined, an empty directory in the Nix store will be used as root.",
+      "loc": [
+        "services",
+        "httpd",
+        "virtualHosts",
+        "<name>",
+        "documentRoot"
+      ],
+      "type": {
+        "elem": {
+          "name": "path"
+        },
+        "name": "nullOr"
+      }
+    },
+    {
+      "help": "Whether to add a separate nginx server block that permanently redirects (301) all plain HTTP traffic to HTTPS. This will set defaults for `listen` to listen on ",
+      "loc": [
+        "services",
+        "httpd",
+        "virtualHosts",
+        "<name>",
+        "forceSSL"
+      ],
+      "type": {
+        "name": "bool"
+      }
+    },
+    {
+      "help": "Additional names of virtual hosts served by this virtual host configuration.",
+      "loc": [
+        "services",
+        "httpd",
+        "virtualHosts",
+        "<name>",
+        "serverAliases"
+      ],
+      "type": {
+        "elem": {
+          "name": "str"
+        },
+        "name": "listOf"
+      }
+    },
+    {
+      "help": "Whether to enable the OpenSSH secure shell daemon, which allows secure remote logins.",
+      "loc": [
+        "services",
+        "openssh",
+        "enable"
+      ],
+      "type": {
+        "name": "bool"
+      }
+    },
+    {
+      "help": "Specifies on which ports the SSH daemon listens.",
+      "loc": [
+        "services",
+        "openssh",
+        "ports"
+      ],
+      "type": {
+        "elem": {
+          "name": "unsignedInt16"
+        },
+        "name": "listOf"
+      }
+    },
+    {
+      "help": "Gives the verbosity level that is used when logging messages from {manpage}`sshd(8)`. Logging with a DEBUG level violates the privacy of users and is not recomm",
+      "loc": [
+        "services",
+        "openssh",
+        "settings",
+        "LogLevel"
+      ],
+      "type": {
+        "elem": {
+          "name": "enum",
+          "values": [
+            "QUIET",
+            "FATAL",
+            "ERROR",
+            "INFO",
+            "VERBOSE",
+            "DEBUG",
+            "DEBUG1",
+            "DEBUG2",
+            "DEBUG3"
+          ]
+        },
+        "name": "nullOr"
+      }
+    },
+    {
+      "help": "Specifies whether password authentication is allowed.",
+      "loc": [
+        "services",
+        "openssh",
+        "settings",
+        "PasswordAuthentication"
+      ],
+      "type": {
+        "elem": {
+          "name": "bool"
+        },
+        "name": "nullOr"
+      }
+    },
+    {
+      "help": "Whether to enable printing support through the CUPS daemon.",
+      "loc": [
+        "services",
+        "printing",
+        "enable"
+      ],
+      "type": {
+        "name": "bool"
+      }
+    },
+    {
+      "help": "Additional configurations to build. If `inheritParentConfig` is true, the system will be based on the overall system configuration.",
+      "loc": [
+        "specialisation"
+      ],
+      "type": {
+        "elem": {
+          "name": "submodule"
+        },
+        "name": "attrsOf"
+      }
+    },
+    {
+      "help": "This option defines the first version of NixOS you have installed on this particular machine, and is used to maintain compatibility with application data (e.g. ",
+      "loc": [
+        "system",
+        "stateVersion"
+      ],
+      "type": {
+        "name": "str"
+      }
+    },
+    {
+      "help": "Definition of systemd service units; see {manpage}`systemd.service(5)`.",
+      "loc": [
+        "systemd",
+        "services"
+      ],
+      "type": {
+        "elem": {
+          "name": "submodule"
+        },
+        "name": "attrsOf"
+      }
+    },
+    {
+      "help": "If set to false, this unit will be a symlink to /dev/null. This is primarily useful to prevent specific template instances (e.g. `serial-getty@ttyS0`) from bein",
+      "loc": [
+        "systemd",
+        "services",
+        "<name>",
+        "enable"
+      ],
+      "type": {
+        "name": "bool"
+      }
+    },
+    {
+      "help": "The time zone used when displaying times and dates. See <https://en.wikipedia.org/wiki/List_of_tz_database_time_zones> for a comprehensive list of possible valu",
+      "loc": [
+        "time",
+        "timeZone"
+      ],
+      "type": {
+        "elem": {
+          "name": "str"
+        },
+        "name": "nullOr"
+      }
+    },
+    {
+      "help": "What the broker runs after each commit; `{repo}` is replaced with the config repo's path. Part of the broker's fixed settings (/etc/torq/broker.json): a root br",
+      "loc": [
+        "torq",
+        "broker",
+        "rebuildCommand"
+      ],
+      "type": {
+        "name": "str"
+      }
+    },
+    {
+      "help": "Development mode: convenience over security while TorqOS itself is being built. Passwordless sudo for wheel, Claude Code + gh + tmux installed, the owner is a t",
+      "loc": [
+        "torq",
+        "dev",
+        "enable"
+      ],
+      "type": {
+        "name": "bool"
+      }
+    },
+    {
+      "help": "nixpkgs attribute paths installed system-wide.",
+      "loc": [
+        "torq",
+        "packages",
+        "system"
+      ],
+      "type": {
+        "elem": {
+          "name": "str"
+        },
+        "name": "listOf"
+      }
+    },
+    {
+      "help": "Per-user nixpkgs attribute paths, keyed by user name.",
+      "loc": [
+        "torq",
+        "packages",
+        "user"
+      ],
+      "type": {
+        "elem": {
+          "elem": {
+            "name": "str"
+          },
+          "name": "listOf"
+        },
+        "name": "attrsOf"
+      }
+    },
+    {
+      "help": "Catalog services to enable. Read from the config repo's services.json only.",
+      "loc": [
+        "torq",
+        "services",
+        "enabled"
+      ],
+      "type": {
+        "elem": {
+          "name": "enum",
+          "values": [
+            "podman",
+            "printing",
+            "ssh",
+            "tailscale"
+          ]
+        },
+        "name": "listOf"
+      }
+    },
+    {
+      "help": "Additional user accounts to be created automatically by the system. This can also be used to set options for root.",
+      "loc": [
+        "users",
+        "users"
+      ],
+      "type": {
+        "elem": {
+          "name": "submodule"
+        },
+        "name": "attrsOf"
+      }
+    },
+    {
+      "loc": [
+        "users",
+        "users",
+        "<name>",
+        "isNormalUser"
+      ],
+      "type": {
+        "name": "bool"
+      },
+      "help": "Indicates whether this is an account for a real user."
+    },
+    {
+      "help": "The user's auxiliary groups.",
+      "loc": [
+        "users",
+        "users",
+        "<name>",
+        "extraGroups"
+      ],
+      "type": {
+        "elem": {
+          "name": "str"
+        },
+        "name": "listOf"
+      }
+    },
+    {
+      "help": "This option enables docker, a daemon that manages linux containers. Users in the \"docker\" group can interact with the daemon (e.g. to start or stop containers) ",
+      "loc": [
+        "virtualisation",
+        "docker",
+        "enable"
+      ],
+      "type": {
+        "name": "bool"
+      }
+    },
+    {
+      "help": "This option enables docker in a rootless mode, a daemon that manages linux containers. To interact with the daemon, one needs to set {command}`DOCKER_HOST=unix:",
+      "loc": [
+        "virtualisation",
+        "docker",
+        "rootless",
+        "enable"
+      ],
+      "type": {
+        "name": "bool"
+      }
+    },
+    {
+      "help": "Alias of {option}`services.openssh.enable`.",
+      "loc": [
+        "services",
+        "sshd",
+        "enable"
+      ],
+      "type": {
+        "name": "bool"
+      }
+    },
+    {
+      "help": "Timeout (in seconds) until loader boots the default menu item. Use null if the loader menu should be displayed indefinitely.",
+      "loc": [
+        "boot",
+        "loader",
+        "timeout"
+      ],
+      "type": {
+        "elem": {
+          "name": "int"
+        },
+        "name": "nullOr"
+      }
+    },
+    {
+      "help": "The device as passed to `mount`.",
+      "loc": [
+        "fileSystems",
+        "<name>",
+        "device"
+      ],
+      "type": {
+        "elem": {
+          "name": "str"
+        },
+        "name": "nullOr"
+      }
+    },
+    {
+      "help": "Type of the file system.",
+      "loc": [
+        "fileSystems",
+        "<name>",
+        "fsType"
+      ],
+      "type": {
+        "name": "str"
+      }
+    },
+    {
+      "loc": [
+        "users",
+        "users",
+        "<name>",
+        "packages"
+      ],
+      "type": {
+        "name": "listOf",
+        "elem": {
+          "name": "package"
+        }
+      },
+      "help": "The set of packages that should be made available to the user."
+    },
+    {
+      "loc": [
+        "users",
+        "users",
+        "<name>",
+        "hashedPassword"
+      ],
+      "type": {
+        "name": "nullOr",
+        "elem": {
+          "name": "passwdEntry"
+        }
+      },
+      "help": "Specifies the hashed password for the user."
+    },
+    {
+      "loc": [
+        "services",
+        "openssh",
+        "settings"
+      ],
+      "free": {
+        "name": "nullOr",
+        "elem": {
+          "name": "either",
+          "left": {
+            "name": "bool"
+          },
+          "right": {
+            "name": "either",
+            "left": {
+              "name": "int"
+            },
+            "right": {
+              "name": "str"
+            }
+          }
+        }
+      }
+    },
+    {
+      "loc": [
+        "networking",
+        "interfaces"
+      ],
+      "type": {
+        "name": "attrsOf",
+        "elem": {
+          "name": "submodule"
+        },
+        "names": "interfaces"
+      },
+      "help": "The configuration for each network interface."
+    },
+    {
+      "loc": [
+        "networking",
+        "interfaces",
+        "<name>",
+        "ipv4",
+        "addresses"
+      ],
+      "type": {
+        "name": "listOf",
+        "elem": {
+          "name": "submodule"
+        }
+      },
+      "help": "List of IPv4 addresses that will be statically assigned to the interface."
+    },
+    {
+      "loc": [
+        "networking",
+        "interfaces",
+        "<name>",
+        "ipv4",
+        "addresses",
+        "*",
+        "address"
+      ],
+      "type": {
+        "name": "strMatching \"(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])([.](25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}\"",
+        "form": "an IPv4 address"
+      },
+      "help": "IPv4 address of the interface."
+    },
+    {
+      "loc": [
+        "networking",
+        "interfaces",
+        "<name>",
+        "ipv4",
+        "addresses",
+        "*",
+        "prefixLength"
+      ],
+      "type": {
+        "name": "intBetween",
+        "range": [
+          0,
+          32
+        ]
+      },
+      "help": "Subnet mask of the interface, as the number of bits in the prefix (24)."
+    }
+  ],
+  "passwords": [
+    [
+      "users",
+      "users",
+      "*",
+      "password"
+    ],
+    [
+      "users",
+      "users",
+      "*",
+      "hashedPassword"
+    ],
+    [
+      "users",
+      "users",
+      "*",
+      "initialPassword"
+    ],
+    [
+      "users",
+      "users",
+      "*",
+      "initialHashedPassword"
+    ],
+    [
+      "users",
+      "users",
+      "*",
+      "hashedPasswordFile"
+    ],
+    [
+      "users",
+      "users",
+      "*",
+      "passwordFile"
+    ]
+  ],
+  "packages": [
+    "btop",
+    "curl",
+    "git",
+    "hello",
+    "htop",
+    "jq",
+    "nginx",
+    "python3Packages",
+    "ripgrep",
+    "vim"
+  ]
+}

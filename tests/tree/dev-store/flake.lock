@@ -1,0 +1,19 @@
+{
+  "nodes": {
+    "root": {
+      "inputs": {
+        "torq": "torq"
+      }
+    },
+    "torq": {
+      "locked": {
+        "type": "path",
+        "path": "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-source",
+        "lastModified": 1,
+        "narHash": "sha256-x"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

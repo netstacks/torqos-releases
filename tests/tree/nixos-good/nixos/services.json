@@ -1,0 +1,1 @@
+{ "httpd": { "enable": true, "adminAddr": "a@example.com", "virtualHosts": { "example.com": { "forceSSL": true, "enableACME": false, "documentRoot": "/var/www" } } } }

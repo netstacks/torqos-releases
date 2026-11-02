@@ -1,0 +1,20 @@
+[package]
+name = "torq"
+version = "0.1.0"
+edition = "2021"
+description = "TorqOS command line (unprivileged): changes the system by proposing diffs to torq-broker"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+rustix = { version = "1.1.6", features = ["event", "process", "termios"] }
+# buffer-redux: input read past one line (a paste without bracketed paste, keys typed ahead) is
+# kept for the next line instead of dropped.
+rustyline = { version = "17", default-features = false, features = ["custom-bindings", "buffer-redux"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# A setting's strMatching pattern (POSIX classes, as NixOS writes them), checked at `set`.
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl"] }
+# First-boot setup: the owner's password as NixOS reads it (SHA-512 crypt), made here, no outside tool.
+sha-crypt = "0.5"
+tempfile = "3"

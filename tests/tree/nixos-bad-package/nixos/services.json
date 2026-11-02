@@ -1,0 +1,1 @@
+{ "httpd": { "enable": true, "adminAddr": "a@example.com", "package": "no-such-package-xyz" } }
