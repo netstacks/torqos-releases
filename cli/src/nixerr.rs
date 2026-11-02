@@ -25,9 +25,36 @@ pub fn message(stderr: &str) -> Option<String> {
     (!joined.trim().is_empty()).then(|| joined.trim().to_string())
 }
 
+/// The configuration's warnings (NixOS's `warnings`) in `stderr`, each one line: Nix writes each as
+/// `evaluation warning: <text>` (older Nix: `trace: warning: <text>`), its later lines indented under
+/// the first. Nix's own notes (`warning: Git tree … is dirty`) are not the configuration's.
+pub fn warnings(stderr: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let mut open = false;
+    for l in stderr.lines() {
+        if let Some(w) = l.strip_prefix("evaluation warning: ").or_else(|| l.strip_prefix("trace: warning: ")) {
+            found.push(w.trim().to_string());
+            open = true;
+        } else if let Some(last) = found.last_mut().filter(|_| open && l.starts_with(' ') && !l.trim().is_empty()) {
+            last.push(' ');
+            last.push_str(l.trim());
+        } else {
+            open = false;
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_configurations_warnings() {
+        let stderr = "warning: Git tree '/x' is dirty\nevaluation warning: first warning\nevaluation warning: second\n                    with two lines\ntrace: warning: an older Nix's\nwarning: not the configuration's\n    nor this\n";
+        assert_eq!(warnings(stderr), ["first warning", "second with two lines", "an older Nix's"]);
+        assert!(warnings("").is_empty());
+    }
 
     #[test]
     fn the_message_of_the_last_error() {

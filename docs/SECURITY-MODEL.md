@@ -58,6 +58,9 @@ machine with UEFI and a TPM.
   password`, `hashedPassword`, `initialPassword`, `initialHashedPassword`, `hashedPasswordFile`,
   `passwordFile`), in torqcli and at evaluation (modules/settings-fence.nix, rule 3), saying to use
   `request system password <user>`.
+- **Nothing listens on the network unless asked for:** no SSH until turned on, and no link-local
+  name answering (systemd-resolved's LLMNR and multicast DNS, off: they let anyone on the same
+  network answer for a name). tests/image.nix checks the image.
 - **SSH is NixOS's own** (`services openssh enable true`; ADR-025), and TorqOS's protections apply
   however it is turned on (modules/services.nix): keys only unless
   `services.openssh.settings.PasswordAuthentication` is set, and then repeated wrong guesses are

@@ -38,6 +38,7 @@ rec {
     [ "torq" "cli" "package" ]
     [ "torq" "schema" ]
     [ "torq" "nixosSchema" ]
+    [ "torq" "releases" ]
     [ "nixpkgs" ]
     [ "nix" "package" ]
     [ "systemd" "package" ]

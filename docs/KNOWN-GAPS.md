@@ -195,7 +195,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    process.
 6y. **Reading the history asks for the owner's password out of dev mode** — decided: the history is
    privileged (ADR-026).
-6z. **A group that does not exist is quietly ignored** (found 2026-11-02, on torq5).
+6z. **A group that does not exist is quietly ignored** (found 2026-11-02, on torq5) — fixed: warned.
    - **What happens:** `set users users viper extraGroups docker`, with Docker off, commits without
      a word and changes nothing. NixOS fills each group's members from the people who name it
      (`users.groups.<g>.members`), so a group nothing declares has no member list, and the name is
@@ -203,9 +203,12 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
      `virtualisation docker enable true` does.
    - **What there is now:** `show users` shows the groups each person is really in, and says where
      groups are set and that `docker` needs Docker on.
-   - **To do:** at `commit check` / `commit`, name every person's group that the configuration does
-     not declare. Decide whether that is a refusal or a warning: a refusal also stops a commit that
-     turns Docker off while someone is still in `docker`.
+   - **Fixed (2026-11-02):** a warning (decided: not a refusal, which would also stop a commit that
+     turns Docker off while someone is still in `docker`). modules/accounts.nix makes each such group
+     a NixOS warning saying what brings it (Docker's) or how to declare it; `commit check` and
+     `commit` now show the configuration's warnings (all of NixOS's, which were dropped before),
+     `commit` with the comparison before it asks. Tested: tests/tree.nix (`groups-missing`,
+     `groups-docker`, the template), the session's tests.
 
 ## Audit findings to fix (2026-11-01)
 

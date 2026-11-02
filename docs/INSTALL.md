@@ -132,7 +132,10 @@ Next:
 
 6. The release (ADR-028): built and signed by CI on a tag, published in
    `netstacks/torqos-releases`; machines update to it, signature checked. *Built 2026-11-02.*
-7. A VM test: the image boots, setup, a commit, a rollback, an update to a signed release.
+7. A VM test (tests/image.nix, 2026-11-02): the image boots to setup with nothing listening; setup,
+   typed on the console, records change #1; the first update moves the machine to signed
+   releases, served over HTTPS; a release the key did not sign is refused. (Commits and
+   rollbacks: tests/trust-loop.nix.)
 8. Then the ISO for real hardware (disk choice added).
 
 Known: setup runs on the first text console (tty1) only. A VM started with a serial console alone

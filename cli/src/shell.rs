@@ -118,12 +118,12 @@ fn done(o: run::Outcome, what: &str) -> Result<serde_json::Value> {
 }
 
 impl Machine for Real<'_> {
-    fn check(&self, base: &str, files: &[(String, Option<String>)]) -> Result<()> {
+    fn check(&self, base: &str, files: &[(String, Option<String>)]) -> Result<Vec<String>> {
         let (_scratch, copy) = self.changed_copy(base, files)?;
         let log = run::start_log()?;
         let _p = run::Progress::start("Checking");
         let host = config_name(&copy)?;
-        evaluate(&copy, &host, &log)?;
+        let warnings = evaluate(&copy, &host, &log)?;
         // A tree file the configuration does not read would commit and change nothing: a flake.nix
         // that does not pass `configDir` to torq.lib.mkSystem (as `torq pkg` checked).
         if files.iter().any(|(p, _)| p != "flake.lock") && !crate::reads_tree(&copy, &host)? {
@@ -132,7 +132,7 @@ impl Machine for Real<'_> {
                  torq.lib.mkSystem with `configDir = ./.;` (a system change, made as Nix)"
             );
         }
-        Ok(())
+        Ok(warnings)
     }
 
     fn commit(&self, diff: &str, base: &str, tier: &str, reason: &str, confirm: Option<u32>) -> Result<u64> {
@@ -497,9 +497,15 @@ impl Machine for Real<'_> {
     fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String> {
         self.relock(base, Some(flake_nix), all)
     }
-    fn check_release(&self, rev: &str) -> Result<String> {
+    fn releases(&self) -> Result<String> {
+        let file = "/etc/torq/releases.json";
+        let text = fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
+        let v: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("{file} is not JSON"))?;
+        v["url"].as_str().map(String::from).with_context(|| format!("{file} names no releases (url)"))
+    }
+    fn check_release(&self, repo: &str, rev: &str) -> Result<String> {
         let _p = run::Progress::start("Checking the release's signature");
-        crate::release::check(crate::software::RELEASES_REPO, rev, Path::new(crate::release::SIGNERS))
+        crate::release::check(repo, rev, Path::new(crate::release::SIGNERS))
     }
     fn ask(&self, question: &str) -> crate::session::Answer {
         ask_person(question)

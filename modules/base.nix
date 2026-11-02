@@ -64,6 +64,14 @@ in
     # (~110 MB). The desktop, when it comes back, brings NetworkManager with it (desktop.nix).
     networking.useNetworkd = lib.mkDefault true;
     services.resolved.enable = lib.mkDefault true;
+    # Names from the DNS servers only: resolved's link-local name answering (LLMNR, and multicast
+    # DNS) listens on every interface, and lets anyone on the same network answer for a name — a
+    # way to pass for another machine. Nothing listens on a TorqOS machine unless it is asked for
+    # (tests/image.nix checks the image).
+    services.resolved.settings.Resolve = {
+      LLMNR = lib.mkDefault false;
+      MulticastDNS = lib.mkDefault false;
+    };
     time.timeZone = lib.mkDefault "America/New_York";
     i18n.defaultLocale = lib.mkDefault "en_US.UTF-8";
 

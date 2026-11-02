@@ -389,7 +389,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   commit and `git verify-commit` checks it against the key the machine was installed with
   (`/etc/torq/release-signers`, from `release/allowed_signers`); a commit the key did not sign is
   refused and nothing is loaded. A machine on the image's own TorqOS is moved to the releases by its
-  first `request system update`.
+  first `request system update`. Where the releases are and their key are TorqOS settings
+  (`torq.releases.url`, `torq.releases.signers`, modules/releases.nix; /etc/torq/releases.json),
+  fenced from the tree: which key decides what every update installs is TorqOS's own.
 - **Consequences:**
   - **The key.** Its private half is an Actions secret of the development repo for now
     (`TORQOS_RELEASE_KEY`; GitHub can use it, never show it); the owner keeps a copy, and moving it

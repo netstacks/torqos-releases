@@ -31,6 +31,10 @@
       "nixosSchema"
     ],
     [
+      "torq",
+      "releases"
+    ],
+    [
       "nixpkgs"
     ],
     [

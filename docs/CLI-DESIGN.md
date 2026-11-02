@@ -71,6 +71,8 @@ and-quit`, `rollback <n> [<place>]`, `up [<n>]`, `top [<command>]` (a command fr
 back where you were — unless it moves), `show system commit`, `?` help, Tab completion, history (↑).
 `?` lists what may come next, `|` after any whole `show`, and `<[Enter]>` when the line would run as
 it is (decided as the session decides it: the line is dry-run on a copy of the candidate).
+Inside quotes `?` is a character: an address with a query is typed `"git+https://…?ref=stable"`
+(one typed without quotes loses its `?`, and a source that did is refused, with the quoted address).
 
 **One grammar** (cli/src/grammar.rs, ADR-025 #1): the command language is declared once — each
 command's words, help, values (checked, with their range), the pipes its output takes, and how a
@@ -391,7 +393,9 @@ refuses if there are none), asks, and says when the change rolls back unless con
 confirms it.
 
 As built (3c/3d): `commit check` evaluates the candidate on the committed base (`git archive`, as
-the broker builds it). A system change, or a change to another user's folder, shows the
+the broker builds it). What the configuration warns of (NixOS's `warnings`: a person's group
+nothing declares, dev mode, …) is shown, `! warning: …`, by `commit check` and by `commit` (with
+the comparison, before it asks; with the outcome when nobody is asked). A system change, or a change to another user's folder, shows the
 comparison and needs a person's yes at a terminal; a change to your own folder does not (as
 `torq pkg --yes` did; KNOWN-GAPS #4). Every value reaches the broker as `--name=value`. If the broker's
 answer to a commit is lost, the ledger decides whether it was made (the candidate is discarded

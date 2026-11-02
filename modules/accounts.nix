@@ -37,6 +37,17 @@ in
       }
     ];
 
+    # A group nothing declares is left out without a word: NixOS fills each group's members from the
+    # people who name it, so a name with no group behind it changes nothing (KNOWN-GAPS 6z: `docker`
+    # with Docker off). Said, not refused: turning Docker off must not wait for everyone's groups.
+    warnings = lib.concatLists (lib.mapAttrsToList (name: u:
+      map (g:
+        "torq: ${name}'s group ${g} does not exist, so ${name} is not in it: turn on what brings it"
+        + lib.optionalString (g == "docker") " (Docker: `virtualisation docker enable true`)"
+        + ", or declare it (`set users groups ${g} gid <number>`)."
+      ) (lib.filter (g: !(config.users.groups ? ${g})) u.extraGroups)
+    ) (lib.filterAttrs (_: u: u.enable) config.users.users));
+
     users.mutableUsers = false;
 
     # A machine from before this (its passwords set with `passwd`, in /etc/shadow only): each

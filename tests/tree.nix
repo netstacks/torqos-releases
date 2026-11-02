@@ -58,6 +58,8 @@ let
     nixos-bad-option = c: c.virtualisation.docker.enable;
     # The fence (modules/settings-fence.nix): what reaches the broker's guard is not the tree's.
     nixos-fence-broker = c: c.torq.broker.rebuildCommand;
+    # Which releases a machine updates from, and the key they are signed with, are TorqOS's own.
+    nixos-fence-releases = c: c.torq.releases.url;
     nixos-fence-etc = c: c.environment.etc."torq/broker.json".text;
     nixos-fence-unit = c: c.systemd.services.torq-broker-init.enable;
     # The bypasses the review of S3a demonstrated: module directives in the data, what the broker's
@@ -115,6 +117,13 @@ let
     ++ lib.optional (tryValue (configOf "template").torq.desktop.enable != false) "template: the desktop is on"
     # The root account is locked: a config file cannot give it a password (modules/accounts.nix).
     ++ lib.optional (!(lib.any (lib.hasInfix "root never has a password") (torqFailures (configOf "config-root-password")))) "config-root-password: root got a password"
+    # A group nothing declares is said, with what brings it (modules/accounts.nix; KNOWN-GAPS 6z);
+    # a declared one, and the owner's own (wheel, video, audio), are not.
+    ++ lib.optional (lib.filter (lib.hasInfix "group") (configOf "groups-missing").warnings != [
+        "torq: dev's group docker does not exist, so dev is not in it: turn on what brings it (Docker: `virtualisation docker enable true`), or declare it (`set users groups docker gid <number>`)."
+        "torq: dev's group builders does not exist, so dev is not in it: turn on what brings it, or declare it (`set users groups builders gid <number>`)."
+      ]) "groups-missing: not warned as expected: ${toString (configOf "groups-missing").warnings}"
+    ++ lib.concatMap (case: lib.optional (lib.any (lib.hasInfix "group") (configOf case).warnings) "${case}: warned of a group that exists") [ "groups-docker" "template" ]
     # TorqOS from a folder (path:) only in dev mode, by the configuration's own lock (modules/dev.nix).
     ++ lib.optional (!(lib.any (lib.hasInfix "comes from a folder") (torqFailures (configOf "dev-folder-off")))) "dev-folder-off: TorqOS from a folder without dev mode was not refused"
     ++ lib.concatMap (case: lib.optional (lib.any (lib.hasInfix "comes from a folder") (torqFailures (configOf case))) "${case}: refused, but may come from there") [ "dev-folder-on" "dev-store" ]

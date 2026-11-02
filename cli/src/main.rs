@@ -372,9 +372,11 @@ fn config_name(repo: &Path) -> Result<String> {
 
 /// Evaluate the whole system from the changed scratch copy: the same modules that will build it
 /// report unknown, unfree or unsupported packages, or a broken update, before anything is proposed.
-fn evaluate(copy: &Path, host: &str, log: &Path) -> Result<()> {
+/// Evaluate the configuration in `copy` (its system, `host`); its warnings, if it evaluates. Never
+/// from Nix's evaluation cache: a cached result says no warnings again.
+fn evaluate(copy: &Path, host: &str, log: &Path) -> Result<Vec<String>> {
     let out = Command::new("nix")
-        .args(["eval", "--no-update-lock-file", "--raw"])
+        .args(["eval", "--no-update-lock-file", "--no-eval-cache", "--raw"])
         .arg(format!("{}#nixosConfigurations.{host}.config.system.build.toplevel.drvPath", flake_ref(copy)))
         .output()
         .context("running nix eval")?;
@@ -383,7 +385,7 @@ fn evaluate(copy: &Path, host: &str, log: &Path) -> Result<()> {
         let _ = fs::OpenOptions::new().append(true).open(log).and_then(|mut f| f.write_all(&out.stderr));
         bail!("{}", pkg::explain_check_error(&history::one_line(&last_error(&out.stderr), 300)));
     }
-    Ok(())
+    Ok(nixerr::warnings(&String::from_utf8_lossy(&out.stderr)))
 }
 
 /// The most useful line of a nix error — ours if there is one, else nix's last `error:` — as one

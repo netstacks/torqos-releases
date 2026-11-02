@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 /// What the session needs from the machine: evaluation and the broker.
 pub trait Machine {
     /// `commit check`: does the configuration at commit `base`, with these tree files changed
-    /// (None: deleted), evaluate?
-    fn check(&self, base: &str, files: &[(String, Option<String>)]) -> Result<()>;
+    /// (None: deleted), evaluate? Its warnings (NixOS's `warnings`), if it does.
+    fn check(&self, base: &str, files: &[(String, Option<String>)]) -> Result<Vec<String>>;
     /// Propose `diff` against `base` and apply it (with `confirm` minutes: commit confirmed). The
     /// broker's tier must be `tier`. Returns the applied ledger entry's number.
     fn commit(&self, diff: &str, base: &str, tier: &str, reason: &str, confirm: Option<u32>) -> Result<u64>;
@@ -67,9 +67,12 @@ pub trait Machine {
     /// `set system software torq source`: the `flake.lock` that locking `torq` (with `all`, every
     /// input) makes, from the configuration at commit `base` with its flake.nix as `flake_nix`.
     fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String>;
-    /// Whether commit `rev` of TorqOS's releases is signed by the release key (release.rs): what
+    /// Where this machine's releases are (/etc/torq/releases.json, modules/releases.nix): a flake
+    /// reference, `git+https://…?ref=stable`.
+    fn releases(&self) -> Result<String>;
+    /// Whether commit `rev` of the releases (`repo`) is signed by the release key (release.rs): what
     /// git says of its signature, or why it is refused.
-    fn check_release(&self, rev: &str) -> Result<String>;
+    fn check_release(&self, repo: &str, rev: &str) -> Result<String>;
 }
 
 
@@ -926,10 +929,10 @@ impl<'a> Session<'a> {
             // An image's own TorqOS has no newer version: the first update moves the machine to the
             // releases (ADR-028), as `set system software torq source` would.
             _ if source.as_deref().is_some_and(crate::software::image_own) => {
-                let releases = crate::software::RELEASES;
+                let releases = self.machine.releases()?;
                 let mut d = self.candidate_data()?;
-                d.source = Some(releases.into());
-                let shown = self.lock_source(releases, all)?;
+                d.source = Some(releases.clone());
+                let shown = self.lock_source(&releases, all)?;
                 self.put_data(d)?;
                 self.save()?;
                 let moved = self.said(&format!("This machine runs the TorqOS it was installed with: the update moves it to TorqOS's releases ({releases})."));
@@ -958,8 +961,9 @@ impl<'a> Session<'a> {
     /// If `lock` takes TorqOS from the releases, the release key's word on that commit (ADR-028): one
     /// it did not sign is refused, before anything is loaded.
     fn release_signed(&self, lock: &str) -> Result<String> {
-        let Some(rev) = crate::software::release_commit(lock) else { return Ok(String::new()) };
-        self.machine.check_release(&rev)?;
+        let repo = crate::software::releases_repo(&self.machine.releases()?);
+        let Some(rev) = crate::software::release_commit(lock, &repo) else { return Ok(String::new()) };
+        self.machine.check_release(&repo, &rev)?;
         Ok(self.said(&format!("TorqOS release {}: signed by the TorqOS release key.", short(&rev))))
     }
 
@@ -1158,8 +1162,8 @@ impl<'a> Session<'a> {
             }
             // The rules between settings, as `commit` applies them.
             crate::whole::software_allowed(&a.data)?;
-            self.machine.check(&base, &files)?;
-            return Ok(self.said("configuration check succeeds"));
+            let warned = self.warned(&self.machine.check(&base, &files)?);
+            return Ok(format!("{warned}{}", self.said("configuration check succeeds")));
         }
         // A commit confirmed waiting freezes every other change (the broker refuses them): say so
         // before evaluating, asking or proposing anything.
@@ -1195,7 +1199,7 @@ impl<'a> Session<'a> {
         let tier = self.tier_of(&changes);
         // A person approves at a terminal: a system change, and a change to someone else's folder.
         let others = self.others_folders(&changes);
-        self.machine.check(&base, &files)?;
+        let warned = self.warned(&self.machine.check(&base, &files)?);
         let compare = a.compare(&self.whole())?;
         let mut shown: String = compare.lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
         // The comparison as it is; the sentences around it fit the window (ui.rs).
@@ -1223,11 +1227,15 @@ impl<'a> Session<'a> {
         if boots {
             shown.push_str(&format!("{}\n", ui.line("! ", "This changes how the machine starts (file systems, boot): a mistake shows only at the next restart, where `commit confirmed` cannot undo it; the earlier configurations stay in the boot menu.")));
         }
+        // What the configuration warns of (NixOS's `warnings`), with what is approved.
+        shown.push_str(&warned);
         let why = match (tier, others.is_empty()) {
             ("system", _) => Some("This changes the system (all users).".to_string()),
             (_, false) => Some(format!("This changes the settings of: {}.", others.join(", "))),
             _ => None,
         };
+        // Asked: the warnings were shown with the question; not asked, they come with the outcome.
+        let warned = if why.is_some() { String::new() } else { warned };
         if let Some(why) = why {
             if let Some(stop) = self.machine.ask(&format!("{shown}{} ", ui.line("", &format!("{why} Commit?")))).go_on("committed")? {
                 return Ok(stop);
@@ -1240,7 +1248,7 @@ impl<'a> Session<'a> {
         let reason = crate::history::one_line(&comment.unwrap_or_else(|| summary(&compare)), usize::MAX);
         let seq = self.machine.commit(&diff, &base, tier, &reason, confirm)?;
         self.discard()?;
-        Ok(match confirm {
+        Ok(warned + &match confirm {
             Some(m) => format!(
                 "{}{}",
                 self.said(&format!("commit confirmed will be automatically rolled back in {m} minute{} unless confirmed (change #{seq})", if m == 1 { "" } else { "s" })),
@@ -1248,6 +1256,12 @@ impl<'a> Session<'a> {
             ),
             None => self.said(&format!("commit complete (change #{seq})")),
         })
+    }
+
+    /// What the configuration warns of (NixOS's `warnings`, as `check` read them), one `!` line each.
+    fn warned(&self, warnings: &[String]) -> String {
+        let ui = self.ui();
+        warnings.iter().map(|w| format!("{}\n", ui.line("! ", &format!("warning: {}", crate::history::clean(w))))).collect()
     }
 
     /// `file list|show|edit|delete`: the config repo's own Nix files, the escape hatch for what is
@@ -1937,11 +1951,13 @@ mod tests {
         /// `NEWER`, from no releases); and the commits whose signature was checked.
         release: Option<(String, bool)>,
         release_checks: RefCell<Vec<String>>,
+        /// What the configuration warns of, when checked.
+        warnings: Vec<String>,
     }
     impl Machine for Fake {
-        fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<()> {
+        fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<Vec<String>> {
             self.checks.borrow_mut().push(files.to_vec());
-            Ok(())
+            Ok(self.warnings.clone())
         }
         fn commit(&self, diff: &str, base: &str, tier: &str, reason: &str, confirm: Option<u32>) -> Result<u64> {
             if self.refuse {
@@ -2044,7 +2060,11 @@ mod tests {
             self.flakes.borrow_mut().push(flake_nix.into());
             Ok(self.newest(all))
         }
-        fn check_release(&self, rev: &str) -> Result<String> {
+        fn releases(&self) -> Result<String> {
+            Ok(RELEASES.into())
+        }
+        fn check_release(&self, repo: &str, rev: &str) -> Result<String> {
+            assert_eq!(repo, "https://github.com/netstacks/torqos-releases", "the machine's releases");
             self.release_checks.borrow_mut().push(rev.into());
             match &self.release {
                 Some((r, true)) if r == rev => Ok("Good \"git\" signature for torqos-release".into()),
@@ -2193,6 +2213,8 @@ mod tests {
         assert!(e.contains("put the text in \"double quotes\""), "an apostrophe opens a quote, as in a shell: {e}");
     }
 
+    /// The test machine's releases (as /etc/torq/releases.json says).
+    const RELEASES: &str = "git+https://github.com/netstacks/torqos-releases?ref=stable";
     /// A `flake.lock` whose `torq` input was last changed at `t` (seconds).
     fn lock(t: u64) -> String {
         format!(r#"{{"nodes":{{"root":{{"inputs":{{"torq":"torq"}}}},"torq":{{"locked":{{"lastModified":{t},"narHash":"h{t}"}}}}}},"version":7}}"#)
@@ -2248,7 +2270,7 @@ mod tests {
             sh(d.path(), &format!("printf '{{\\n  inputs = {{\\n    torq.url = \"{source}\";\\n  }};\\n}}\\n' > flake.nix && git add -A && git commit -qm flake"));
             d
         };
-        let releases = crate::software::RELEASES;
+        let releases = RELEASES;
 
         // From the image: moved to the releases, the newest one checked, both in the candidate.
         let d = machine(image);
@@ -3094,6 +3116,32 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "set users users dev packages [ htop ]", "commit"]);
         assert_eq!(*m.ssh_calls.borrow(), 0, "a person's own packages cannot turn SSH on");
+    }
+
+    /// What the configuration warns of (NixOS's `warnings`: a group nothing declares, say; KNOWN-GAPS
+    /// 6z) reaches the person: at `commit check`, with the question before a system change, and with
+    /// the outcome of a change nobody is asked about.
+    #[test]
+    fn the_configurations_warnings_are_shown() {
+        let warn = "torq: viper's group docker does not exist";
+        let fake = || Fake { answer: true, warnings: vec![warn.into()], ..Default::default() };
+        let (d, m) = (repo(), fake());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set time timeZone UTC"]);
+        assert_eq!(s.exec("commit check").unwrap(), format!("! warning: {warn}\nconfiguration check succeeds\n"));
+        assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n", "shown with the question, not again");
+        assert!(m.asked.borrow()[0].contains(&format!("! warning: {warn}\n")), "{}", m.asked.borrow()[0]);
+        // A person's own settings: no question, so with the outcome.
+        let (d, m) = (repo(), fake());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set users users dev packages [ htop ]"]);
+        assert_eq!(s.exec("commit").unwrap(), format!("! warning: {warn}\ncommit complete (change #42)\n"));
+        assert!(m.asked.borrow().is_empty());
+        // Text from the configuration is cleaned before it reaches the terminal.
+        let (d, m) = (repo(), Fake { answer: true, warnings: vec!["a\x1b[31m red".into()], ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set time timeZone UTC"]);
+        assert!(!s.exec("commit check").unwrap().contains('\x1b'));
     }
 
     #[test]
