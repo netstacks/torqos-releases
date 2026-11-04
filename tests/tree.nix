@@ -60,6 +60,7 @@ let
     nixos-fence-broker = c: c.torq.broker.rebuildCommand;
     # Which releases a machine updates from, and the key they are signed with, are TorqOS's own.
     nixos-fence-releases = c: c.torq.releases.url;
+    nixos-fence-branding = c: c.torq.branding.package.outPath;
     nixos-fence-etc = c: c.environment.etc."torq/broker.json".text;
     nixos-fence-unit = c: c.systemd.services.torq-broker-init.enable;
     # The bypasses the review of S3a demonstrated: module directives in the data, what the broker's
@@ -73,6 +74,13 @@ let
     nixos-fence-etc-slash = c: c.environment.etc."/torq/broker.json".text;
     nixos-fence-etc-dot = c: c.environment.etc."./torq/broker.json".text;
     nixos-fence-etc-target = c: c.environment.etc.innocent.target;
+    # Where an /etc file lands, however spelled: a `..` is refused (audit of 2026-11-03).
+    nixos-fence-etc-dotdot = c: c.environment.etc."torq/broker.json".text;
+    nixos-fence-etc-target-dotdot = c: c.environment.etc.innocent.target;
+    # A specialisation is a second system, out of every rule: not the tree's (audit of 2026-11-03).
+    nixos-fence-specialisation = c: c.specialisation.x.configuration.torq.broker.rebuildCommand;
+    # The ISO installer's mode is never a machine's.
+    nixos-fence-installer = c: c.torq.installer.enable;
     # A setting TorqOS keeps in its own file is not also in nixos/ (one setting, one place).
     nixos-elsewhere = c: c.networking.hostName;
     nixos-elsewhere-packages = c: map (p: p.outPath or p) c.environment.systemPackages;
@@ -124,6 +132,12 @@ let
         "torq: dev's group builders does not exist, so dev is not in it: turn on what brings it, or declare it (`set users groups builders gid <number>`)."
       ]) "groups-missing: not warned as expected: ${toString (configOf "groups-missing").warnings}"
     ++ lib.concatMap (case: lib.optional (lib.any (lib.hasInfix "group") (configOf case).warnings) "${case}: warned of a group that exists") [ "groups-docker" "template" ]
+    # A service's own /etc files land where the evaluated system says, not where the tree spells
+    # them: a pppd peer or an editor's runtime file climbing into /etc/torq is refused
+    # (modules/security.nix; audit of 2026-11-03).
+    ++ lib.concatMap (case: lib.optional (!(lib.any (lib.hasInfix "land outside their place") (torqFailures (configOf case))))
+      "${case}: an /etc file landing in /etc/torq was not refused") [ "etc-astray-pppd" "etc-astray-neovim" ]
+    ++ lib.optional (lib.any (lib.hasInfix "land outside their place") (torqFailures (configOf "nixos-good"))) "nixos-good: refused as an /etc file astray"
     # TorqOS from a folder (path:) only in dev mode, by the configuration's own lock (modules/dev.nix).
     ++ lib.optional (!(lib.any (lib.hasInfix "comes from a folder") (torqFailures (configOf "dev-folder-off")))) "dev-folder-off: TorqOS from a folder without dev mode was not refused"
     ++ lib.concatMap (case: lib.optional (lib.any (lib.hasInfix "comes from a folder") (torqFailures (configOf case))) "${case}: refused, but may come from there") [ "dev-folder-on" "dev-store" ]

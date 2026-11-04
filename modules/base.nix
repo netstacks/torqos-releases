@@ -14,8 +14,9 @@ in
   config = {
     assertions = [
       {
-        # Every configured machine has an owner; only the image, before setup, has none.
-        assertion = cfg.user != null && cfg.user != "CHANGE-ME" || cfg.user == null && cfg.setup.enable;
+        # Every configured machine has an owner; only the image, before setup, and the installer
+        # (ADR-031), which installs the image, have none.
+        assertion = cfg.user != null && cfg.user != "CHANGE-ME" || cfg.user == null && (cfg.setup.enable || cfg.installer.enable);
         message = "Set the owner's login name: `torq user <name>` (nixos/torq.json in the config repo).";
       }
       {
@@ -75,17 +76,39 @@ in
     time.timeZone = lib.mkDefault "America/New_York";
     i18n.defaultLocale = lib.mkDefault "en_US.UTF-8";
 
-    # The tools a person at the shell expects. The editor is nano (NixOS's, small: `file edit` uses
-    # it unless $EDITOR says otherwise); anything else is a package to install.
-    environment.systemPackages = with pkgs; [ git curl htop jq ];
-    # Nothing NixOS adds unasked (perl, rsync, strace on the shell's path); no manuals but the man
-    # pages (the NixOS and Nix manuals, info, /share/doc: ~70 MB).
+    # The skeleton (ADR-032): what TorqOS itself runs, and nothing a configuration can add. git is
+    # the config repo's, which torqcli reads (the minimal build: no manuals, Perl or Python). The
+    # editor is nano (NixOS's, small: `file edit` uses it unless $EDITOR says otherwise). Anything
+    # else — htop, jq, a desktop — is a package or setting to put in the configuration.
+    environment.systemPackages = [ pkgs.gitMinimal ];
+    # Nothing NixOS adds unasked (perl, rsync, strace on the shell's path), and no documentation:
+    # the NixOS and Nix manuals, info, /share/doc and the man pages with their tools (~85 MB). A
+    # configuration turns it back on (`set documentation enable true`; the man pages need `set
+    # documentation man enable true` as well).
     environment.defaultPackages = lib.mkDefault [ ];
-    documentation = {
-      nixos.enable = lib.mkDefault false;
-      info.enable = lib.mkDefault false;
-      doc.enable = lib.mkDefault false;
+    documentation.enable = lib.mkDefault false;
+    documentation.man.enable = lib.mkDefault false;
+    # Nothing a machine without a screen uses (as NixOS's own minimal profile): fonts, icons, sounds,
+    # file types and autostart entries are a desktop's (desktop.nix turns them back on).
+    fonts.fontconfig.enable = lib.mkDefault false;
+    xdg = {
+      autostart.enable = lib.mkDefault false;
+      icons.enable = lib.mkDefault false;
+      mime.enable = lib.mkDefault false;
+      sounds.enable = lib.mkDefault false;
     };
+    # NixOS's own tools for installing and changing a machine — nixos-install, -generate-config,
+    # -enter, -option, -build-vms, and nixos-rebuild and nixos-version — are not on a TorqOS machine
+    # (ADR-032): the image is installed already (the ISO installer has generate-config, on the ISO
+    # only), torqcli reads and sets every option (`?`, `show`), and the broker builds and switches
+    # with nix itself (modules/broker.nix `rebuildCommand`). bcache's tools are for a cache disk
+    # TorqOS never sets up.
+    system.tools = lib.genAttrs [ "nixos-install" "nixos-generate-config" "nixos-enter" "nixos-option" "nixos-build-vms" "nixos-rebuild" "nixos-version" ]
+      (_: { enable = lib.mkDefault false; });
+    boot.bcache.enable = lib.mkDefault false;
+    # systemd's container-image importer (`machinectl pull-*`), and the GnuPG and LDAP libraries it
+    # brings (~18 MB): containers come from the configuration (`virtualisation …`), not from it.
+    systemd.services.systemd-importd.enable = lib.mkDefault false;
 
     system.stateVersion = lib.mkDefault "26.05";
   };

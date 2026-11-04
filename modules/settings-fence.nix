@@ -39,6 +39,9 @@ rec {
     [ "torq" "schema" ]
     [ "torq" "nixosSchema" ]
     [ "torq" "releases" ]
+    [ "torq" "branding" ]
+    # The ISO installer's own mode (ADR-031): never a machine's.
+    [ "torq" "installer" ]
     [ "nixpkgs" ]
     [ "nix" "package" ]
     [ "systemd" "package" ]
@@ -78,12 +81,13 @@ rec {
   # Whether `path` is, or is below, a fenced setting.
   fenced = matchesAny patterns;
 
-  # Where an /etc entry lands: its `target`, else its name, without a leading `/` or `./`.
-  etcTarget = name: e:
-    let
-      t = if builtins.isAttrs e && builtins.isString (e.target or null) then e.target else name;
-      strip = s: if lib.hasPrefix "/" s then strip (lib.removePrefix "/" s) else if lib.hasPrefix "./" s then strip (lib.removePrefix "./" s) else s;
-    in strip t;
+  # Where an /etc entry lands: its `target`, else its name, as path segments — empty and `.`
+  # segments dropped (`/torq`, `./torq`, `torq//x`). A `..` is kept, and refused (`problem`): where
+  # `x/../torq/broker.json` lands is /etc/torq/broker.json (audit of 2026-11-03).
+  etcSegments = name: e:
+    let t = if builtins.isAttrs e && builtins.isString (e.target or null) then e.target else name;
+    in lib.filter (seg: seg != "" && seg != ".") (lib.splitString "/" t);
+  etcTarget = name: e: lib.concatStringsSep "/" (etcSegments name e);
 
   # The first problem in a value set under `path`: a key starting with `_`, a fenced setting, or an
   # /etc entry landing in torq/. null if none.
@@ -94,6 +98,7 @@ rec {
       etc = path == [ "environment" "etc" ] && builtins.isAttrs v;
       landsInTorq = lib.findFirst (k: let t = etcTarget k v.${k}; in t == "torq" || lib.hasPrefix "torq/" t) null
         (if etc then builtins.attrNames v else [ ]);
+      climbs = lib.findFirst (k: builtins.elem ".." (etcSegments k v.${k})) null (if etc then builtins.attrNames v else [ ]);
       inner = if builtins.isAttrs v then lib.mapAttrsToList (k: x: problem (path ++ [ k ]) x) v
         else if builtins.isList v then lib.imap0 (i: x: problem (path ++ [ "[${toString i}]" ]) x) v
         else [ ];
@@ -102,7 +107,9 @@ rec {
     else if matchesAny aliases path then "${here}: NixOS's old name for ${if lib.elemAt path 1 == "extraUsers" then "users.users" else "users.groups"}: set it there (one place, every rule)"
     else if keptElsewhere path then "${here}: kept in its own file by TorqOS (as torqcli writes it), not in nixos/"
     else if matchesAny passwords path then "${here}: a password is never in the configuration (everyone can read it, and its history keeps it): `request system password <user>` sets one"
+    else if path == [ "specialisation" ] then "specialisation: a second system, out of every rule here, is not the tree's: put it in an attached .nix file (config-files.json), reviewed as code"
     else if fenced path then "${here}: not settable in the configuration tree (it reaches the broker or TorqOS itself)"
+    else if climbs != null then "environment.etc.${climbs}: a `..` in where an /etc file lands: not settable in the configuration tree"
     else if landsInTorq != null then "environment.etc.${landsInTorq}: lands in /etc/torq, the broker's: not settable in the configuration tree"
     else lib.findFirst (p: p != null) null inner;
 }

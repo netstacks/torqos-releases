@@ -73,7 +73,7 @@ fn command_line() -> clap::Command {
         .arg(opt(
             "rebuild-cmd",
             "TORQ_REBUILD_CMD",
-            "Command run after each commit; `{flake}` is the config repo at the commit (git+file://…?rev=…), `{repo}` its path [default: nixos-rebuild switch --no-update-lock-file --flake {flake}#torq].",
+            "Command run after each commit; `{flake}` is the config repo at the commit (git+file://…?rev=…), `{repo}` its path [default: build the commit with nix, make it the system profile, switch to it in a transient unit (torq-switch)].",
         ))
         .arg(opt(
             "build-cmd",

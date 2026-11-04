@@ -1969,24 +1969,37 @@ fn a_rollback_is_restored_only_if_the_next_boot_is_known() {
 
 /// From the audit: apply and revert did not check for an outside switch running (repair and
 /// reconcile did); one interleaving could have its system recorded as the broker's commit's.
-#[test]
-fn apply_and_revert_wait_for_an_outside_switch() {
+/// `unit` is the switch unit a systemctl of the test's says is active.
+fn apply_and_revert_wait_for_a_switch_in(unit: &str) {
     let (dir, b) = setup("true");
     let fake = dir.path().join("fake-bin");
     fs::create_dir(&fake).unwrap();
     // A systemctl that says the switch unit is active.
-    fs::write(fake.join("systemctl"), "#!/bin/sh\n[ \"$1 $3\" = \"is-active nixos-rebuild-switch-to-configuration.service\" ]\n").unwrap();
+    fs::write(fake.join("systemctl"), format!("#!/bin/sh\n[ \"$1 $3\" = \"is-active {unit}\" ]\n")).unwrap();
     fs::set_permissions(fake.join("systemctl"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let path = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap());
     let d = write_diff(dir.path(), "theme.diff", THEME);
     let p = b.propose(&d, "x", Actor::User, false).unwrap();
     let head = b.repo.head().unwrap();
     let out = run_cli_env(dir.path(), &[("PATH", &path)], &["apply", &p.body.seq.to_string(), "--approved-by", "casey"]);
-    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("running outside the broker"), "{out:?}");
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("running outside the broker"), "{unit}: {out:?}");
     assert_eq!(b.repo.head().unwrap(), head, "nothing committed");
     let a = b.apply(p.body.seq, "casey", false).unwrap();
     let out = run_cli_env(dir.path(), &[("PATH", &path)], &["revert", &a.body.seq.to_string(), "--approved-by", "casey"]);
-    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("running outside the broker"), "{out:?}");
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("running outside the broker"), "{unit}: {out:?}");
+}
+
+/// A switch by hand with nixos-rebuild (a stock NixOS habit; the tool is not on a TorqOS machine,
+/// but can be brought).
+#[test]
+fn apply_and_revert_wait_for_an_outside_switch() {
+    apply_and_revert_wait_for_a_switch_in("nixos-rebuild-switch-to-configuration.service");
+}
+
+/// The broker's own switch unit (ADR-032), left running by a broker that died, or run by hand.
+#[test]
+fn apply_and_revert_wait_for_the_brokers_own_switch_unit() {
+    apply_and_revert_wait_for_a_switch_in("torq-switch.service");
 }
 
 /// From the audit: a commit git had made when what followed it failed (its sync, here) was reset
@@ -2125,12 +2138,28 @@ fn setup_builds_switches_then_ledgers_once() {
     assert!(e.contains("did not build: nothing was set up"), "{e}");
     assert!(failing.ledger.read_all().unwrap().is_empty() && !marker.exists(), "never switched");
     assert!(!repo.join(".git").exists() && repo.join("desktop.nix").exists(), "files left, history gone");
-    // Built, but the switch reported a problem: the machine boots it from now on, so it is ledgered,
-    // saying so.
+    // Built, but the switch reported a problem after making it the boot default: the machine starts
+    // it from now on, so it is ledgered, saying so.
     let (dir, repo) = config_dir();
-    let partly = Broker::new(&repo, dir.path().join("state"), "false").with_confirm_commands("echo /nix/store/ccc", "true", "true", "true");
+    let profile = dir.path().join("system");
+    let partly = Broker::new(&repo, dir.path().join("state"), &format!("ln -sfn /nix/store/ccc {} && false", profile.display()))
+        .with_current_system(dir.path().join("current-system"))
+        .with_system_profile(&profile)
+        .with_confirm_commands("echo /nix/store/ccc", "true", "true", "true");
     let e = partly.set_up().unwrap();
     assert_eq!((e.body.seq, e.body.reason.as_str()), (1, "TorqOS set up (the switch reported a problem: show system alarms)"));
+    // The switch failed before the new system took either way (neither running nor the boot
+    // default): the machine is still the image, with no account — nothing is set up, as for a build
+    // that failed, so setup asks again (audit A4; it was ledgered as change #1).
+    let (dir, repo) = config_dir();
+    let none = Broker::new(&repo, dir.path().join("state"), "false")
+        .with_current_system(dir.path().join("current-system"))
+        .with_system_profile(dir.path().join("no-profile"))
+        .with_confirm_commands("echo /nix/store/ddd", "true", "true", "true");
+    let e = format!("{:#}", none.set_up().unwrap_err());
+    assert!(e.contains("still runs and starts the image: nothing was set up"), "{e}");
+    assert!(none.ledger.read_all().unwrap().is_empty(), "no change #1");
+    assert!(!repo.join(".git").exists() && repo.join("desktop.nix").exists(), "files left, history gone: setup can try again");
 }
 
 /// `request system password`: the hash set at once (here a command that only reads it), kept in

@@ -223,7 +223,7 @@ impl Status {
             if self.running_system.as_ref() != Some(want) {
                 p.push(format!(
                     "running system is {}, not the last ledgered build {want}: it was switched outside the \
-                     broker (e.g. nixos-rebuild against another configuration, or an old boot entry)",
+                     broker (e.g. another configuration built and switched to by hand, or an old boot entry)",
                     self.running_system.as_deref().unwrap_or("(unknown)")
                 ));
             }
@@ -281,7 +281,8 @@ impl Lock {
     }
 
     /// The lock as a child's stdin, so the rebuild's whole process tree holds it too. Killing the
-    /// broker does not stop `nixos-rebuild`, which may still switch the system; the next operation
+    /// broker does not stop the build or the switch (`torq-switch`, its own unit), which may still
+    /// switch the system; the next operation
     /// must wait for it rather than race it. A dup shares the open file description, which is what
     /// flock locks belong to, so the lock lasts until the last holder exits. The rebuild
     /// therefore has no terminal: anything that prompts (nix flake config, sudo, ssh host keys)
@@ -388,15 +389,15 @@ fn ledgered_commit(entries: &[Entry]) -> Option<String> {
         .find_map(|e| e.body.data.get("commit").and_then(|v| v.as_str()).map(String::from))
 }
 
-/// nixos-rebuild runs the switch in this transient unit (`systemd-run --pipe`). A broker rebuild's
-/// switch inherits the lock through stdin, but a manual `nixos-rebuild` outside the broker does not.
-const SWITCH_UNIT: &str = "nixos-rebuild-switch-to-configuration.service";
+/// The broker runs each switch in a transient unit of its own (`systemd-run --pipe`, config.rs
+/// REBUILD), which inherits the broker's lock through stdin. A switch running in it, or in the one
+/// `nixos-rebuild` used (a system from before ADR-032, or one started by hand), is a switch the
+/// broker must not race. The first is the one messages name.
+const SWITCH_UNITS: [&str; 2] = ["torq-switch.service", "nixos-rebuild-switch-to-configuration.service"];
+const SWITCH_UNIT: &str = SWITCH_UNITS[0];
 
 fn switch_running() -> bool {
-    config::command("systemctl")
-        .args(["is-active", "--quiet", SWITCH_UNIT])
-        .status()
-        .is_ok_and(|s| s.success())
+    SWITCH_UNITS.iter().any(|u| config::command("systemctl").args(["is-active", "--quiet", u]).status().is_ok_and(|s| s.success()))
 }
 
 impl Broker {
@@ -619,10 +620,12 @@ impl Broker {
     /// there is a ledger, refused: setup is once.
     /// - Built first: a configuration that does not build changes nothing — not taken over (its
     ///   history removed, its files left), so setup can correct its answers and try again.
-    /// - Then switched to, and ledgered whatever the switch says: a switch makes the new system the
-    ///   boot default before activating it, so from then on the machine starts it, and its history
-    ///   must name it. A switch that reported a problem says so in the entry; `status` shows any
-    ///   difference, and `repair` returns the machine to it.
+    /// - Then switched to. If the new system took — it runs, or it is the boot default (a switch sets
+    ///   that before activating) — the machine starts it from now on, and its history must name it:
+    ///   ledgered, a problem the switch reported said in the entry (`status` shows any difference,
+    ///   `repair` returns the machine to it). If it took neither way (the profile not set, the boot
+    ///   loader not installed), the machine is still the image, with no account: nothing is set up,
+    ///   as for a build that failed, and setup asks again (audit A4).
     pub fn set_up(&self) -> Result<Entry> {
         let lock = Lock::acquire(&self.state_dir)?;
         // A setup cut short on the image starts again from nothing (the console removes what it
@@ -648,12 +651,23 @@ impl Broker {
         self.repo.init()?;
         let head = self.repo.head()?;
         self.write_setup(&SetupRecord { commit: Some(head.clone()) })?;
-        if let Err(e) = self.build_system(&lock, &head) {
-            let _ = std::fs::remove_dir_all(self.repo.root().join(".git"));
-            let _ = self.clear_setup();
-            return Err(e.context("the new configuration did not build: nothing was set up"));
-        }
+        let built = match self.build_system(&lock, &head) {
+            Ok(system) => system,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(self.repo.root().join(".git"));
+                let _ = self.clear_setup();
+                return Err(e.context("the new configuration did not build: nothing was set up"));
+            }
+        };
         let switched = self.rebuild(&lock, &head);
+        if let Err(e) = &switched {
+            let took = self.running_system().as_deref() == Some(built.as_str()) || self.next_boot().as_deref() == Some(built.as_str());
+            if !took {
+                let _ = std::fs::remove_dir_all(self.repo.root().join(".git"));
+                let _ = self.clear_setup();
+                bail!("the switch to the new system failed, and the machine still runs and starts the image: nothing was set up ({e:#})");
+            }
+        }
         let reason = if switched.is_ok() { "TorqOS set up" } else { "TorqOS set up (the switch reported a problem: show system alarms)" };
         let e = self.ledger.append(NewEntry {
             actor: "user".into(),

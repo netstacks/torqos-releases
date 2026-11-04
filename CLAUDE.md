@@ -5,25 +5,30 @@
 
 ## What this project is
 
-TorqOS is a **thin, CLI-only operating system** built on **NixOS**, where **the configuration is the
-device** (ADR-019). Its goals:
+TorqOS is a **thin operating system** built on **NixOS**, where **the configuration is the
+device** (ADR-019), with **one base and two faces** (ADR-034): the sysadmin's server as code in
+git, and a person's desktop or laptop that an AI can drive safely. Its goals:
 
 1. **One configuration defines the machine.** Like a network device's config: `torqcli` edits one
    tree, every NixOS setting plus plain Nix config files, kept in the machine's config git repo
    (`docs/CONFIG-IS-THE-DEVICE.md`). torq is the small, tightly controlled configuration part of
-   the OS; everything else is plain NixOS.
+   the OS; everything else is plain NixOS. With a remote, the machine is a URL (ADR-036).
 2. **Every change is controlled, auditable and reversible.** A small privileged **broker** is the
    only writer of the config repo: each change is a git commit that becomes a bootable NixOS
    generation, recorded in a tamper-evident ledger, undoable in one command.
-3. **Ready for AI, later.** No AI work now, but everything is built so AI layers can be added
-   later, limited permanently and without bypass: an AI will only *propose* configuration changes;
-   people stay free (anything in their own home, any change they approve).
+3. **The AI fenced, people free — and next, not later.** The agent is an account the kernel
+   vouches for (ADR-035), unprivileged; it only *proposes* configuration changes; people stay free
+   (anything in their own home, any change they approve). The desktop is a *configuration*
+   (`torqos-desktop`) loaded on the same base, not a product (ADR-034). torqcli is the agent's
+   interface first, the administrator's second.
 
-Not goals now: the AI layers (later), a desktop or any UI, laptop- or touch-specific design, hardware-specific work, a
-broad "complete OS". Owner-rooted boot security is later; a private git remote for the config
-repo is far future (`docs/ROADMAP.md`).
+Not goals: laptop-*specific* or touch-first design, reference hardware, a smoothness target;
+building a sync service or a cache of our own (ADR-038, ADR-039); preventing root (the agent
+cannot get it; the owner can, not silently — ADR-035). Owner-rooted boot security is later
+(`docs/ROADMAP.md`).
 
-Read `docs/VISION.md` first, then `docs/ARCHITECTURE.md`.
+Read `docs/VISION.md` first, then `docs/ARCHITECTURE.md`. The owner's procedure for steering
+sessions — what to build next, where a fresh session validates — is `docs/DRIVING.md`.
 
 ## The one rule that shapes everything
 
@@ -34,20 +39,31 @@ That is what makes auditing and reversal automatic. Do not add code paths that b
 ## Repository layout
 
 ```
-flake.nix              entry point: VMs, ISO, checks, packages
+flake.nix              entry point: images, VMs, checks, packages, the dev shell
 modules/               the distribution, as NixOS modules (torq.* options)
   base.nix             nix settings, users, locale, core packages
   security.nix         hardening (boot chain and TPM: later)
-  desktop.nix          a desktop (niri), off by default since ADR-019; kept to bring back later
+  desktop.nix          a desktop (niri), off in the base; the torqos-desktop configuration's (ADR-034, M4)
   broker.nix           the privileged change broker service + config repo
   shell.nix            the login shell: zsh + oh-my-zsh and the TorqOS prompt (shell/torq.zsh-theme)
-  ai.nix               local model runtime + agent service (a stub: the AI layers are later)
+  setup.nix            first-boot setup, at the console of a machine made from the image
+  installer.nix        the ISO installer's console: the image onto a chosen disk (ADR-031)
+  releases.nix         where a machine takes TorqOS from, signatures checked (ADR-028)
+  settings-fence.nix   what the configuration tree may never change
+  dev.nix              development mode (ADR-009) — and the assertion that guards a path: source
+  ai.nix               local model runtime + agent service (a stub: the agent is M5, docs/AI-LAYER.md)
 hosts/
+  image/               the release image's own system (`.#image`, `.#image-vmdk`)
+  installer/           the ISO installer's system and the image it carries (`.#iso`)
   dev-vm/              throwaway VM (`.#nixosConfigurations.dev-vm-{aarch64,x86_64}`)
 templates/config/      the per-machine config repo the broker manages
                        (`nix flake new -t .#config /var/lib/torq/config`)
 broker/                Rust crate: torq-broker (ledger, policy, git, rebuild, rollback)
+cli/                   Rust crate: torqcli — the grammar, the candidate, the tree (ADR-025)
 tests/                 NixOS VM tests
+release/               allowed_signers: the keys a machine trusts a release from
+.github/workflows/     test on every push, weekly nixpkgs bump, release on a v* tag
+branding/              the TorqOS logo, icons, terminal logos and palette (modules/branding.nix)
 docs/                  design docs and decision log
 ```
 
@@ -58,31 +74,62 @@ Two repos, on purpose:
 
 ## Commands
 
+The Rust toolchain is not installed in the system: it comes from the flake's dev shell, so the
+machine stays thin. `nix develop` for a shell, or `nix develop --command …` for one command.
+
 ```bash
-# Rust broker
-cd broker && cargo test          # unit tests, incl. ledger tamper detection
-cd broker && cargo run -- --help
+# The Rust crates
+nix develop --command bash -c 'cd broker && cargo test'   # incl. ledger tamper detection
+nix develop --command bash -c 'cd cli    && cargo test'   # the grammar, candidate, tree
 
-# Nix (run on Linux or inside the NixOS VM; on macOS needs a linux-builder)
-nix flake check                                   # eval + VM tests
-nix build .#nixosConfigurations.dev-vm-aarch64.config.system.build.vm
-./result/bin/run-torq-dev-vm                   # boot the throwaway VM (dev / torq)
-nix build .#checks.aarch64-linux.trust-loop       # run the trust-loop VM test
+# Nix — x86_64 here; aarch64 is CI's (ADR-030), assume nothing about it locally
+nix flake check                                   # eval + tree checks + VM tests
+nix build .#checks.x86_64-linux.trust-loop        # one VM test
+nix build .#checks.x86_64-linux.image             # boot, setup, a commit, a signed update
+nix build .#image                                 # the qcow2 (.#image-vmdk for ESXi)
+nix build .#iso                                   # the ISO installer, for real hardware (ADR-031)
+nix build .#checks.x86_64-linux.installer         # USB stick → chosen disk → its first boot
+nix build .#nixosConfigurations.dev-vm-x86_64.config.system.build.vm
+./result/bin/run-torq-dev-vm                      # boot the throwaway VM (dev / torq)
 
-# Inside the UTM VM, against the machine's config repo
-sudo nixos-rebuild switch --flake /var/lib/torq/config#torq   # first time only
+# Against this machine's config repo (dev mode: sudo needs no password)
 sudo torq-broker propose --diff change.diff --reason "..." --actor user
 sudo torq-broker apply <seq> --approved-by $USER
 sudo torq-broker revert <applied-seq> --approved-by $USER
-sudo torq-broker log && sudo torq-broker verify
+sudo torq-broker log && sudo torq-broker verify && sudo torq-broker status
 ```
 
-## Current milestone (M1.5) — `torqcli`: TorqOS driven like a network device
+The VM tests need `/dev/kvm` to be quick; on `torq5` it is there (ESXi exposes nested
+virtualisation). Without it QEMU falls back to TCG and they take minutes.
 
-A shell with operational and configuration modes, one syntax (the J style, ADR-021), a
-candidate configuration, `show | compare`, `commit check`, `commit confirmed`, `rollback <n>`, and a
-configuration tree that is the config repo's files (ADR-016, `docs/CLI-DESIGN.md`). Built in small,
-reviewed steps, broker first. Next: the rest of M1.5, then M2, Install: a qcow2 image, then an ISO (`docs/ROADMAP.md`); the AI layers are later.
+## Current milestone (M2) — Install: TorqOS as a ready image
+
+Nobody has to build TorqOS to install it: a release is an image to download and boot. Done — the
+qcow2 and the ESXi VMDK, first-boot setup at the console, customer-safe defaults, signed releases a
+machine takes as git and checks the signature of (ADR-028), the three CI workflows, and the image
+VM test. Updates work as NixOS's do (ADR-023): almost everything comes signed from NixOS's own
+cache; the machine builds TorqOS's few small pieces itself.
+
+The ISO installer (ADR-031) puts that same image on real hardware: `torq install` on its console
+writes it to the disk a person names and leaves the detected hardware for first-boot setup.
+Also built: a smaller TorqOS (ADR-032: no `nixos-rebuild` or NixOS's other tools on an installed
+machine, a size budget), the EFI-partition test (ADR-033: Lanzaboote itself deferred to Secure
+Boot), and ADR-039's source statement and unfree check (`checks.<system>.free`). The end-of-M2 audit is
+done (`docs/AUDIT-2026-11-04.md`); **left of M2:** the `v0.2.0` tag.
+
+**Then M3 — trust** (ADR-035, ADR-036): the broker as a socket service with identity from
+`SO_PEERCRED`, the agent's account, the config repo's remote (push after every change, the ledger
+anchored there, pull as a proposal, adopt at setup), strict mode and `torq break-glass`, data
+snapshots. **M4 — the desktop as a configuration** (`torqos-desktop`; applications by rung,
+ADR-037; data declared, ADR-038). **M5 — the agent** (doctor, proposals, session trust; the three
+scenarios of ADR-034 as VM tests). `docs/ROADMAP.md` has each. What is left of M1.5 is human
+polish, below these.
+
+M1.5 built `torqcli` itself: operational and configuration modes, one syntax (the J style,
+ADR-021), a candidate configuration, `show | compare`, `commit check`, `commit confirmed`,
+`rollback <n>`, and a configuration tree that is the config repo's files (ADR-016,
+`docs/CLI-DESIGN.md`), rebuilt on six single sources by ADR-025. Built in small, reviewed steps,
+broker first.
 
 ## Engineering principles
 
@@ -109,21 +156,48 @@ reviewed steps, broker first. Next: the rest of M1.5, then M2, Install: a qcow2 
 - Keep `docs/` in sync when behaviour changes.
 - Things in this scaffold marked `TODO(M1)` / `TODO(M2)` are the intended next steps.
 
-## Current status (read this first) — 2026-10-30
+## Current status (read this first) — 2026-11-04
 
-- **M1 is complete** and running on the UTM VM: propose → apply → rebuild → ledger → one-command
-  rollback; broken changes reset *and rebuilt* (ADR-008); a broker killed mid-change is reconciled
+- **Handoff (2026-11-04, M2 done; `v0.2.0` is the owner's tag to push):** on `main`, each branch
+  reviewed in a fresh session and its findings fixed: the ISO installer (ADR-031; KNOWN-GAPS 6zc);
+  the skeleton (ADR-032; 6zd); the EFI-partition test (`tests/boot.nix`, check `boot`) —
+  ADR-033's Lanzaboote **deferred** to Secure Boot (its premise was false: Python stays for
+  growpart; branch deleted 2026-11-04, its reviews' findings in the ADR's amendment); ADR-039
+  (`checks.<system>.free`, the release notes' source statement); the fence's holes (an /etc path
+  with `..`, `specialisation`, `torq.installer`, /etc files other modules land in /etc/torq —
+  modules/security.nix; 6ze); the SSH greeting and the README in the brand. The end-of-M2 audit
+  (`docs/AUDIT-2026-11-04.md`): no high finding; A1 (gpg-signed releases accepted) and A4 (setup
+  ledgering a failed switch) fixed, A3 and A11 in part, A2 and the rest in KNOWN-GAPS' audit table
+  for M3. The version is 0.2.0 (`scripts/bump-version`, which with `--release` also tags and pushes); release.yml refuses a tag that is not the
+  source's version, or would move `stable` back. torq5 runs this `main` (change #23, TorqOS 0.2.0).
+  `nix flake check` green on 2026-11-04. **Next:** the owner runs `scripts/bump-version 0.2.0 --release` (CONTRIBUTING.md,
+  "Releasing") once CI is green on `main`; then M3, starting with the socket broker (A2 with it).
+- **Development moved to `torq5`** (ADR-030), an x86_64 ESXi VM with KVM, 64 GB and 1 TB; the
+  aarch64 UTM VM on the M4 Mac is retired and aarch64 is CI's alone. `docs/DEV-SETUP.md` is
+  written for this host. Tests here: **broker 118, torqcli 241** (`cargo test` in `nix develop`,
+  also run in the Nix build sandbox).
+- **M2 is essentially done** — images (qcow2 + ESXi VMDK, both arches), first-boot setup,
+  customer-safe defaults, signed releases (ADR-028; v0.1.0 and v0.1.1 out), the test/bump/release
+  workflows, and `tests/image.nix`. `torq5` was installed from the v0.1.1 image and its first
+  update moved it to the releases repo, which was the last acceptance criterion for releases.
+  The **ISO installer** (ADR-031, `tests/installer.nix`) is built: USB stick → chosen disk → its
+  first boot. ADR-029 gave TorqOS its own `os-release`, boot menu and console
+  greeting — committed but not yet in a release, so a machine on `stable` still says `NAME=NixOS`.
+- **M1 is complete**: propose → apply → rebuild → ledger → one-command rollback; broken changes
+  reset *and rebuilt* (ADR-008); a broker killed mid-change is reconciled
   on the next operation (ADR-010); `torq-broker status` reports any drift from the ledger.
-  `tests/trust-loop.nix` passes inside the UTM VM (no `/dev/kvm`: QEMU falls back to TCG, ~2.5 min).
-  Broker: 40 tests green (`cargo test`, also run in the Nix build sandbox).
+  `tests/trust-loop.nix` passes on `torq5` with KVM: **376 s of test script**, ~12 min wall from
+  cold including building the test system (2026-11-03). ROADMAP's M1 note of "~75 s" measured a far
+  smaller test in 2026-10 — it is history, not a target.
 - **Packages, services, updates, history** (ADR-011–013) are torqcli commands now (4g): the earlier
   `torq pkg/service/update/log/undo/status` are gone and say what replaced each; `torq` is torqcli.
   Drift is checked at boot and every 15 min.
-- **A stray `nixos-rebuild` (the default `/etc/nixos`) cannot switch the machine away** from its
-  ledgered config: `/etc/nixos` holds stubs that refuse (`torq.broker.guardEtcNixos`). This happened
-  once from another tool on this VM. Root can still switch any other way (`--flake /tmp/x`, a
-  built system's `switch-to-configuration`): that is drift, reported afterwards, not prevented.
-  Never build `/etc/nixos` or any config other than the broker's.
+- **NixOS's own tools for changing a machine are gone** (ADR-032): no `nixos-rebuild`, `nixos-option`,
+  `nixos-version`; the broker builds and switches with `nix` itself (`torq-switch`). Building the
+  default `/etc/nixos` with `nix` refuses: it holds stubs (`torq.broker.guardEtcNixos`), after
+  another tool once switched this VM away. Root can still switch by hand (`nix build` of another
+  flake, a built system's `switch-to-configuration`): that is drift, reported afterwards, not
+  prevented. Never build `/etc/nixos` or any config other than the broker's.
 - **Way of working:** small steps; an independent reviewer agent behind every meaningful change;
   mutation-check new guards (break them, see a test fail); verify in the Nix sandbox and VM test.
 - **M1.5 `torqcli` (ADR-016) is built and live:** one syntax (ADR-021), candidate, `commit check`,
@@ -145,13 +219,29 @@ reviewed steps, broker first. Next: the rest of M1.5, then M2, Install: a qcow2 
   / `users users <name> packages`, services NixOS's own with TorqOS's protections however they are
   on; the catalog folded in). Acceptance (a walk of every `?`, fresh usability reviews) still to do.
 
-### You are probably running inside the dev VM
-- Host `torq-utm`, user **`viper`** (the template no longer names a user; `torq user` in
-  the config repo's `nixos/torq.json` is the one place, since S3d). `torq dev enable true` there: passwordless sudo, you have root (ADR-009).
-- `~/torq` = this repo (working copy; push to `github.com/netstacks/torqos`, branch `main`).
-- `/var/lib/torq/config` = the machine's config repo; its `torq` input is
-  `path:/home/viper/torq`.
-- **Ship a distribution change to the running VM through the broker**, so it is ledgered. Commit
+### You are probably running on the dev host
+- Host **`torq5`**, an x86_64 VM on a VMware ESXi server (ADR-030), user **`viper`** (the template
+  no longer names a user; `torq user` in the config repo's `nixos/torq.json` is the one place,
+  since S3d). 8 vCPU, 64 GB, 1 TB, nested virtualisation on — so `/dev/kvm` is there and the VM
+  tests run at native speed. **aarch64 is CI's**: there is no arm64 machine to develop on, so
+  assume nothing about it locally.
+- It is a **normal install** — made from a release image (2026-11-02), then updated to the signed
+  releases repo — with two ledgered, reversible commits on top, both applied on 2026-11-03:
+  `torq dev enable true` (ADR-009: passwordless sudo, you have root) and `system software torq
+  source path:/home/viper/torq`. `modules/dev.nix` asserts the second requires the first.
+  `docs/DEV-SETUP.md` has both.
+- **A `path:` input copies the working tree, uncommitted changes included** — it does not read git.
+  So a dirty `~/torq` becomes part of the system the broker ledgers: recorded and reversible, but
+  not reproducible from the repository. `git status` before shipping anything.
+- `~/torq` = this repo (working copy; push to `github.com/netstacks/torqos`, branch `main`;
+  commits are signed off under the DCO, `git commit -s`, and CI checks it).
+- `/var/lib/torq/config` = the machine's config repo. Check which source it is on before assuming:
+  `path:/home/viper/torq` is the dev state, `git+…/torqos-releases?ref=stable` the release state.
+  While it is on a path, this machine is **not** exercising the release path real machines take, so
+  a release still has to be checked from a machine tracking `stable` (ADR-028).
+- The Rust toolchain is not in the system — it is the flake's dev shell (`nix develop`), so the
+  machine stays thin and no toolchain change is ledgered.
+- **Ship a distribution change to the running machine through the broker**, so it is ledgered. Commit
   in `~/torq` first (the config repo's `torq` input is that working tree), then, in a terminal (tmux),
   with a **private candidate** (`-c`) — never the interactive one, which every interactive session of
   the user shares, and may hold a person's uncommitted edits:

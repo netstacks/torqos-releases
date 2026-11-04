@@ -21,6 +21,12 @@ machine with UEFI and a TPM.
 
 ## Root, the owner, and an AI the owner runs
 
+The plan that closes this section's gaps is ADR-035, in three levers: *the account* (the broker on
+a socket, identity from `SO_PEERCRED`; the agent an account of its own; the owner's password the
+human gate), *the door* (strict mode, `torq break-glass`: a root shell only after a ledger entry),
+and *the record* (the ledger's head anchored off the machine, ADR-036). What it does not try: to
+tell a person from a program at a root shell — nothing can.
+
 - **The `root` account is locked** (no password: nobody logs in as root). **Root's powers** are
   borrowed through `sudo` by the owner, with the owner's own password; `sudo bash` borrows them for a
   whole shell. That is the owner's override, as on any Linux, and TorqOS does not try to forbid it:
@@ -65,7 +71,7 @@ machine with UEFI and a TPM.
   however it is turned on (modules/services.nix): keys only unless
   `services.openssh.settings.PasswordAuthentication` is set, and then repeated wrong guesses are
   blocked (sshguard); 3 tries a connection; only the owner may log in (`AllowUsers`). These are
-  defaults a person can change. `root` never logs in over SSH: an assertion refuses any
+  defaults a person can change (tests/ssh.nix checks each). `root` never logs in over SSH: an assertion refuses any
   `PermitRootLogin` but `no`. `show system alarms` notes that SSH accepts passwords. A commit (or
   revert) that changes who can log in over SSH — turning it on, allowing passwords or turning them
   off, removing a key, another owner — shows it (the keys that will be able to log in, or that
@@ -73,8 +79,12 @@ machine with UEFI and a TPM.
   already on as much as when it turns on (audit of 2026-11-01). Keys only stays one `set` away.
 - **Releases are signed** (ADR-028): each image's checksum, with the TorqOS release key, and the one
   command that checks it (INSTALL.md); and each release's source, a git commit the key signed.
-  A machine updates only to a commit signed with the key it was installed with
-  (`/etc/torq/release-signers`): torqcli checks it before the update enters the candidate.
+  `request system update` takes only a commit signed (an SSH signature; OpenPGP and X.509 ones are
+  refused) with the key the machine was installed with (`/etc/torq/release-signers`), checked by
+  torqcli before the update enters the candidate. Not yet covered (audit of 2026-11-04, KNOWN-GAPS):
+  a lock someone else wrote — a proposal by hand, later the agent's — whose content hash points at
+  other source than the signed commit (A2: the broker re-fetching and checking it is M3), and the
+  machine refusing an older release by itself (A3: CI refuses to move `stable` back).
 
 ## Threat model
 
@@ -119,8 +129,14 @@ Hardware guidance: integrated-graphics machines are lowest risk for removing Mic
 
 ## Hardening defaults (initial list, expand with care)
 
-- Kernel lockdown (integrity), signed modules only.
+- Kernel lockdown (integrity). Modules are not signature-checked yet (KNOWN-GAPS 6).
 - No display server by default.
-- Minimal enabled services; all TorqOS services use systemd sandboxing.
-- `nix.settings.allowed-users` restricted; only the broker may trigger system rebuilds.
+- Minimal enabled services. TorqOS's own services are not yet sandboxed beyond what systemd does by
+  default (`torq-broker-init` only; audit N5).
+- `nix.settings.allowed-users` is root and wheel: the owner can build anything, and root can switch
+  by hand (drift, reported, not prevented). Only the broker *ledgers* a switch.
+- The boot menu's entries cannot be edited (systemd-boot's editor off, `modules/security.nix`): a
+  kernel command line typed at boot is a root shell. A system-tier commit can turn it on,
+  ledgered. Checked on the disk the installer writes (`tests/installer.nix`) until the
+  EFI-partition test of ADR-033 checks the menu itself.
 

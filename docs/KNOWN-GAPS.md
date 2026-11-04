@@ -111,7 +111,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    changed before `confirm`). `--confirm` builds the config again even if `commit check` just built
    it (cached by nix, but evaluated twice). "Boot default" is the system profile, not the boot
    loader's entry: a profile set while the boot-loader install failed counts as restored. The
-   activation is not run under `systemd-run` as `nixos-rebuild` does: a change that kills the
+   activation is not run under `systemd-run` as the broker's plain switch is (`torq-switch`): a change that kills the
    user's session kills the broker mid-switch (recovered by reconcile, but noisy).
 6c. **`request system update` trusts the user's fetch:** `nix flake update` runs as the user, so their
    environment (proxy, CA, `NIX_CONFIG`) shapes the narHash written to the lock, and root builds
@@ -209,6 +209,24 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
      `commit` now show the configuration's warnings (all of NixOS's, which were dropped before),
      `commit` with the comparison before it asks. Tested: tests/tree.nix (`groups-missing`,
      `groups-docker`, the template), the session's tests.
+6za. **Password guessing over SSH was never blocked** (found 2026-11-02, by tests/ssh.nix) — fixed.
+   - **What happened:** with passwords allowed (setup's "password" or "either"), sshguard ran and saw
+     nothing: NixOS has it read the journal's `sshd` lines, and OpenSSH (9.8 on) logs logins as
+     `sshd-session`. Only OpenSSH's own few seconds' penalty slowed a guesser.
+   - **Fixed:** modules/services.nix has sshguard read both. tests/ssh.nix checks every SSH
+     protection: keys only by default, the owner only, never root, and a guesser's address in the
+     firewall's block set, a right key refused after.
+6zb. **Setup's first question could be lost from the screen** (found 2026-11-02, by tests/image.nix on
+   x86_64) — fixed.
+   - **What happened:** a graphics driver loading after setup started (bochs-drm on QEMU's
+     standard VGA, as on Proxmox; a GPU's on real hardware) took the console over, and what was on
+     it was gone: a screen asking nothing while setup waited. Ordering setup after
+     systemd-udev-settle (20e1b3d, in v0.1.1) did nothing: NixOS has no such unit. Waiting for
+     udev's queue does not help either: the driver loaded after it was empty.
+   - **Fixed:** while it waits for an answer, setup shows its question again (with the welcome)
+     when the console changes size, as a takeover does. tests/image.nix makes one on purpose.
+     A takeover that keeps the size would still lose the screen; Enter then answers with the
+     default shown in brackets, and the next question appears.
 
 ## Audit findings to fix (2026-11-01)
 
@@ -236,7 +254,7 @@ is 6p, N18 is 6 (below).
 | N4 | `propose --reason` may hold newlines: forged git trailers | fixed: a reason is one line, no control characters (refused at propose; torqcli sends one clean line) |
 | N5 | Only torq-broker-init is sandboxed; SECURITY-MODEL says all are | open — sandbox the root units, fix the sentence |
 | N6 | `systemd tmpfiles` and `environment.etc."nixos/*"` reach the broker's inputs and the /etc/nixos guard | open — fence them |
-| N7 | Setup offers password SSH by default; no test of the image's invariants | default fixed (none: Enter turns nothing on); tests/image.nix open |
+| N7 | Setup offers password SSH by default; no test of the image's invariants | fixed: none by default (Enter turns nothing on); tests/image.nix checks the image, tests/ssh.nix SSH's protections |
 | N8 | "A person at a terminal" is a tty check: `script`/`expect` pass it | open — say so (KNOWN-GAPS 4); absolute `id` |
 | N9 | Signing the ledger on the machine cannot keep root out | open — restate: signed by the build, anchored off the machine |
 | N10 | `save <file>` writes anywhere (`.ssh/authorized_keys`) | open — confine save/load |
@@ -246,6 +264,23 @@ is 6p, N18 is 6 (below).
 | N16 | The broker reads `--diff`/`--hash-file` without an owner check or O_NOFOLLOW | open (matters with the M3 socket) |
 | N17 | The /etc/nixos guard stops the default path only; CLAUDE.md says more | CLAUDE.md reworded; the guard is as SECURITY-MODEL says |
 | N19 | Every proposal's diff is in the ledger; each call parses it all | open — diffs by hash beside it |
+
+The audit of 2026-11-04 (end of M2, `docs/AUDIT-2026-11-04.md`), kept as written:
+
+| # | What | Status |
+|---|---|---|
+| A1 | The release check accepted an OpenPGP- or X.509-signed commit (git handed it to gpg and the caller's keyring) | fixed: only an SSH signature, checked before git verifies; gpg's and X.509's programs `false`, no caller's home (cli/src/release.rs, a test with a PGP-signed commit) |
+| A2 | A lock's content hash, not its signed `rev`, decides what is built: a lock someone else wrote can pair the newest signed rev with older source in the store | open — the broker re-fetching each changed input as root and checking its hash and signature (M3, with the socket broker); SECURITY-MODEL says what is not covered |
+| A3 | `stable` could move to an older release; `show \| compare` shows dates, not versions | partly: CI refuses a release not newer than `stable`'s version (release.yml). Open: torqcli showing and comparing versions |
+| A4 | First-boot setup ledgered change #1 when the switch failed before the new system took, leaving the image with no account | fixed: ledgered only if the new system runs or is the boot default; otherwise nothing set up, setup asks again (broker/src/lib.rs `set_up`, its test) |
+| A5 | Release authority wider than the key: the releases token in the bump job's environment, any `v*` tag published | open — a protected environment for release, the token in the step that needs it (GitHub settings) |
+| A6 | The release check says nothing for a source other than the releases repo; `github:` accepted for it | open |
+| A7 | `systemd.suppressedSystemUnits`, a `systemd.mask=` parameter and `torq.setup.enable` switch off the drift check | open — fence them, or assert the units |
+| A8 | The installer's disk is bootable without its hardware file for as long as the write takes | open (6zc's window, wider than it says) |
+| A9 | An interrupted setup leaves a password file under the first name typed | open |
+| A10 | Ctrl-C at a setup question ends setup until the next boot | open — `Restart=always`, or the console's signal keys off as the installer has them |
+| A11 | Release hygiene: a tag moved mid-run signed untested; loose pre-release pattern; no revocation; the fingerprint in one place | partly: the tested commit is what is signed (a moved tag fails), tags are `vX.Y.Z` or `vX.Y.Z-word` only. Open: revocation, the fingerprint elsewhere |
+| A12 | Claims stronger than the code (verify, signed updates, signed modules, sandboxing, rebuilds, compare) | fixed: README, SECURITY-MODEL and ADR-028 say what is true |
 
 Its design notes (§4) are for the AI layer and M3: `SO_PEERCRED` names an account, not a person;
 approve-once for user tier; taint set by the tool layer; what strict mode can mean; where an update
@@ -257,13 +292,31 @@ Its §5 lists claims without a test.
    not active (`/sys/kernel/security/lsm` = `capability,landlock,yama,bpf,ima`). Module signing
    is not built into the kernel either, so "signed modules only" (SECURITY-MODEL.md) is not true.
 
-## Desktop (off since ADR-019; kept for later)
+## Upstreams (ADR-039)
+6u. **`cache.nixos.org` and `github.com/NixOS/nixpkgs` are a bet, not a right.** Every machine
+   fetches from the Foundation's cache (ADR-023) and `flake.lock` points at GitHub; neither has an
+   SLA, and the cache's cost is a recurring Foundation concern. The *code* cannot be withdrawn (MIT,
+   pinned, and the nixpkgs tree is inside every image); the services can change for everyone. If
+   the cache went away, Nix builds from source — slowly. Answer when there are users: a nixpkgs
+   mirror under `netstacks`, a caching proxy, a source mirror. Not yet: the release's source
+   statement and CI's unfree check (ROADMAP M2).
+
+## Desktop (off in the base; the torqos-desktop configuration's, ADR-034, M4)
 7. niri runs its stock config: `Mod+T` spawns `alacritty` (not installed; we ship `foot`), no
    `xwayland-satellite` (X11 apps fail), no cursor theme. Ship a TorqOS niri config.
 8. ~~Template hard-codes user `casey`.~~ Fixed: `torq user` (nixos/torq.json) is the one place
    (asserted set and well-formed); per-user apps are `users/<name>/packages.json`.
 
-## UTM VM quirks (not TorqOS bugs)
+## Dev host quirks (not TorqOS bugs)
+- **ESXi must expose nested virtualisation** or there is no `/dev/kvm`, and every NixOS VM test
+  falls back to QEMU's TCG emulation (the trust loop goes from seconds to minutes). VM → Edit →
+  CPU → "Expose hardware assisted virtualization to the guest OS", with the VM powered off.
+  Check with `ls /dev/kvm` and `grep -o vmx /proc/cpuinfo`.
+- **No aarch64 machine of its own** since the Mac VM was retired (ADR-030): an arm64-only failure
+  cannot be reproduced by hand, only through CI's arm64 runners. If one appears and resists
+  iterating through pushes, borrow an arm64 machine rather than guessing.
+
+### UTM on a Mac (historical: that VM was the dev host until 2026-11-03, ADR-030)
 - niri needs 3D: UTM display card must be `virtio-gpu-gl-pci` with GPU acceleration on
   (renderer ANGLE/Metal). Without it: black screen, "software EGL renderers are skipped".
 - Firefox's GPU WebRender drops most text on virgl. Workaround: `LIBGL_ALWAYS_SOFTWARE=1 firefox`.
@@ -277,6 +330,12 @@ Its §5 lists claims without a test.
   `modules/dev.nix` pins the version by overriding nixpkgs' release manifest with
   `modules/claude-code-manifest.json`. To update, fetch a newer manifest (the commands are in
   `dev.nix`) and ship it through the broker. Running sessions keep their old code until relaunched.
+- **A `path:` TorqOS source builds the working tree, not a commit.** `nix` copies the directory
+  as it is on disk for a `path:` flake input; it does not read git. So on a dev machine with
+  `system software torq source path:/home/viper/torq`, uncommitted edits in the checkout are built
+  and ledgered like any other change: recorded, attributable and reversible, but not reproducible
+  from the repository — the ledger names a store path nobody else can rebuild. `git status` before
+  shipping. (Found on torq5, 2026-11-03, while writing ADR-030's setup.)
 6l. **`show system alarms` has no exit code of its own.** `torq status` exited 1 when the machine was
    not as its ledger says and 75 while a change was being made; `torqcli show system alarms` says it
    in words and exits 0. Scripts and monitoring use `sudo torq-broker --json status` (its `ok`,
@@ -294,3 +353,47 @@ Its §5 lists claims without a test.
    all: like system.nix always was, they can set anything, the broker's settings included. A person
    approves each one as its raw diff; an agent proposing one is for the same M3 allow-list (a
    config file is a whole module, so the allow-list will have to refuse them to agents outright).
+6zc. **The ISO installer refuses a machine with another NixOS disk.** The image finds its file
+   systems by label (`nixos`, `ESP`), the same on every TorqOS disk and NixOS's defaults, so a
+   second disk carrying either could be what the installed machine starts from or grows. `torq
+   install` refuses until that disk is disconnected or cleared (ADR-031). Unique labels or
+   partition UUIDs per install would lift this. Also: hardware NixOS detects as needing an unfree
+   driver (a Broadcom wifi card's `broadcom_sta`) gets it named in the detected hardware file,
+   which TorqOS, allowing no unfree packages, then fails to evaluate at first-boot setup; untested
+   on such hardware. (Found by review of the installer, 2026-11-03.)
+   Smaller, from the second review (2026-11-03), not fixed: a stick blkid cannot probe (copied to
+   RAM, a read error) is offered, since only its label says it is the installer's; the hardware is
+   detected after the write, so a detection failure costs the disk's contents (detecting first
+   would wipe nothing); disk model strings are printed as the disk reports them (an escape
+   sequence in a USB disk's INQUIRY string could redraw the list); a cciss disk's `cciss!c0d0`
+   name is not mapped to its `/dev/cciss/c0d0`. And the installer does not ignore SIGINT, SIGQUIT
+   or SIGTERM itself (Rust has no safe way without a new crate): with the console's signal keys
+   off and logind ignoring the power, reboot, suspend and hibernate keys and the lid (since
+   2026-11-03: before, the power key was a poweroff that stopped the installer between the write
+   and the hardware file, leaving a system without one), only root sends one — nobody logs in to
+   the installer — and a write stopped by one leaves no partition table (ADR-031 step 4).
+   One window remains (review of 5f99d05): on a disk exactly the image's size, the image's own
+   backup partition table lands at the disk's last sector near the end of the stream, so a power
+   cut in the seconds before the first MiB is written leaves a disk a firmware could restore the
+   table from — holding everything the image has, but not yet read back. Holding back the image's
+   last MiB too, written with its first, would close it.
+
+6zd. **The skeleton's loose ends** (review of `slim`, ADR-032, 2026-11-03; none a defect) —
+   closed the same day: a broker test fakes an active `torq-switch.service` as one fakes
+   nixos-rebuild's unit (`apply_and_revert_wait_for_the_brokers_own_switch_unit`); the switch's
+   `-E LOCALE_ARCHIVE` is gone (the broker's environment never had one to pass); the boot menu's
+   editor lock is checked on the disk the installer writes (`editor 0` in its `loader.conf`,
+   tests/installer.nix) until the EFI-partition test (ADR-033); the image test checks htop and
+   man are not there (curl is one of NixOS's core packages, and stays: ADR-032); the wording naming `nixos-rebuild` as what the broker runs is gone from
+   `user-docs/`, modules/broker.nix and broker/src/lib.rs; modules/base.nix says man pages need
+   `documentation man enable true` as well; and trust-loop starts a real `torq-switch` unit by
+   hand and checks the broker applies nothing until it stops. Still open: no test would notice
+   `-E LOCALE_ARCHIVE` put back (harmless: it passes nothing).
+
+6ze. **The fence's loose ends** (reviews of 2026-11-03). torqcli's own check (cli/src/nixos.rs
+   `fenced`) knows the fence's patterns but not where an /etc file lands, a `..`, or that
+   `specialisation` is refused: such a setting is refused at the commit, when the system is
+   evaluated, with the module's message, not when it is typed. An /etc entry whose `source` is a
+   glob is linked under its files' own names, not its target, and is not checked for where those
+   land (no way to make one land in /etc/torq from the tree was found). The unit fence covers
+   `torq-*` services, timers and units, not sockets or paths (the broker has none yet).

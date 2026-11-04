@@ -70,12 +70,7 @@ in
     systemd.services.torq-setup = {
       description = "TorqOS first-boot setup";
       wantedBy = [ "multi-user.target" ];
-      # After the devices found at boot are set up: a graphics driver loading late (bochs-drm on
-      # QEMU's standard VGA, at about a minute into a slow boot) moves the console to a framebuffer
-      # and loses what was on the screen — setup's first question with it, leaving a screen that asks
-      # nothing. Settled, the console is the one setup keeps.
-      wants = [ "systemd-udev-settle.service" ];
-      after = [ "systemd-user-sessions.service" "systemd-udev-settle.service" ];
+      after = [ "systemd-user-sessions.service" ];
       conflicts = [ "getty@tty1.service" ];
       # Setup runs the broker, which switches to the new system — where this unit does not exist. A
       # switch stops units it removes, which would kill setup and the broker mid-switch: this one

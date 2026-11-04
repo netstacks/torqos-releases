@@ -1,7 +1,24 @@
 # AI layer
 
-**Later, not planned now (ADR-019).** This is the design the AI layers will follow when they come;
-everything built now (the broker as the only writer, actors, tiers, the ledger) keeps it possible.
+**Next (ADR-034): M5, on the account M3 makes (ADR-035) and the desktop configuration M4 makes.**
+Everything built so far (the broker as the only writer, actors, tiers, the ledger) was built so
+this could be added without a bypass. The agent is an *account*, `torq-agent`, whose identity the
+kernel vouches for (`SO_PEERCRED`) — never a flag the caller sets.
+
+## What it is for
+
+Three things a person says to their machine; each is an acceptance test (ROADMAP M5):
+
+| | The agent does | The gate |
+|---|---|---|
+| "Fix my wifi." | reads logs and hardware (doctor), proposes a system-tier change | the person's one answer; `commit confirmed`, so it reverts itself if the machine does not come back |
+| "Build me an application for this." | writes and builds it in the person's home, installs it through the tree (ADR-037, rung 3) | none: user tier; every step a ledger line; `rollback` undoes it |
+| "Watch while I try it." | screenshots and input through the compositor's protocols | the person's session; nothing of the broker's |
+
+In order: **doctor mode** (read, explain, propose nothing), **proposals**, **session trust** ("for
+the next hour, user-tier changes without asking" — ledgered, revertible, never for system tier).
+On a desktop the approval is a dialog with the owner's password, the one thing a program in the
+owner's shell does not have; in a terminal it is torqcli's prompt, the same text.
 
 ## Components
 
@@ -59,7 +76,8 @@ Entry kinds: `init`, `proposal`, `applied`, `apply_failed`, `reverted`, `revert_
    Paths are what the diff actually changes (applied to a scratch index): both sides of a
    rename, raw names — so renames, deletions and quoted names cannot dodge the forbidden tier.
 3. Preview shown; approval collected (torqcli at a terminal; the broker takes `--approved-by`).
-4. `apply` — commit (signed with the broker's key), `nixos-rebuild switch`, ledger append.
+4. `apply` — snapshot data (ADR-038), commit, build and switch, ledger append, push and anchor
+   (ADR-036). (Signing on the machine is not the defence — ADR-035; the anchor is.)
 5. `rollback <seq|commit>` — `git revert`, rebuild, ledger append.
 
 ## Tool inventory (initial)

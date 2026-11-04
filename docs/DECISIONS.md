@@ -303,6 +303,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** Nothing for the project to host but release files. An update takes a few
   minutes more than a pure download. A cache of TorqOS's own pieces can be added later without
   changing machines' design (a public key in their configuration), if that ever matters.
+  (ADR-039: NixOS's cache is a service TorqOS depends on without an agreement; a caching proxy in
+  front of it, where TorqOS's own pieces would be prebuilt, is the plan once there are users.)
 
 ## ADR-024 — The store survives a power cut
 - **Context:** Cutting the power during first-boot setup's build (M2) left the Nix store broken: Nix
@@ -398,9 +400,463 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     to a hardware key, with signing by hand, is later. A new key reaches machines as an update
     signed by the old one.
   - **Writing to the releases** takes a token that may write to that repo only
-    (`TORQOS_RELEASES_TOKEN`, a fine-grained token: it expires, at most a year).
+    (`TORQOS_RELEASES_TOKEN`, a fine-grained token: it expires, at most a year). Since
+    2026-11-02 it may also push to this repo and open its pull requests, for the weekly nixpkgs
+    bump (`.github/workflows/bump.yml`): what Actions' own token pushes starts no workflow, and
+    the bump's tests must run.
   - **Not covered yet:** an attacker able to move `stable` back to an older signed release
-    (a downgrade): `stable` only moves forward when CI moves it, and `show | compare` shows the
-    version before a commit, but the machine does not refuse an older release by itself. The check
+    (a downgrade): `stable` only moves forward when CI moves it, and since the audit of
+    2026-11-04 (A3) only to a higher version than it holds, but `show | compare` shows the release's
+    date, not its version, and the machine does not refuse an older release by itself. The check
     is torqcli's, at update: a person who edits the lock by hand is past it (as they are past any
     check, being able to commit).
+
+## ADR-029 — TorqOS names itself, as a NixOS derivative
+- **Context:** A TorqOS machine said it was NixOS everywhere it names itself: `/etc/os-release`
+  (`NAME=NixOS`, NixOS's version, URLs and logo), the boot menu, the console's greeting. The
+  project now has its own identity (`branding/`, from the TorqOS brand kit).
+- **Decision:** `modules/branding.nix` sets NixOS's own options for a derivative:
+  `system.nixos.distroName = "TorqOS"`, `distroId = "torqos"` (so os-release says
+  `ID_LIKE=nixos`), and os-release's values: TorqOS's version (torqcli's, one number) with the NixOS
+  release under it (`VERSION="0.1.1 (NixOS 26.05)"`), the public repository's URLs, the logo's
+  icon name and Torque orange (`ANSI_COLOR="38;5;208"`). NixOS's build id and its release's end of
+  support stay. The console's `/etc/issue` shows the wordmark and the version; setup shows the
+  wordmark over its welcome; a fastfetch configuration is installed for whoever installs fastfetch;
+  the icons are installed with a desktop. The shell's prompt and colours are unchanged.
+  `torq.branding` is fenced from the tree.
+- **Consequences:** Tools that ask "is this NixOS?" by `ID` see `torqos` and must read `ID_LIKE`;
+  NixOS's own switch checks `/etc/NIXOS`, which every TorqOS machine has. The version in
+  os-release is the TorqOS release a machine runs, so a machine updated to a release says so. The
+  repository's files are Apache-2.0; the name and logo are not licensed as trademarks
+  (branding/README.md).
+
+## ADR-030 — Development moves to an x86_64 ESXi host; aarch64 is CI's
+- **Context:** TorqOS was built in an aarch64 UTM VM on an M4 Mac (ADR-006's "dev on M4 Mac").
+  That machine had no `/dev/kvm`, so every NixOS VM test ran under QEMU's TCG emulation (the trust
+  loop ~2.5 min), it was limited to 8 GB and a 64 GB disk, it paused whenever the Mac slept — and
+  the Mac is company property, which is the wrong place for the project to live. `torq5`, an
+  x86_64 VM on a VMware ESXi server, was installed from the v0.1.0 release image on 2026-11-02 and
+  has since been given 8 vCPU, 64 GB of memory, a 1 TB disk and nested virtualisation.
+- **Decision:** `torq5` is the development machine for everything day to day: the broker and
+  torqcli crates, `nix flake check`, the VM tests (now with KVM) and the images. The Mac VM is
+  retired, not kept as a second host. **aarch64 is covered only by CI**, on GitHub's arm64 runners,
+  which already build both architectures' images on every release and run the tests on every push.
+  The dev machine is itself a normal release install, so every change to it goes through its own
+  broker and ledger — with two deliberate exceptions, both one ledgered commit and both reversible:
+  `torq dev enable true` (ADR-009) and `system software torq source path:/home/viper/torq`, which
+  points the machine at the checkout instead of the signed releases repo. `modules/dev.nix` asserts
+  that the second requires the first, so a machine cannot quietly build from a writable folder.
+- **Consequences:** VM tests run at native speed, and the disk is no longer a reason to avoid
+  building images locally. An arm64-only failure has no local reproduction: it has to be chased
+  through CI, or on a borrowed arm64 machine (KNOWN-GAPS, "Dev host quirks"). While its source is a
+  path, `torq5` is not testing the release path that real machines take, so a release must still be
+  checked from a machine that tracks `stable` (ADR-028). A `path:` input also builds the checkout's
+  working tree, uncommitted edits included (KNOWN-GAPS, "Dev mode"), so what the ledger records on
+  the dev machine is reversible but not always reproducible from the repository. `docs/DEV-SETUP.md` is written for this
+  host; the Mac/UTM instructions are in git history.
+
+## ADR-031 — The ISO installer writes the image, and detects the hardware
+- **Context:** M2's last piece is TorqOS on real hardware: an ISO to boot from a USB stick that
+  puts TorqOS on a disk. TorqOS already has one install artifact, tested end to end (the image,
+  `tests/image.nix`): a disk that grows to fill whatever it is written to and runs first-boot setup.
+  What a real machine adds is a disk to choose, and hardware a VM does not have — network cards'
+  firmware, CPU microcode, storage drivers at boot — which the image's `hardware-configuration.nix`
+  (a VM's: `qemu-guest.nix`) does not name.
+- **Decision:** The ISO is a small TorqOS live system whose console runs `torq install` and nothing
+  else: nobody can log in, nothing listens — no network, and nothing on the machine's disks
+  started (no LVM, no RAID). It carries the image itself — the qcow2 CI builds and tests, converted
+  to raw by `qemu-img` and compressed, so every install, VM or metal, is the same disk bytes.
+  `torq install`:
+  1. checks its own copy of the image (its SHA-256) before offering any disk: a damaged stick or
+     download is found with nothing written;
+  2. lists the whole disks it could install to (`/sys/block`): not loop, RAM, optical,
+     device-mapper or read-only devices, an eMMC's boot areas, an NVMe disk's hidden paths, or a
+     disk anything is built on (an old LVM volume group, a RAID array), and **never the installer's
+     own medium** — by what is mounted, and by its volume label, so also when the ISO was copied to
+     RAM; each with its size, model and how it is attached, and what is on it now;
+  3. asks for one, and to type that disk's name again to confirm that everything on it is erased —
+     nothing is written before that;
+  4. refuses while another disk has a file system labelled as the image's are (`nixos`, `ESP`: an
+     earlier NixOS, another ESP), which the installed system, finding its file systems by label,
+     could start from or grow instead; opens the chosen disk exclusively and checks it is still the
+     disk that was chosen (the kernel's `diskseq`, device number and size: a disk swapped for
+     another under the same name is refused, and so is a later opening by name — to read back,
+     find the partitions, mount, clear — of another), then writes the image to the whole disk and
+     reads it back to check every byte. The image's first MiB, its partition table, is written
+     last: the disk's start and end (an earlier table and its backup) are zeroed first and
+     everything else written and synced before it, so whatever stops the write — a power cut, a
+     reset, the process killed — the disk has no partition table, and no half-written system to
+     start from. A failure once writing began — writing, reading back, or detecting the hardware
+     below — clears the disk's partition tables (its start, the image's backup, the disk's end).
+     No key stops it mid-write: the terminal's signal keys are off (or nothing is offered),
+     Ctrl-Alt-Del starts nothing on the installer, and the power, reboot, suspend and hibernate
+     keys and the lid do nothing (logind ignores them: it would otherwise stop the installer
+     between the write and the hardware file, leaving a system without one) — for the installer's
+     whole life, so the power button does not turn it off at the disk menu either: holding it
+     down (the firmware's, not logind's) or answering the installer does. If the labels above
+     cannot be looked for (blkid failing), nothing is
+     written. Disks with sectors larger than 512 bytes are not offered: the image's partition
+     table is in 512-byte sectors;
+  5. detects this machine's hardware (`nixos-generate-config --show-hardware-config
+     --no-filesystems`, on the ISO only — installed machines have no installer tools, 37bed79) and
+     writes it, with the image's file systems, into the new disk's root as
+     `/var/lib/torq/install/hardware-configuration.nix`;
+  6. says to remove the installer and restart.
+  On the first boot from the disk the root partition grows to fill it (`boot.growPartition`, as now)
+  and first-boot setup runs unchanged, except that it takes the detected hardware file over the
+  image's generic one: change #1 records it in the config repo like any machine's.
+- **Not now:** installing beside another system or to a partition (whole disks only), disk
+  encryption, BIOS boot (UEFI only, as the image), Secure Boot (later, ROADMAP). Both architectures'
+  ISOs are built by CI; only x86_64 is installed and booted in a VM test here (ADR-030).
+- **Consequences:** One install path to keep correct, not two: what the ISO installs is what the
+  image tests already boot. A VM installed from the ISO gets a detected hardware file instead of the
+  image's — the same drivers or more. The ISO is larger than the image by its live system and the
+  firmware of any machine it may start on (about 1.9 GiB, near GitHub's 2 GiB a release file:
+  release.yml refuses one past it, by name). Hardware
+  detection is what NixOS's own installer does, so it is as good as NixOS's on any machine;
+  firmware a machine needs that NixOS does not detect is a setting to add afterwards
+  (`set hardware enableRedistributableFirmware true`). "Nobody can log in" is over the console and
+  the network: someone at the machine can edit the boot menu's kernel command line and start a
+  shell on the installer — as on any machine whose boot they control, and the installer holds
+  nothing (Secure Boot and a locked menu: later, ROADMAP).
+
+## ADR-032 — TorqOS is a skeleton: NixOS's tools gone, the base only what TorqOS runs, on a budget
+- **Context:** What TorqOS is: a CLI skeleton you install, boot, and give a configuration that
+  builds the actual system — configurations people pass around for every kind of machine. Whatever
+  that does not need should not be on the machine. A new machine's own system (the image's) was
+  1294 MB in 613 store paths, with 787 commands on its PATH, much of it NixOS's defaults and
+  plumbing rather than anything TorqOS runs: `nixos-rebuild` and NixOS's other tools for changing a
+  machine, the man pages and their tools, full git with its manuals, Perl and Python for NixOS's
+  own scripts, systemd's container-image importer with GnuPG and LDAP, and curl, htop and jq for
+  the shell.
+- **Decision:**
+  1. **No NixOS tools for changing a machine.** `nixos-rebuild`, `nixos-option`, `nixos-version`,
+     `nixos-install`, `nixos-enter`, `nixos-generate-config` and `nixos-build-vms` are not on a
+     TorqOS machine (the ISO installer keeps `nixos-generate-config`, on the ISO only, ADR-031).
+     The broker no longer uses `nixos-rebuild`: it does what `nixos-rebuild switch` did — `nix
+     build` the commit, `nix-env --set` the system profile, `switch-to-configuration switch` in a
+     transient unit of its own (`torq-switch`, so the switch outlives whatever started it) — as its
+     `commit confirmed` path already did. It still counts a switch in `nixos-rebuild`'s unit as
+     one it must not race (a system from before this).
+  2. **The base is what TorqOS itself runs.** git (the minimal build: the config repo's, read by
+     torqcli) and nano (`file edit`'s editor); no documentation, no systemd-importd; htop and jq
+     are packages a configuration adds. A configuration turns any of it back on. (curl stays on
+     the path: it is one of NixOS's core packages, assembled from several modules, and taking
+     one out of that list would mean restating all of NixOS's.)
+  3. **A budget.** `checks.x86_64-linux.size` fails when a new machine's system grows past its
+     budget (1280 MB): lowered as TorqOS sheds more, never raised to make a change fit without
+     saying why here.
+- **Kept, on purpose:** Perl (~58 MB), which NixOS's account script needs. NixOS's userborn (Rust)
+  would replace it, but does not fit TorqOS's accounts: a person's `hashedPasswordFile` that does
+  not exist is an error that fails userborn's whole run (userborn 2026-10 `main.rs`, `password.rs`),
+  where NixOS's script locks that one account — and in TorqOS a person without a password file is
+  ordinary (SSH keys only; an account just declared; "a file removed is a password removed",
+  modules/accounts.nix). A machine would boot with its accounts unmanaged. It also makes
+  `/etc/shadow` read-only, which the broker's `chpasswd` writes. Revisit if userborn locks a missing
+  file's account instead.
+- **Not this step:** Python (134 MB), which only systemd-boot's boot-entry writer needs: a small
+  Rust one of TorqOS's own, with its own ADR and tests, since a bootloader bug leaves a machine that
+  does not start. The nixpkgs tree (207 MB), which evaluates every configuration, setup's offline
+  included: kept, unless setup may need the network.
+- **Floor:** a machine that builds itself from a configuration keeps the kernel and its modules,
+  systemd, glibc, Nix and the nixpkgs tree. Trimming the kernel would mean every machine compiling
+  its own, with nothing from NixOS's cache (ADR-023); overriding big packages (systemd without its
+  importer, say) the same: options only.
+- **Consequences:** 1294 MB → 1228 MB and 613 → 516 store paths for a new machine (x86_64,
+  2026-11-03), Python still to go. Root can still build and switch with `nix`
+  and `switch-to-configuration` by hand: removing the tools removes the easy way around the broker,
+  not every way (limits on root: later, ROADMAP). Habits from NixOS (`nixos-rebuild switch`) fail
+  with "command not found" instead of the `/etc/nixos` guard's message; the guard stays for `nix`
+  itself. Tests that read JSON in their VMs bring their own jq.
+
+## ADR-033 — Python leaves with systemd-boot's installer: Lanzaboote now, Secure Boot later
+- **Status:** decided, 2026-11-03 (the owner: option 1); **deferred** the same day (the owner),
+  because its premise was false — see "Amended" at the end. The VM test it asked for first is
+  built and stays (`tests/boot.nix`); Lanzaboote comes with Secure Boot itself.
+- **Context:** Python (134 MB, a tenth of a new machine's system) is there for one thing:
+  systemd-boot's installer, NixOS's `systemd-boot-builder.py` (452 lines), which writes the boot
+  menu at each switch — the kernels and initrds onto the EFI partition, one entry per generation
+  and specialisation, `loader.conf` (default, timeout, editor), systemd-boot itself updated with
+  `bootctl`, old entries removed past `configurationLimit`. NixOS takes any other installer through
+  `boot.loader.external.installHook`, reading each generation's bootspec (`boot.json`).
+  docs/SECURITY-MODEL.md already chose Lanzaboote for owner-key Secure Boot (`torq.security.
+  secureBoot`, a TODO), and Lanzaboote's installer (`lzbt`, Rust) is itself such a replacement.
+- **Decision:** option 1. Lanzaboote (nix-community, Rust) is the boot-entry writer: its `lzbt`
+  replaces the Python installer at every switch, bundling each generation into a signed unified
+  kernel image under systemd-boot. The keys are the machine's own, made at setup and kept outside
+  the config repo; they protect nothing until the owner enrolls them in the firmware, which is the
+  Secure Boot work of later (SECURITY-MODEL, ROADMAP) — and then nothing migrates twice. Not option
+  2, because bootloader code is the last place to write TorqOS's own and then throw it away; not
+  option 3, because the 134 MB buys nothing a machine that will have Secure Boot needs.
+- **Options weighed:**
+  1. **Lanzaboote now, Secure Boot later (chosen).** Its installer replaces the Python one
+     (systemd-boot stays the boot menu, booting signed unified kernel images); setup generates
+     the machine's own keys (`autoGenerateKeys`), kept outside the config repo like passwords; the
+     owner enrolls them in the firmware when Secure Boot comes (later, ROADMAP) — the same layout
+     then, nothing to migrate twice. Costs: an input from outside nixpkgs (nix-community, tracking
+     nixos-unstable: pinned to TorqOS's nixpkgs with `follows`), built from source on each machine
+     (Rust, minutes) unless TorqOS's releases carry it prebuilt; keys that protect nothing until
+     enrolled; a change of boot-entry format on machines already installed (one switch, tested).
+  2. **TorqOS's own writer.** A small Rust program (`torq-boot`) doing what the Python one does for
+     TorqOS's case (one profile, no XBOOTLDR, no initrd secrets or extra files), same file names
+     and layout. Smallest and fully TorqOS's — and replaced by Lanzaboote when Secure Boot comes.
+  3. **Keep Python.** 134 MB, no work, no risk.
+- **Consequences:** a VM test that boots from a real EFI partition (NixOS's `useBootLoader`,
+  `useEFIBoot`) is written **before** the switch and must pass on both writers: the entries after
+  a switch, the default, a rollback by choosing an older entry, a `commit confirmed` rolled back by
+  a reboot, and the editor off; the image and ISO tests boot through it too. Then the input
+  (`lanzaboote`, `follows` TorqOS's nixpkgs; pinned by the weekly bump like nixpkgs), the module in
+  `modules/security.nix` (`boot.lanzaboote.enable`, keys generated at setup into
+  `/var/lib/torq/secureboot`, fenced from the tree), and the migration of installed machines (one
+  switch; `torq5` first). Each machine builds Lanzaboote itself until releases carry it prebuilt
+  (ADR-039's cache). The size budget comes down by what Python saved. A second reviewer on the
+  diff (docs/DRIVING.md): a bootloader bug leaves a machine that does not start.
+- **Amended (2026-11-03): deferred.** Built on a branch (`lanzaboote`, 63cf007, since deleted), it showed the
+  premise false: Python is not only the boot writer's — `growpart` (cloud-utils, the root grown
+  at the first boot, `boot.growPartition`) needs it too, so Lanzaboote saves none of the 134 MB,
+  and adds sbctl and lzbt (1228 → 1277 MB of the 1280 budget). Its fresh reviews found what
+  moving every machine would cost now: an installed machine's EFI partition (torq5's: 249 MiB,
+  122 MB free) cannot hold Lanzaboote's copies of every generation's kernel and initrd beside
+  NixOS's during the switch that moves it; the clean-up of the old writer's entries, as built,
+  could remove the only ones that start after a way back to NixOS's writer (a rollback past the
+  move); Lanzaboote itself does not test aarch64; each machine downloads a Rust toolchain to
+  build its stub. With no saving to set against that, the owner deferred it: Lanzaboote comes
+  with Secure Boot (SECURITY-MODEL, later), when keys are enrolled and it is worth its cost, and
+  the branch's lessons go with it (a free-space check before the move; a clean-up that removes an
+  entry only when its files are gone; x86_64 first). Python leaves when the root is grown by
+  systemd-repart instead of growpart — its own item, and then the boot writer is the only thing
+  left needing it. Until then the menu is NixOS's writer's, and `tests/boot.nix` (the check
+  `boot`) holds it to what this ADR asked of any writer: the entries after a switch, the default,
+  an older entry chosen at the menu, a commit confirmed rolled back by a power cut, the editor off.
+## ADR-034 — One base, two faces: the sysadmin's server as code, and a person's machine an AI can drive
+- **Context:** ADR-019 narrowed TorqOS to a thin, CLI-only OS and deferred the desktop and the AI,
+  so the configuration layer could be built first. It is built: the trust loop (M1), torqcli
+  (M1.5), the image, setup, signed releases and the ISO (M2). But the reason TorqOS was started
+  was never a server. It was an operating system where an AI can be given deep, powerful access
+  *safely*: fix a driver, build an application a person asks for, watch a desktop while a program
+  is tried — with every change recorded and undoable. What was built is exactly the substrate that
+  needs: generations, one writer, the ledger, tiers, a typed tree over every setting, `commit
+  confirmed`. What it was being aimed at — an administrator typing torqcli — is one of its two
+  users, not the only one. The owner (2026-11-03) wants both: *a sysadmin's dream, servers defined
+  in code in git*, and *the laptop or desktop an AI drives*.
+- **Decision:** TorqOS has **one base and two faces.**
+  1. **The server:** a machine defined in code, in git, driven by `torqcli` and rebuilt from its
+     repository anywhere (ADR-036). Everything built so far; nothing taken away.
+  2. **The desktop or laptop:** the same base with a desktop *configuration* loaded on it, where
+     the person talks to an agent, the agent proposes, and the person approves. The desktop is a
+     configuration, not a product: a config repo (`torqos-desktop`: the compositor, a terminal, the
+     agent, a few applications) loaded onto the skeleton (ADR-032) like any configuration, with the
+     same gate, ledger and rollback. `modules/desktop.nix` becomes that configuration's modules.
+  What follows from that:
+  - **The AI layers move from "later" to next** after M2 (ROADMAP M5; AI-LAYER.md): doctor mode
+    (read, explain, propose nothing), then proposals, then session trust. They need the trust work
+    of ADR-035 first, because an agent needs an identity the kernel vouches for.
+  - **torqcli is the agent's interface first, the administrator's second.** ADR-025's single
+    sources — one typed grammar, `commit check`, every command saying what it did — are what an
+    agent drives. Its human polish (the walk of every `?`, usability reviews) stays, lower.
+  - **The thin base stays thin** (ADR-032): a small base serves both faces; a desktop adds its own
+    size as a configuration, not as the base.
+  - **Three scenarios are the acceptance tests** of the laptop face, each a VM test when built:
+    (a) *fix my wifi* — a system-tier proposal applied with `commit confirmed`, reverting itself if
+    the machine does not come back; (b) *build me an application* — written in the person's home
+    (free), installed through the tree at user tier (ADR-037), undone with `rollback`; (c) *watch
+    the desktop* — agent tooling over the compositor's screenshot and input protocols, needing the
+    person's session and nothing of the broker's.
+  ADR-019's **architecture stands; its scope is reversed.** Still out: laptop-*specific* design,
+  touch-first, reference hardware, a smoothness target. The desktop is a configuration, not
+  hardware work.
+- **Consequences:** VISION, ROADMAP, ARCHITECTURE, AI-LAYER, CLAUDE.md rewritten (2026-11-03).
+  ADR-035–039 record what the laptop face needs that the server face did not force: closing the
+  root gap, the config repo's remote, applications, data, upstreams. The skeleton and ISO work
+  continue unchanged — both faces want them. Nothing is deleted; the server face is the base the
+  laptop face is loaded on.
+
+## ADR-035 — Closing the root gap: the account, the door, and the record (proposed)
+- **Status:** proposed, 2026-11-03; the plan for M3. The order below is the build order.
+- **Context:** Root is root: no program can tell a person from an AI typing in a root shell, and
+  TorqOS's model already says so (SECURITY-MODEL, "Root, the owner, and an AI the owner runs").
+  Today every guarantee is *visibility*, not *enforcement*: the broker trusts `--actor` and
+  `--approved-by` as given (KNOWN-GAPS 4, 6a); the ledger is unkeyed and a root writer can rewrite
+  the chain (2); `sudo` is needed for daily work, so a root shell is ordinary and silent. The audit's
+  N8 and N9 are this: a tty check is not a person, and signing on the machine cannot keep root out.
+  The question to answer is not "is this a human?" — it is **"which account is this, and did it
+  come through a door that rings?"**
+- **Decision:** three levers, each enforceable.
+  1. **Identity is the account.** The broker becomes a service on a Unix socket and takes its
+     caller's identity from the kernel (`SO_PEERCRED`: uid, pid), never from a flag. The agent runs
+     as its own account (`torq-agent`), sandboxed, no sudo, no shell: whatever arrives from that uid
+     *is* the agent. Whatever arrives from the owner's uid is the owner — what they run in their
+     own terminal is theirs, as a browser extension is. `torqcli` needs no sudo. A system-tier
+     commit asks for the owner's **password** at the terminal (on a desktop: a dialog) — the one
+     thing a program in the owner's shell does not have; that is the human gate.
+  2. **Root rare, and loud.** With torqcli off sudo, the owner can go weeks without root. Then
+     **strict mode** (SECURITY-MODEL): sudoers allows TorqOS's own commands and one more, `torq
+     break-glass`, which writes a ledger entry *first* (who, when, the reason), anchors it (3), and
+     only then gives a shell. Root still exists; it cannot be reached quietly. The agent cannot press
+     it: wrong uid, no sudo, no password.
+  3. **The record lives where root cannot reach.** After each entry the ledger's head goes off the
+     machine — to the config repo's remote (ADR-036), as its own ref; with the remote refusing
+     force-pushes, it is append-only in practice. Root can rewrite local history; the anchor
+     disagrees, and `verify` says so. Signing entries on the machine is not the defence (N9): a key
+     on the box is a key root can read, a TPM key one root can use. What root changes on the machine
+     does not survive a rebuild from the configuration (the store is read-only; `request system
+     repair`), and data it deletes comes back from snapshots (ADR-038).
+- **Not:** preventing root. The only OS that does is one with no shell at all (Talos); strict mode
+  without break-glass is that, and stays an owner's option for later, once every task an owner
+  needs is a torqcli command.
+- **Consequences:** Closes KNOWN-GAPS 4 and 6a (identity), 2 (the anchor), restates N8. The
+  broker gains a socket service and loses `sudo` as its door; `torq-broker` under sudo stays for
+  dev mode and recovery. Measured boot (SECURITY-MODEL) and data snapshots come after, as planned.
+  What TorqOS can then say, truthfully: *the agent cannot get root; the owner can, but not
+  silently; and what root does here cannot rewrite the record elsewhere or outlive a rebuild.*
+
+## ADR-036 — The config repo's remote: the machine is a URL (proposed)
+- **Status:** proposed, 2026-11-03. Keeps ADR-004's default (local, never pushed) and adds the
+  remote as a setting; answers VISION's two "far future" questions.
+- **Context:** The config repo is the machine minus its data: `flake.nix`, `flake.lock`, the tree's
+  JSON, attached Nix files, `hardware-configuration.nix`, `users/<name>/*.json`. Secrets are kept
+  out *by construction* (modules/settings-fence.nix refuses every password form), not by care. So
+  the repo can leave the machine without exposing anything but what the machine runs: packages,
+  services, user names, public SSH keys, the host name — a private repo, then. The owner's idea:
+  point a new install at a repository and the machine rebuilds; and the same remote is the ledger's
+  anchor (ADR-035).
+- **Decision:**
+  - **Adopt at setup.** First-boot setup asks: *a fresh machine, or from a repository?* Given a URL
+    and a credential it clones, checks HEAD's signature against the owner's key (enrolled as
+    `release-signers` is, ADR-028: trust on first clone, pinned after), takes the repository's tree
+    and files but **this machine's hardware file** (the installer's detected one, ADR-031 — hardware
+    never travels, and `load override` keeps the local one too), asks for the owner's password
+    (it cannot come from the repo; SSH keys do, so a keys-only machine comes back whole), and
+    builds: change #1, as any setup.
+  - **Push after every applied change**, the ledger as its own ref (`refs/torq/ledger`). Branch
+    protection on the remote (no force-push) makes it append-only in practice. `verify` compares
+    the local head with the remote's; a difference is an alarm.
+  - **Pull is a proposal, never an apply.** A commit on the remote the machine does not have shows
+    in `show system remote`; `request system pull` loads it into the candidate; the person reads
+    `show | compare` and commits. Nothing from the remote is ever applied unasked — that would be
+    the bypass the whole design exists to prevent, and whoever held the credential would own every
+    machine.
+  - **The credential** lives in the broker's state directory: root-readable, which the model
+    allows; unreadable by the agent's account. A deploy key scoped to the one repository,
+    push-capable. Root with it can push junk commits (visible, reversible), not rewrite history.
+  - **One repository per machine.** Sharing between machines is `save` / `load` (S5), which exists.
+    A shared base with per-host overlays — where fleets end up — is a later ADR.
+  - The `torq` input must be the releases URL, never `path:` (a dev machine's source means nothing
+    elsewhere).
+- **Consequences:** *Your machine is a URL*: disk dies, new install, same URL, identical machine
+  minus data (ADR-038). Setup gains an online path (the default stays offline). New: `torq remote
+  …` settings, `request system pull`, the remote in `show system alarms`. ADR-004's "network is
+  download-only" becomes "download-only until the owner names a remote".
+
+## ADR-037 — Applications: a ladder, every rung declared (proposed)
+- **Status:** proposed, 2026-11-03; the design for M4's applications. Rung 3 needs its own small
+  design before the agent builds anything.
+- **Context:** A desktop needs Firefox and LibreOffice, a vendor's proprietary application, and what
+  the person or the agent builds. An installer that puts a binary somewhere and on PATH does not
+  work on NixOS (no `/lib`: the binary cannot find its libraries — KNOWN-GAPS, "Dev mode", `claude
+  update`) and goes unrecorded even when it does. "Applications" are three things: the application
+  (the tree's), its settings and data (the home's, never the tree's), and an application built here.
+- **Decision:** a ladder; the repository is the whole truth on every rung.
+  1. **nixpkgs, in the tree** — the default. `users <name> packages`, `environment systemPackages`;
+     pinned by `flake.lock`, byte-reproducible, rolled back with the system. Most of a desktop.
+  2. **Flatpak, declared in the tree** — the escape hatch, for what nixpkgs lacks, lags on, or a
+     vendor supports only there: `users <name> flatpaks [ com.spotify.Client ]`, reconciled at each
+     switch (a module like nix-flatpak's, exposed like any option), never `flatpak install` by hand.
+     The repository records the application and its remote, not its bytes — acceptable because a
+     Flatpak is a leaf nothing depends on, sandboxed, with its own rollback.
+  3. **Built here** — a package from a repository of the person's own: the source in their home
+     (free, the agent iterates there), a small `flake.nix` the agent writes, and the tree pointing
+     at it (`users <name> projects [ ./projects/foo ]`, or a git URL). User tier, so build, install,
+     test and undo need no approval and each is a ledger line. Today the tree takes nixpkgs names
+     only: this rung is the design to do.
+  **Never:** `curl | sh`, self-updaters, AppImage, Snap — refused where TorqOS can see them
+  (`set` of a path outside the repository already is), documented where it cannot.
+  Unfree software stays as it is: allowed by name (modules/unfree.nix), on the person's machine by
+  the person's choice; never in an image (ADR-039).
+- **Why not Flatpak for everything** (Silverblue's answer): it loses reproducibility for the thing
+  most worth reproducing, the agent cannot easily build one (a Nix package is twenty lines in the
+  language it already uses), and nothing is shared between applications on disk.
+- **Consequences:** the desktop configuration turns on `services.flatpak` and the portal for its
+  compositor; disk for runtimes; the agent builds Nix packages, not Flatpaks. The repository shows
+  every application on the machine, by rung.
+
+## ADR-038 — Data: what a rebuild does not bring back, and what TorqOS does about it (proposed)
+- **Status:** proposed, 2026-11-03. The snapshot decision belongs with the installer (ADR-031).
+- **Context:** The repository rebuilds the machine, not the person's life on it. A laptop's data is
+  five kinds: documents and media (catastrophic to lose); application settings (annoying);
+  secrets — SSH and GPG keys, saved passwords, tokens (serious, and never in the repository);
+  caches (nothing); and, on servers, service data in `/var/lib` (catastrophic). ADR-004's
+  "optional user-chosen encrypted backup" is this decision.
+- **Decision:**
+  - **Documents are a sync service's**, declared in the tree so a rebuilt machine comes back
+    syncing — `services syncthing` (NixOS's own, peer-to-peer, no cloud) or a mount of OneDrive or
+    the like (rclone). TorqOS does not build one: it is the honest stance of every OS that treats
+    the machine as disposable (ChromeOS, macOS with iCloud, Silverblue).
+  - **A declared backup.** NixOS's `services.restic.backups` as the tree's backup of `/home` and
+    `/var/lib` to any target (S3, a NAS, SFTP, a disk), encrypted; its key lives where passwords do,
+    outside the repository. `request system restore` on a rebuilt machine; setup's from-a-repository
+    path (ADR-036) offers it. A rebuild is then two steps, both ledgered: the repository, then the
+    restore.
+  - **Local snapshots.** On a snapshot-capable file system (btrfs, the installer's choice at
+    partition time), the broker snapshots `/home` and `/var/lib` before each commit, and `rollback`
+    offers the data too: the agent's migration of a database undone with the service. This is also
+    the root gap's "what a root process deletes" (ADR-035, ROADMAP).
+  - **Secrets never enter the repository** (the fence); a password manager is recommended for
+    application credentials; public keys are in the repository already, private ones in the
+    encrypted backup or regenerated and re-enrolled. There is no design without one secret in a
+    human's head — the backup passphrase — and TorqOS makes it exactly one.
+  - **Caches:** nothing.
+- **Consequences:** A laptop's whole state is three pointers — a repository URL, a backup location,
+  a sync account — and the machine comes back from them: system bit-for-bit, applications,
+  settings, data. To build: `request system restore`, the restore step in setup, the snapshot hook
+  in the broker, the installer's file-system choice. Everything else is NixOS options the tree
+  already has, plus telling people the honest thing.
+
+## ADR-039 — Upstreams: what TorqOS owes, and what it depends on
+- **Context:** TorqOS redistributes images made of other people's software: nixpkgs and NixOS's
+  modules (MIT), the kernel and git (GPLv2), bash and coreutils (GPLv3), systemd and glibc (LGPL),
+  redistributable firmware. It fetches from the NixOS Foundation's binary cache and GitHub
+  repository; a desktop's applications come from Flathub, an independent nonprofit. None of these
+  licences restrict what the software is used for — field-of-use limits are not open source — and
+  "a different use case" owes nothing. *Distributing binaries* does. This is a maintainer's map,
+  not legal advice.
+- **Decision:**
+  - **A source statement on every release** (release.yml): the tag, the nixpkgs commit, that
+    `nix build` of them builds the same system from the same sources (not the same bytes: an image
+    carries its own copy of its source), and that every package's source is pinned there by hash.
+    The sources themselves are upstream's, fetched by those hashes: a mirror of them is for when
+    TorqOS has users (below), and until then the GPL's "corresponding source" rests on them.
+  - **Nothing unfree in an image or the ISO**, checked by CI: `torq.unfree` is off in `hosts/image`
+    and `hosts/installer`, and a check fails if anything would let a package nixpkgs marks unfree
+    into them (what it covers and cannot see: Consequences).
+    Dev mode's Claude Code never ships. On a person's machine, what *their* configuration fetches
+    from a vendor is their download, not TorqOS's distribution: the image is TorqOS's to answer
+    for; the configuration is the owner's. Firmware stays `enableRedistributableFirmware`'s set —
+    the word is the legal term.
+  - **Trademarks:** "a NixOS derivative" (ADR-029), never NixOS or its logo; nixpkgs' Firefox
+    unmodified (Mozilla's permission covers it), rebranded if ever changed.
+  - **Owner keys for Secure Boot** (SECURITY-MODEL) stay the plan: GPLv3's anti-tivoisation
+    permits exactly that and forbids project-held boot keys.
+  - **The dependencies are a bet, named.** The code cannot be withdrawn (MIT, pinned, and the
+    nixpkgs tree is inside every image). The *services* can change: `cache.nixos.org` (ADR-023's
+    bet) and `github.com/NixOS/nixpkgs` have no SLA, and the cache's cost is a recurring Foundation
+    concern; Flathub serves every desktop distribution and gates no client. If the cache went away
+    nothing breaks at once — Nix builds from source, slowly. When TorqOS has users: mirror nixpkgs
+    to `netstacks`, a caching proxy in front of the cache (which is also where TorqOS's own pieces
+    get prebuilt, the footnote ADR-023 allowed for), a source mirror. And send fixes upstream:
+    projects do not cut off the people who help.
+- **Consequences:** One paragraph in release.yml and one CI check now; the mirrors when there is
+  anyone to serve. ADR-023 gains the footnote. KNOWN-GAPS lists the bet. Built 2026-11-03: the
+  release notes' **Source** paragraph (the tag, the nixpkgs commit, the command that builds the
+  image from them), and `checks.<system>.free` — nothing lets an unfree package into the image or
+  the ISO, on both platforms: none of nixpkgs' settings that would (`torq.unfree`, `allowUnfree`,
+  `allowUnfreePackages`, `allowlistedLicenses`, `handleEvalIssue`), in them or a specialisation
+  of them; no package set from outside; no second nixpkgs reached in TorqOS's own Nix
+  (`pkgs.path`, `<nixpkgs>`, NixOS's modules' parent, however spelled), and no licence set but
+  its own packages' (a package relabelled free would pass nixpkgs' check). nixpkgs
+  refuses an unfree package otherwise, so that is the closure's licence check, as far as nixpkgs'
+  licences go: a package with no licence check (a vendor's file fetched as it is) it cannot see,
+  and redistributable firmware nixpkgs counts as free, which the ISO carries (linux-firmware and
+  others, `enableRedistributableFirmware`) and the image does not. It checks itself: each of the
+  eight ways planted in the image is caught. (Review of 2026-11-03: the first version checked only
+  `torq.unfree`.)

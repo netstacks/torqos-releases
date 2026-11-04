@@ -89,8 +89,11 @@ in
           MaxAuthTries = lib.mkDefault 3;
           AllowUsers = lib.mkIf (owner != null) (lib.mkDefault [ owner ]);
         };
-        # Password guessing: an address that keeps failing is blocked for a while.
+        # Password guessing: an address that keeps failing is blocked for a while. sshguard reads the
+        # journal by the name a program logs under; OpenSSH (9.8 on) logs logins, failed ones
+        # included, as `sshd-session`, not `sshd`, which is all NixOS has it read (tests/ssh.nix).
         services.sshguard.enable = lib.mkDefault (ssh.settings.PasswordAuthentication == true);
+        services.sshguard.services = lib.mkDefault [ "sshd" "sshd-session" ];
       })
 
       # Podman: rootless use needs no root API socket (group `podman`, root-equivalent).

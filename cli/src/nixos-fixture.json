@@ -35,6 +35,14 @@
       "releases"
     ],
     [
+      "torq",
+      "branding"
+    ],
+    [
+      "torq",
+      "installer"
+    ],
+    [
       "nixpkgs"
     ],
     [

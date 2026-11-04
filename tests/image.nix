@@ -89,6 +89,9 @@ pkgs.testers.runNixOSTest {
 
   nodes.machine = { lib, ... }: {
     imports = [ self.nixosModules.default ];
+    # jq, to read the configuration's JSON (not on a TorqOS machine itself: ADR-032); the
+    # specialisation setup switches to inherits it.
+    environment.systemPackages = [ pkgs.jq ];
     # The image: setup on its console, its own TorqOS as the source a new machine starts from.
     torq.setup.enable = true;
     torq.setup.source = self.sourceInfo;
@@ -126,8 +129,11 @@ pkgs.testers.runNixOSTest {
         try:
             machine.wait_until_succeeds(f"grep -aqF {shlex.quote(text)} /dev/vcs1", timeout=timeout)
         except Exception:
-            # What the screen shows instead, and what runs on it.
-            print(machine.execute("fgconsole; tr -s ' ' < /dev/vcs1; echo; systemctl status --no-pager torq-setup; journalctl -b --no-pager -u torq-setup | tail -20")[1])
+            # What the screen shows instead, what runs on it, and when the console and setup came up
+            # (seconds from boot).
+            print(machine.execute("fgconsole; tr -s ' ' < /dev/vcs1; echo; systemctl status --no-pager torq-setup; "
+                "journalctl -b --no-pager -o short-monotonic -u torq-setup -u systemd-udev-settle -u systemd-udev-trigger -u systemd-vconsole-setup -u getty@tty1; "
+                "journalctl -b --no-pager -o short-monotonic -k --grep 'Console|fbcon|drm'")[1])
             raise
 
     def answer(text):
@@ -135,6 +141,21 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the image boots to setup, with nobody to log in as and nothing listening"):
         on_console("Welcome to TorqOS. This machine has no configuration yet")
+        on_console("Machine name [torq]:")
+        # Under TorqOS's wordmark; and the machine says it is TorqOS, on NixOS (modules/branding.nix).
+        on_console("set  |  commit  |  rollback")
+        machine.succeed(". /etc/os-release && test \"$NAME $ID $ID_LIKE\" = 'TorqOS torqos nixos' && test \"$VERSION_ID\" = '${self.packages.${pkgs.stdenv.hostPlatform.system}.torq.version}'")
+        # The base is what TorqOS runs and nothing else (ADR-032): no htop or man pages (jq this
+        # test's own machine adds; curl is one of NixOS's core packages; the NixOS tools are the
+        # trust-loop test's check).
+        for tool in ["htop", "man"]:
+            machine.fail(f"command -v {tool}")
+        # A graphics driver taking the console over late can lose what was on the screen, and
+        # changes its size: setup asks again. (The x86_64 VM's bochs-drm may do it by itself, or not:
+        # done here, on purpose.)
+        machine.succeed("printf '\\033[H\\033[2J' > /dev/tty1 && stty -F /dev/tty1 rows 30 cols 100")
+        on_console("Welcome to TorqOS. This machine has no configuration yet")
+        on_console("Machine name [torq]:")
         machine.succeed("systemctl is-active torq-setup")
         machine.fail("systemctl is-active getty@tty1")
         machine.succeed("passwd -S root | grep -q ' L '")
@@ -175,6 +196,12 @@ pkgs.testers.runNixOSTest {
         machine.succeed("jq -e '.user == \"alice\"' /var/lib/torq/config/nixos/torq.json")
         # Its TorqOS: the image's own, in the store.
         machine.succeed("grep -q 'torq.url = \"path:/nix/store/' /var/lib/torq/config/flake.nix")
+        # An SSH login at a terminal is greeted with the mark and what the machine is
+        # (modules/branding.nix); one without a terminal (scp, `ssh host command`) is not.
+        greeted = machine.succeed("su - alice -c \"script -qec 'env SSH_CONNECTION=\\\"10.0.2.2 1 10.0.2.15 22\\\" zsh -lic true' /dev/null\"")
+        assert "osydhhdhhdhys" in greeted and "TorqOS" in greeted and "Generation" in greeted, greeted
+        quiet = machine.succeed("su - alice -c \"env SSH_CONNECTION='10.0.2.2 1 10.0.2.15 22' zsh -lc 'echo done'\" < /dev/null")
+        assert quiet.strip() == "done", quiet
 
     def as_alice(cmd, ok=True):
         run = machine.succeed if ok else machine.fail

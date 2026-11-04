@@ -537,7 +537,7 @@ The broker stays small; its additions for this model:
   without the file a root broker refuses to run. It clears its caller's environment (keeping only
   `TERM`; `LANG=C.UTF-8`), sets `PATH` and `HOME` from the file, tells git to read no global or
   system configuration, works from `/` (path arguments made absolute first) with umask 022. The
-  fixed `PATH` starts with store paths of nixos-rebuild, nix, git, coreutils, bash and systemd, so a
+  fixed `PATH` starts with store paths of nix, git, coreutils, bash and systemd, so a
   change that drops one of them from the system cannot break its own `revert`; it takes the place
   of a sudo `secure_path`. The CLI calls sudo and the broker by absolute path. Without root
   (tests), flags apply.

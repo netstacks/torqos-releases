@@ -1,0 +1,10 @@
+// Cloudflare Workers deploy of the built docs (static files only, no code).
+// Build first with `mkdocs build`, which writes ./site.
+{
+  "name": "torqos-docs",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./site",
+    "not_found_handling": "404-page"
+  }
+}

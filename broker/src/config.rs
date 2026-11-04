@@ -67,7 +67,16 @@ pub struct Requested {
 /// shell-quoted value (`'/var/lib/torq/config'#torq` is still one word): never quote them here.
 /// `--no-update-lock-file`: the committed flake.lock is what was approved; one that does not match
 /// flake.nix fails the build, never quietly re-locked (and fetched) as root.
-pub const REBUILD: &str = "nixos-rebuild switch --no-update-lock-file --flake {flake}#torq";
+/// What `nixos-rebuild switch` did, without it (ADR-032): build the commit (kept from garbage
+/// collection by a link while it is built), make it the system profile (the boot default), and
+/// switch to it in a transient unit of its own (`systemd-run --pipe`: the switch outlives whatever
+/// started it — an SSH session restarted mid-switch, say — and its output comes back here).
+pub const REBUILD: &str = concat!(
+    "d=$(mktemp -d) && trap 'rm -rf \"$d\"' EXIT",
+    " && sys=$(nix build --no-update-lock-file --out-link \"$d/system\" --print-out-paths {flake}#nixosConfigurations.torq.config.system.build.toplevel)",
+    " && nix-env -p /nix/var/nix/profiles/system --set \"$sys\"",
+    " && systemd-run --collect --no-ask-password --pipe --quiet --service-type=exec --unit=torq-switch --wait \"$sys/bin/switch-to-configuration\" switch"
+);
 /// `{link}`: a GC root for the built system until it settles (confirmed or rolled back).
 pub const BUILD: &str = "nix build --no-update-lock-file --out-link {link} --print-out-paths {flake}#nixosConfigurations.torq.config.system.build.toplevel";
 pub const ACTIVATE: &str = "{system}/bin/switch-to-configuration test";
@@ -236,7 +245,7 @@ mod tests {
         Settings {
             repo: "/var/lib/torq/config".into(),
             state_dir: "/var/lib/torq/state".into(),
-            rebuild: "nixos-rebuild switch --no-update-lock-file --flake {flake}#torq".into(),
+            rebuild: REBUILD.into(),
             build: BUILD.into(),
             activate: ACTIVATE.into(),
             boot: BOOT.into(),

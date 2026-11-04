@@ -7,7 +7,7 @@ boot.
 ## From download to a running machine
 
 1. **The project builds a release** (ADR-028): the images (`torqos-<arch>.qcow2`,
-   `torqos-<arch>.vmdk.gz`; later an ISO), their checksums (`SHA256SUMS`), and a signature of that
+   `torqos-<arch>.vmdk.gz`, and the installer `torqos-<arch>.iso`), their checksums (`SHA256SUMS`), and a signature of that
    file made with the TorqOS release key (`SHA256SUMS.sig`), with the key (`allowed_signers`).
    Plain files on the release page of `netstacks/torqos-releases`: no service.
 2. **Someone downloads and (optionally) checks it**, with OpenSSH and coreutils:
@@ -66,12 +66,39 @@ small (about 5 GB): give the VM a bigger one, and the root file system grows to 
 
   *Tried on ESXi 8.0 U3 (2026-11-02): boots to setup, its disk on PVSCSI, network VMXNET3, EFI.*
 
+### Real hardware: the ISO installer (ADR-031)
+
+`torqos-<arch>.iso` (`nix build .#iso`) puts the same image on a real machine's disk. It starts on
+UEFI machines only, as the image does (turn off Secure Boot: ROADMAP, later).
+
+1. Write it to a USB stick of 2 GB or more, as it is — it is not a file to copy onto the stick:
+   `sudo dd if=torqos-x86_64-linux.iso of=/dev/sdX bs=4M conv=fsync` on Linux (or any tool that
+   writes a disk image raw: balenaEtcher, Rufus in DD mode). Everything on the stick is erased.
+2. Start the machine from the stick (its firmware's boot menu). The console shows the installer: no
+   login, nothing listening.
+3. It lists the disks TorqOS can go on — whole disks only, at least the image's size (about 5 GB),
+   never the stick it started from — each with its size, how it is attached and what is on it now.
+   Choose one, then type its name again (`nvme0n1`, `sda`): **everything on that disk is erased**.
+   Nothing is written before the name is typed.
+4. It writes TorqOS to the disk, reads it all back to check it, and detects the machine's hardware
+   (NixOS's own `nixos-generate-config`: the drivers, firmware and microcode this machine needs),
+   leaving that on the new disk.
+5. Remove the stick and restart. The disk grows to its full size and first-boot setup runs, as on
+   the image; change #1 records the detected hardware as the machine's `hardware-configuration.nix`.
+
+Not yet: installing beside another system or to one partition, disk encryption, BIOS-only machines.
+Firmware a machine needs that NixOS did not detect is one setting afterwards:
+`set hardware enableRedistributableFirmware true`.
+
 ## What is in the image
 
 Only what a TorqOS machine needs: Linux and systemd; Nix, git and nixpkgs's source, with which the
 machine builds itself from its configuration (ADR-019); TorqOS (torqcli, the broker, the shell); and
-a few tools (curl, htop, jq, nano). No NetworkManager (systemd-networkd, DHCP on wired interfaces),
-no manuals but man pages. About 1.5 GB installed; the download is compressed (about 730 MB).
+nano, `file edit`'s editor, with NixOS's core commands (coreutils, curl, ssh and the like). git is
+its minimal build; there are no man pages or other manuals, no htop or jq (a configuration adds
+them: `set environment systemPackages [ htop ]`), and no NixOS tools for changing a machine — the broker builds and switches (ADR-032). No
+NetworkManager (systemd-networkd, DHCP on wired interfaces). About 1.2 GB installed; the download
+is compressed.
 
 ## Where a machine's TorqOS comes from
 
@@ -136,7 +163,8 @@ Next:
    typed on the console, records change #1; the first update moves the machine to signed
    releases, served over HTTPS; a release the key did not sign is refused. (Commits and
    rollbacks: tests/trust-loop.nix.)
-8. Then the ISO for real hardware (disk choice added).
+8. The ISO installer for real hardware (ADR-031): the image, written to a disk chosen and confirmed
+   by name, read back, with the machine's detected hardware for setup (tests/installer.nix).
 
 Known: setup runs on the first text console (tty1) only. A VM started with a serial console alone
 shows login prompts there, with no account to log in to: give it a display (UTM does by default).

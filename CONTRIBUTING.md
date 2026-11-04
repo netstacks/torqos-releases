@@ -28,3 +28,27 @@ already made.
 Read `CLAUDE.md` (how the project works and its rules) and `docs/DECISIONS.md`. In short: no
 `unsafe` and no dead code (the compiler forbids them); every security or reversibility claim has a
 test that would fail if it broke; `docs/` changes with the behaviour it describes.
+
+## Releasing (maintainers)
+
+A release is a tag on `main`; `.github/workflows/release.yml` does the rest (ADR-028): it checks the
+tag is the source's version, runs every test, builds the images and the ISO for both architectures,
+and only then publishes the source to `netstacks/torqos-releases` (signed, tagged, `stable` moved)
+and a GitHub Release with the files and their signed checksums.
+
+```sh
+scripts/bump-version 0.3.0 --release      # bump and commit if needed, check, ask, tag v0.3.0, push
+scripts/bump-version 0.3.0-rc1 --release  # a pre-release of 0.3.0 first
+```
+
+`--release` refuses before it changes anything unless: you are on `main` with nothing uncommitted,
+`main` is GitHub's, CI has not failed there, the tag is not taken, and a stable version is newer
+than the last stable tag. It then shows what it will push and asks you to type the tag (`--yes`
+skips the question); a wrong answer undoes its version commit. Without `--release`,
+`scripts/bump-version 0.3.0 [--commit]` only sets the version, for a release made by hand
+(`git tag -a v0.3.0 -m "TorqOS v0.3.0" && git push origin v0.3.0`).
+
+A tag with a hyphen (`v0.3.0-rc1`) is a pre-release: everything runs and is published, but `stable`
+does not move, so no machine updates to it. The source carries `0.3.0`; `-rc1` is the tag's alone.
+A tag that is not the source's version is refused before anything runs. A release that fails is not
+retagged: fix it and tag the next patch version.

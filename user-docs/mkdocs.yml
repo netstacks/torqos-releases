@@ -1,0 +1,92 @@
+# TorqOS user documentation.
+#
+# Only the pages in user-docs/pages/ are published. The design and development
+# documents in docs/ are never read by this build.
+site_name: TorqOS Documentation
+site_description: Install, configure and run TorqOS, the operating system that is its configuration.
+docs_dir: pages
+site_dir: site
+site_url: https://docs.torqos.org/
+repo_url: https://github.com/netstacks/torqos-releases
+repo_name: torqos-releases
+edit_uri: ""
+copyright: TorqOS · Apache License 2.0 · Built on NixOS
+
+theme:
+  name: material
+  logo: assets/logo.svg
+  favicon: assets/favicon.svg
+  font: false
+  palette:
+    - scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+    - toc.follow
+
+extra:
+  generator: false
+  social:
+    - icon: material/web
+      link: https://torqos.org
+      name: torqos.org
+    - icon: fontawesome/brands/github
+      link: https://github.com/netstacks/torqos-releases
+      name: TorqOS releases on GitHub
+
+extra_css:
+  - stylesheets/torqos.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Install: start/install.md
+      - First-boot setup: start/first-boot.md
+      - Your first session: start/first-session.md
+  - Guide:
+      - Using torqcli: guide/torqcli.md
+      - The configuration: guide/configuration.md
+      - Commit and roll back: guide/commit.md
+      - Users, passwords and SSH: guide/users-ssh.md
+      - Updates: guide/updates.md
+      - History and health: guide/history.md
+  - Reference:
+      - Commands: reference/commands.md
+      - Security defaults: reference/security.md
+      - Troubleshooting: reference/troubleshooting.md
+  - torqos.org ↗: https://torqos.org

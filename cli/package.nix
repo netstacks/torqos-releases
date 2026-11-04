@@ -13,7 +13,8 @@ in
 
 rustPlatform.buildRustPackage {
   pname = "torq";
-  version = "0.1.1";
+  # One place: Cargo.toml (scripts/bump-version sets it).
+  version = (lib.importTOML ./Cargo.toml).package.version;
   src = lib.cleanSource ./.;
   cargoLock.lockFile = ./Cargo.lock;
 

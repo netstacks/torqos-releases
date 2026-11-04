@@ -1,0 +1,68 @@
+/* TorqOS brand colours and type for Material for MkDocs. */
+@font-face { font-family: "Space Grotesk"; src: url("../assets/fonts/space-grotesk-latin-wght-normal.woff2") format("woff2"); font-weight: 300 700; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("../assets/fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2"); font-weight: 100 800; font-display: swap; }
+:root {
+  --md-text-font: "Space Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --md-code-font: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+[data-md-color-primary="custom"] {
+  --md-primary-fg-color: #E2620B;
+  --md-primary-fg-color--light: #FF7A1A;
+  --md-primary-fg-color--dark: #b84a00;
+  --md-primary-bg-color: #ffffff;
+}
+[data-md-color-accent="custom"] {
+  --md-accent-fg-color: #E2620B;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-hue: 220;
+  --md-default-bg-color: #101216;
+  --md-default-fg-color--light: #8A93A3;
+  --md-code-bg-color: #15171B;
+  --md-typeset-a-color: #FF7A1A;
+  --md-accent-fg-color: #FF7A1A;
+}
+[data-md-color-scheme="slate"][data-md-color-primary="custom"] {
+  --md-primary-fg-color: #08090b;
+  --md-primary-bg-color: #ECEDEF;
+}
+[data-md-color-scheme="slate"] .md-tabs { background-color: #08090b; border-bottom: 1px solid #22252b; }
+[data-md-color-scheme="slate"] .md-header { border-bottom: 1px solid #22252b; box-shadow: none; }
+[data-md-color-scheme="slate"] .md-tabs__link--active,
+[data-md-color-scheme="slate"] .md-tabs__item--active .md-tabs__link { color: #FF7A1A; }
+
+[data-md-color-scheme="default"] {
+  --md-default-bg-color: #F3F2EE;
+  --md-typeset-a-color: #E2620B;
+}
+
+.md-header__title { font-weight: 700; letter-spacing: -.01em; }
+.md-typeset h1 { font-weight: 700; letter-spacing: -.02em; }
+.md-typeset h2 { font-weight: 600; letter-spacing: -.01em; }
+
+/* inline code in the brand accent */
+[data-md-color-scheme="slate"] .md-typeset :not(pre) > code { color: #FF9a4d; }
+
+/* a terminal-looking block for torqcli sessions */
+.md-typeset .language-text code { line-height: 1.6; }
+
+/* home page hero */
+.tq-hero { padding: 1rem 0 1.5rem; }
+.tq-hero h1 { font-size: 2.4rem; line-height: 1.1; margin-bottom: .6rem; }
+.tq-hero p.lede { font-size: 1.05rem; color: var(--md-default-fg-color--light); max-width: 40rem; }
+.md-typeset .tq-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: .8rem; margin: 1.5rem 0; }
+.md-typeset .tq-cards a { display: block; padding: 1rem 1.1rem; border: 1px solid var(--md-default-fg-color--lightest); border-radius: 6px; color: inherit; transition: border-color .2s, transform .2s; }
+.md-typeset .tq-cards a:hover { border-color: var(--md-accent-fg-color); transform: translateY(-2px); }
+.md-typeset .tq-cards b { display: block; color: var(--md-typeset-a-color); margin-bottom: .2rem; }
+.md-typeset .tq-cards span { font-size: .85em; color: var(--md-default-fg-color--light); }
+
+/* headings and buttons on the dark scheme */
+[data-md-color-scheme="slate"] .md-typeset h1 { color: #ECEDEF; }
+.md-typeset .md-button { border-color: #E2620B; color: #E2620B; border-radius: 4px; }
+.md-typeset .md-button:hover, .md-typeset .md-button:focus { background: #E2620B; border-color: #E2620B; color: #fff; }
+.md-typeset .md-button--primary { background: #E2620B; border-color: #E2620B; color: #fff; }
+[data-md-color-scheme="slate"] .md-typeset .md-button { border-color: #FF7A1A; color: #FF7A1A; }
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary { background: #FF7A1A; color: #08090b; }
+[data-md-color-scheme="slate"] .md-typeset .md-button:hover { background: #FF7A1A; color: #08090b; }

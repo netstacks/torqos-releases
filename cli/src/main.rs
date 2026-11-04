@@ -36,6 +36,7 @@ mod status;
 mod ui;
 mod nixerr;
 mod setup;
+mod install;
 
 use anyhow::{bail, Context, Result};
 

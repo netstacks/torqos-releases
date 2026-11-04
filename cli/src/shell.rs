@@ -803,6 +803,10 @@ fn run_shell(args: &[String]) -> Result<i32> {
     if args == ["setup"] {
         return crate::setup::run().map(|()| 0);
     }
+    // The ISO installer (its console, as root, ADR-031): its own program too.
+    if args == ["install"] {
+        return crate::install::run().map(|()| 0);
+    }
     let name = own_name();
     let run = parse_args(&name, args)?;
     if run == Invocation::Help {

@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# Set TorqOS's version, everywhere it is written — and, with --release, release it.
+#
+#   scripts/bump-version 0.3.0              # set it, and check every place agrees
+#   scripts/bump-version 0.3.0 --commit     # and commit it (signed off)
+#   scripts/bump-version 0.3.0 --release    # set and commit it if needed, then tag v0.3.0 and push
+#   scripts/bump-version 0.3.0-rc1 --release   # a pre-release of 0.3.0: tagged, `stable` does not move
+#
+# The version a machine reports (/etc/os-release, the console and SSH greetings) is torqcli's, from
+# cli/Cargo.toml; the broker carries the same. Each crate's Cargo.lock names it too, and
+# package.nix reads it from Cargo.toml. The release workflow refuses a tag that is not
+# `v<this version>` (or `v<this version>-<pre-release>`, e.g. v0.3.0-rc1, which needs no bump).
+#
+# --release checks before it changes anything: on `main`, nothing uncommitted, the same commit as
+# GitHub's main, CI not failed there, the tag not taken, and a stable version newer than the last
+# stable tag. Then it asks you to type the tag: pushing it publishes a public release
+# (.github/workflows/release.yml, ADR-028). --yes skips that question.
+# Run from anywhere in the repository; it changes nothing outside cli/ and broker/.
+set -euo pipefail
+
+usage() {
+  echo "usage: scripts/bump-version <major.minor.patch> [--commit]" >&2
+  echo "       scripts/bump-version <major.minor.patch>[-<pre-release>] --release [--yes]" >&2
+  exit 2
+}
+die() { echo "$*" >&2; exit 1; }
+
+[ $# -ge 1 ] || usage
+want=$1; shift
+commit='' release='' yes=''
+for a in "$@"; do
+  case $a in
+    --commit) commit=1 ;;
+    --release) release=1 ;;
+    --yes) yes=1 ;;
+    *) usage ;;
+  esac
+done
+[ -z "$yes" ] || [ -n "$release" ] || usage
+[ -n "$release" ] && commit=1
+
+semver='^([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z.]+)?$'
+[[ $want =~ $semver ]] || die "not a version: $want (major.minor.patch, e.g. 0.3.0; with --release also 0.3.0-rc1)"
+new=${BASH_REMATCH[1]}
+pre=${BASH_REMATCH[2]}
+[ -z "$pre" ] || [ -n "$release" ] || die "$want is a pre-release: that is a tag, not a version — use --release (the source stays $new)"
+tag=v$new$pre
+
+cd "$(git rev-parse --show-toplevel)"
+crates=(cli broker)
+cargo_files=("${crates[@]/%//Cargo.toml}" "${crates[@]/%//Cargo.lock}")
+
+# The version in a Cargo.toml's [package] section.
+toml_version() { awk '/^\[/{p = ($0 == "[package]")} p && /^version *=/ {gsub(/[" ]/, "", $0); sub(/^version=/, "", $0); print; exit}' "$1"; }
+toml_name() { awk '/^\[/{p = ($0 == "[package]")} p && /^name *=/ {gsub(/[" ]/, "", $0); sub(/^name=/, "", $0); print; exit}' "$1"; }
+# The version Cargo.lock records for package `name`.
+lock_version() { awk -v n="$2" '$0 == "name = \"" n "\"" {f = 1; next} f && /^version = / {gsub(/"/, "", $3); print $3; exit}' "$1"; }
+
+old=$(toml_version cli/Cargo.toml)
+
+# --release: everything that would stop it, before anything changes.
+if [ -n "$release" ]; then
+  [ "$(git symbolic-ref -q --short HEAD)" = main ] || die "Not on main: a release is a tag on main (git switch main)."
+  [ -z "$(git status --porcelain)" ] || die "The tree has changes not committed: nothing ships from a dirty tree."
+  git fetch -q --tags origin main
+  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] \
+    || die "main is not GitHub's main: git pull --ff-only (or push what is yours) first."
+  if git rev-parse -q --verify "refs/tags/$tag" >/dev/null || [ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]; then
+    die "$tag is taken: a release is never retagged — release the next version."
+  fi
+  if [ -z "$pre" ]; then
+    last=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' | sort -V | tail -1 || true)
+    newest=$(printf '%s\n%s\n' "$last" "$new" | sort -V | tail -1)
+    if [ -n "$last" ] && { [ "$last" = "$new" ] || [ "$newest" != "$new" ]; }; then
+      die "$new is not newer than the last release, v$last: stable only moves forward."
+    fi
+  fi
+  if command -v gh >/dev/null; then
+    ci=$(gh run list --commit "$(git rev-parse HEAD)" --workflow test.yml --json status,conclusion \
+           -q '.[0] | "\(.status) \(.conclusion)"' 2>/dev/null || true)
+    case $ci in
+      "completed success") echo "CI is green on main ($(git rev-parse --short HEAD))." ;;
+      completed*) die "CI failed on main ($(git rev-parse --short HEAD)): fix that first." ;;
+      "") echo "No CI run found on main's commit: the release runs every test itself." ;;
+      *) echo "CI is still running on main: the release runs every test itself." ;;
+    esac
+  fi
+fi
+
+if [ "$old" = "$new" ]; then
+  echo "TorqOS is already $new."
+else
+  [ -z "$commit" ] || git diff --quiet HEAD -- "${cargo_files[@]}" \
+    || die "cli/ or broker/'s Cargo files have changes not committed: commit or drop them first."
+  for c in "${crates[@]}"; do
+    name=$(toml_name "$c/Cargo.toml")
+    # [package]'s version line only, never a dependency's.
+    awk -v v="$new" '/^\[/{p = ($0 == "[package]")} p && !done && /^version *=/ {print "version = \"" v "\""; done = 1; next} {print}' \
+      "$c/Cargo.toml" > "$c/Cargo.toml.new" && mv "$c/Cargo.toml.new" "$c/Cargo.toml"
+    # The lock's entry for this crate itself: its version line, right after its name.
+    awk -v n="$name" -v v="$new" '$0 == "name = \"" n "\"" {print; f = 1; next} f && /^version = / {print "version = \"" v "\""; f = 0; next} {print}' \
+      "$c/Cargo.lock" > "$c/Cargo.lock.new" && mv "$c/Cargo.lock.new" "$c/Cargo.lock"
+  done
+fi
+
+# Every place agrees, as Nix and the release will read them.
+bad=0
+for c in "${crates[@]}"; do
+  name=$(toml_name "$c/Cargo.toml")
+  for got in "$(toml_version "$c/Cargo.toml")" "$(lock_version "$c/Cargo.lock" "$name")"; do
+    [ "$got" = "$new" ] || { echo "$c: found $got, not $new" >&2; bad=1; }
+  done
+done
+system=$(nix eval --raw --impure --expr builtins.currentSystem)
+for p in torq torq-broker; do
+  got=$(nix eval --raw ".#packages.$system.$p.version" 2>/dev/null || echo "(no evaluation)")
+  [ "$got" = "$new" ] || { echo "$p's package says $got, not $new" >&2; bad=1; }
+done
+if [ $bad -ne 0 ]; then
+  [ "$old" = "$new" ] || [ -z "$release" ] || git checkout -q -- "${cargo_files[@]}"
+  exit 1
+fi
+[ "$old" = "$new" ] || echo "TorqOS is $new (was $old): cli and broker, their Cargo.toml and Cargo.lock, and their packages."
+
+bumped=
+if [ -n "$commit" ] && [ "$old" != "$new" ]; then
+  git add "${cargo_files[@]}"
+  git commit -q -s -m "TorqOS $new" -m "The version a machine reports (os-release, the greetings): scripts/bump-version $new."
+  echo "Committed: $(git log --oneline -1)"
+  bumped=1
+fi
+
+if [ -z "$release" ]; then
+  cat <<EOF
+
+To release it, once this is on main:
+  scripts/bump-version $new --release          (or $new-rc1 --release for a pre-release first)
+EOF
+  exit 0
+fi
+
+# The release itself.
+kind="a release: \`stable\` moves to it, and machines update to it"
+[ -z "$pre" ] || kind="a pre-release: published, but \`stable\` does not move"
+cat <<EOF
+
+About to release TorqOS $tag — $kind.
+  commit  $(git log --oneline -1)
+  pushes  ${bumped:+main (the version commit), then }the tag $tag to $(git remote get-url origin)
+The release workflow then tests, builds and publishes it: public, and never retagged.
+EOF
+if [ -z "$yes" ]; then
+  read -r -p "Type $tag to release it: " answer
+  if [ "$answer" != "$tag" ]; then
+    [ -z "$bumped" ] || git reset -q --hard HEAD~1
+    die "Not released${bumped:+ (the version commit is undone)}."
+  fi
+fi
+
+git tag -a "$tag" -m "TorqOS $tag"
+[ -z "$bumped" ] || git push -q origin main
+git push -q origin "$tag"
+repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo netstacks/torqos)
+cat <<EOF
+Pushed $tag. The release workflow is running:
+  gh run watch \$(gh run list --workflow release.yml --limit 1 --json databaseId -q '.[0].databaseId')
+When it finishes, the images and ISOs are at https://github.com/$repo/releases/tag/$tag
+EOF

@@ -1,0 +1,49 @@
+// TorqOS's fastfetch configuration: the greeting over an SSH login (modules/branding.nix,
+// `torq shell sshGreeting`), and what `fastfetch` shows. TorqOS installs it for everyone
+// (/etc/xdg/fastfetch/config.jsonc), its logo beside it; for one person: ~/.config/fastfetch/config.jsonc.
+// The logo is the mark in letters (torqos-logo-ascii-fastfetch.txt, branding/tools/ascii-logo.py).
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "logo": {
+    "type": "file",
+    "source": "~/.config/fastfetch/torqos-logo-ascii-fastfetch.txt",
+    "color": { "1": "38;5;208", "2": "97" },   // 1 = Torque, the ring; 2 = Foreground, the prompt
+    "padding": { "top": 1, "left": 1, "right": 4 }
+  },
+  "display": {
+    "color": { "keys": "38;5;208", "title": "38;5;208", "separator": "38;5;246" }
+  },
+  "modules": [
+    "title",
+    "separator",
+    { "type": "os", "key": "OS" },
+    {
+      "type": "command", "key": "Generation",
+      "text": "readlink /nix/var/nix/profiles/system | grep -o '[0-9]\\+' || echo n/a"
+    },
+    {
+      "type": "command", "key": "Last change",
+      "text": "git -C /var/lib/torq/config log -1 --format='%s · %cr' 2>/dev/null || echo n/a"
+    },
+    {
+      // The drift check (every 15 minutes, and at boot) leaves /run/torq/drift when the machine
+      // is not as its ledger says.
+      "type": "command", "key": "History",
+      "text": "if [ -e /run/torq/drift ]; then echo 'not as the ledger says: torqcli show system alarms'; else echo 'as the ledger says'; fi"
+    },
+    { "type": "kernel", "key": "Kernel" },
+    { "type": "uptime", "key": "Uptime" },
+    { "type": "packages", "key": "Packages" },
+    { "type": "shell", "key": "Shell" },
+    { "type": "cpu", "key": "CPU" },
+    { "type": "memory", "key": "Memory" },
+    { "type": "disk", "key": "Disk", "folders": "/" },
+    "break",
+    {
+      // TorqOS's palette (palette/colors.md), in 256 colours: Graphite, Torque, Torque on light,
+      // Signal green, Steel, Slate, Foreground.
+      "type": "custom",
+      "format": "\u001b[48;5;233m   \u001b[48;5;208m   \u001b[48;5;166m   \u001b[48;5;115m   \u001b[48;5;246m   \u001b[48;5;241m   \u001b[48;5;255m   \u001b[m"
+    }
+  ]
+}
