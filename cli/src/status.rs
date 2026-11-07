@@ -70,9 +70,24 @@ pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
         }
     }
 
+    if let Some(list) = v["store_modified"].as_array().filter(|l| !l.is_empty()) {
+        found.push((format!("The system's files were changed after they were built ({} of them, in the store).", list.len()), Fix::Repair));
+    }
+    // The one the design most wants seen: this machine's history and its copy elsewhere disagree.
+    if let Some(why) = v["remote_alarm"]["why"].as_str() {
+        found.push((format!("This machine's history and the copy on its remote disagree: {} (show system remote; once looked into, request system remote clear).", one_line(why, 160)), Fix::Person));
+    }
+    // The record against itself: no rebuild puts these right, so neither is offered one.
+    if let Some(list) = v["disagreements"].as_array().filter(|l| !l.is_empty()) {
+        found.push((format!("The history and the configuration's commits disagree: {} (look into it, then: request system ledger acknowledge).", list.iter().filter_map(|d| d.as_str()).map(|d| one_line(d, 120)).collect::<Vec<_>>().join("; ")), Fix::Person));
+    }
+    if v["torn"] == true {
+        found.push(("The history's last line was cut short, by a power cut perhaps: nothing was lost that had finished, and the next change removes it.".into(), Fix::Nothing));
+    }
+
     // The broker knows of a problem this command cannot name (a newer broker, say): never all-well.
     if found.is_empty() && v["ok"] != true {
-        found.push(("TorqOS found a problem this command can't describe (see: torq-broker status).".into(), Fix::Person));
+        found.push(("TorqOS found a problem this command can't describe: an administrator can read it with show system remote and show system ledger, or the journal of torq-status.".into(), Fix::Person));
     }
     if found.is_empty() {
         let text = if v["checked_running_system"] == true {
@@ -87,12 +102,14 @@ pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
         };
         return Report { text, exit: 0, fix: Fix::Nothing };
     }
-    let fix = if found.iter().any(|(_, f)| *f == Fix::Person) { Fix::Person } else { Fix::Repair };
-    let mut text = format!("{}\n", ui.warn("This machine is not as its history says."));
+    let any = |want: Fix| found.iter().any(|(_, f)| *f == want);
+    let fix = if any(Fix::Person) { Fix::Person } else if any(Fix::Repair) { Fix::Repair } else { Fix::Nothing };
+    let mut text = format!("{}\n", ui.warn(if fix == Fix::Nothing { "Something to know about this machine's history." } else { "This machine is not as its history says." }));
     for (what, _) in &found {
         text.push_str(&format!("{}\n", ui.line("    · ", what)));
     }
     text.push_str(&match fix {
+        Fix::Nothing => String::new(),
         Fix::Repair => format!("{}\n", ui.line("    ", &format!("To return it to its history:  request system repair   {}", ui.dim("(asks first)")))),
         _ => format!("{}\n", ui.line("    ", &format!("This needs a person: look at {} (request system repair won't touch it).", one_line(repo, 40)))),
     });
@@ -142,6 +159,36 @@ mod tests {
                 "next_boot": "/nix/store/a", "ledgered_system": "/nix/store/a", "checked_running_system": true })
     }
 
+
+    /// The record against itself: named, with what to do, and no rebuild offered for it.
+
+    /// The remote's alarm is named where a person looks (the audit of M3, L1).
+    #[test]
+    fn the_remotes_alarm_is_named() {
+        let mut v = ok();
+        v["ok"] = json!(false);
+        v["remote_alarm"] = json!({ "at": "2026-11-06T00:00:00Z", "why": "the remote's ledger was rewritten" });
+        let r = render(&v, None, "/var/lib/torq/config", &Ui::plain());
+        let text = r.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!((r.exit, r.fix), (1, Fix::Person));
+        assert!(text.contains("copy on its remote disagree") && text.contains("rewritten") && text.contains("request system remote clear"), "{text}");
+    }
+    #[test]
+    fn what_a_rebuild_does_not_touch() {
+        let mut v = ok();
+        v["ok"] = json!(false);
+        v["torn"] = json!(true);
+        let r = render(&v, None, "/var/lib/torq/config", &Ui::plain());
+        assert_eq!((r.exit, r.fix), (1, Fix::Nothing));
+        assert!(r.text.contains("cut short") && r.text.contains("next change") && !r.text.contains("repair") && !r.text.contains("not as its history"), "{}", r.text);
+        let mut v = ok();
+        v["ok"] = json!(false);
+        v["disagreements"] = json!(["#7 says casey approved it, its commit says \"mallory\""]);
+        let r = render(&v, None, "/var/lib/torq/config", &Ui::plain());
+        assert_eq!((r.exit, r.fix), (1, Fix::Person));
+        let text = r.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(text.contains("#7 says casey") && text.contains("request system ledger acknowledge"), "{text}");
+    }
     #[test]
     fn all_well() {
         let r = render(&ok(), Some("Install htop for viper"), "/var/lib/torq/config", &Ui::plain());

@@ -90,10 +90,9 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl show -p ConditionResult torq-broker-init | grep -qx ConditionResult=no")
         machine.succeed(f"git -C {repo} status --porcelain | grep -q stray.nix")
         machine.succeed(f"rm {repo}/stray.nix")
-
-    with subtest("agent proposes, user approves, change lands"):
+    with subtest("a proposal, approved, lands (what the agent may propose: tests/agent.nix)"):
         head = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
-        out = machine.succeed(f"torq-broker propose --actor agent --base {head} "
+        out = machine.succeed(f"torq-broker propose --actor user --base {head} "
                               "--diff /etc/torq-test/night-light.diff --reason 'Night light'")
         assert "proposal #2" in out, out
         machine.succeed("torq-broker apply 2 --approved-by tester")
@@ -167,9 +166,15 @@ pkgs.testers.runNixOSTest {
         machine.succeed("su - dev -c 'printf \"configure\\nset users dev packages jq\\nexit\\nexit\\n\" | torqcli'")
         machine.succeed("su - dev -c 'test \"$(stat -c %a ~/.local/state/torq/candidate.json)\" = 600'")
         # The ledger is root's (its state directory is 0700): the numbers come through the broker, as a
-        # commit does. Without it there are no numbers, rather than git's (which a rollback can differ from).
+        # commit does — over its socket, for any account (ADR-040): reading the ledger needs no sudo.
+        # Without the broker there are no numbers, rather than git's (which a rollback can differ from).
+        machine.succeed("test \"$(stat -c %a /var/lib/torq/state)\" = 700")
+        out = machine.succeed("su - dev -c 'torqcli -c \"show system commit\"'")
+        assert out.splitlines()[0].startswith("Rollback"), out
+        machine.succeed("systemctl stop torq-broker.socket")
         out = machine.fail("su - dev -c 'torqcli -c \"show system commit\"' 2>&1")
-        assert "could not read the ledger" in out, out
+        assert "could not read the ledger" in out or "reaching the broker" in out, out
+        machine.succeed("systemctl start torq-broker.socket")
         out = machine.succeed("torqcli -c 'show system commit'")
         # (A heading, then the newest configuration: 0.)
         assert out.splitlines()[0].startswith("Rollback") and " host" in out.splitlines()[1] and "tester" in out.splitlines()[1], out
@@ -413,11 +418,11 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test -e /etc/torq-test/new-system")
         machine.succeed(f"grep -q 'nightLight = true' {repo}/desktop.nix")
         # A real wall-clock timer, running the broker that made the change by its store path.
-        unit = f"torq-confirm-{a['seq']}"
+        unit = f"torq-confirm-{a['data']['confirm']['timer']}"
         machine.succeed(f"systemctl is-active {unit}.timer")
         machine.succeed(f"systemctl show -p TimersCalendar {unit}.timer | grep -q 'UTC'")
         machine.succeed(f"systemctl show -p ExecStart {unit}.service "
-                        f"| grep -Eq 'argv\\[\\]=/nix/store/[^ ]+/bin/torq-broker expire-confirm {a['seq']} '")
+                        f"| grep -Eq 'argv\\[\\]=/nix/store/[^ ]+/bin/torq-broker expire-confirm {a['data']['confirm']['timer']} '")
         out = machine.succeed("torq-broker status")
         assert "rolls back at" in out, out
         out = machine.fail(f"torq-broker revert {a['seq']} --approved-by tester 2>&1")
@@ -463,7 +468,7 @@ pkgs.testers.runNixOSTest {
         c = broker("confirm --approved-by tester")
         assert c["kind"] == "confirmed" and c["data"]["applied"] == a["seq"], c
         # The timer still fires at the deadline, and finds nothing to roll back.
-        machine.wait_until_succeeds(f"journalctl -u torq-confirm-{a['seq']}.service | grep -q 'nothing is waiting'", timeout=180)
+        machine.wait_until_succeeds(f"journalctl -u torq-confirm-{a['data']['confirm']['timer']}.service | grep -q 'nothing is waiting'", timeout=180)
         assert running() == new_system
         machine.succeed(f"grep -q 'nightLight = true' {repo}/desktop.nix")
         assert last_entry()["kind"] == "confirmed"

@@ -71,6 +71,10 @@ let
     nixos-fence-build = c: c.system.build.nixos-rebuild;
     nixos-fence-nix = c: c.nix.package.outPath;
     nixos-fence-units = c: c.systemd.units."torq-broker-init.service".text;
+    # The broker's door and its password gate: its socket, and the PAM stacks (the audit of M3, L3).
+    nixos-fence-socket = c: c.systemd.sockets.torq-broker.socketConfig.SocketMode;
+    nixos-fence-pam = c: c.security.pam.services.torq-approve.text;
+    nixos-fence-pam-su = c: c.security.pam.services.su.rootOK;
     nixos-fence-etc-slash = c: c.environment.etc."/torq/broker.json".text;
     nixos-fence-etc-dot = c: c.environment.etc."./torq/broker.json".text;
     nixos-fence-etc-target = c: c.environment.etc.innocent.target;

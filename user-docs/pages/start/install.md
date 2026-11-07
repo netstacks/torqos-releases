@@ -47,7 +47,7 @@ The image is a single EFI disk. Whatever your hypervisor:
 - **Boot with UEFI** firmware, with **Secure Boot off**.
 - **Give the VM a display.** First-boot setup runs on the first text console; a VM with only a
   serial console shows login prompts with no account to log in to.
-- **Make the disk bigger** than the image if you like (the image is about 5 GB). The root file system
+- **Make the disk bigger** than the image if you like (the image is about 6 GB). The root file system
   grows to fill the disk at boot.
 
 === "QEMU / KVM / libvirt"

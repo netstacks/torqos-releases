@@ -460,7 +460,8 @@ the running machine (/proc, `ip -j addr`, `df`, the system profiles, /etc/passwd
 ## How it is built
 
 - **`torqcli` is unprivileged** (ADR-014): the shell, the candidate, `show`, `commit check` and
-  `rollback <n>` live in it. A commit is one `propose --base` + `apply` through `sudo torq-broker`.
+  `rollback <n>` live in it. A commit is one `propose --base` + `apply` over the broker's socket
+  (ADR-040: no sudo; a system change asks the caller's password there, at the terminal).
 - **The schema** is defined next to each setting's NixOS module (`torq.schema."<path>"`; the node
   format is documented in `modules/schema.nix`) and installed as `/etc/torq/schema.json`, so the
   shell reads it instantly for parsing, `?` and Tab. Closed sets carry their values (time zones from

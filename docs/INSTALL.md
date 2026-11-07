@@ -49,7 +49,7 @@ boot.
 ## Running it
 
 The image is one EFI disk; first-boot setup is on its console (give the VM a display). The disk is
-small (about 5 GB): give the VM a bigger one, and the root file system grows to fill it at boot.
+small (about 6 GB): give the VM a bigger one, and the root file system grows to fill it at boot.
 
 - **UTM, QEMU, Proxmox:** `torqos-<arch>.qcow2` (`nix build .#image`), as it is, UEFI firmware.
 - **VMware ESXi** (x86_64): `torqos-x86_64-linux.vmdk` (a release has it gzipped: `gunzip` it first;
@@ -76,7 +76,7 @@ UEFI machines only, as the image does (turn off Secure Boot: ROADMAP, later).
    writes a disk image raw: balenaEtcher, Rufus in DD mode). Everything on the stick is erased.
 2. Start the machine from the stick (its firmware's boot menu). The console shows the installer: no
    login, nothing listening.
-3. It lists the disks TorqOS can go on — whole disks only, at least the image's size (about 5 GB),
+3. It lists the disks TorqOS can go on — whole disks only, at least the image's size (about 6 GB),
    never the stick it started from — each with its size, how it is attached and what is on it now.
    Choose one, then type its name again (`nvme0n1`, `sda`): **everything on that disk is erased**.
    Nothing is written before the name is typed.

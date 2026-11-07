@@ -25,7 +25,8 @@ in
       message = "torq.ai.enable: the AI layers are not built yet (they come later, docs/ROADMAP.md); nothing would run.";
     }];
 
-    # TODO(later, the AI layers): systemd.services.torq-agent — unprivileged, sandboxed (DynamicUser,
+    # TODO(later, the AI layers): systemd.services.torq-agent — running as the agent's account
+    # (modules/agent.nix: a static user, not a DynamicUser — ADR-041), sandboxed (
     # ProtectSystem=strict, bubblewrap), read-only MCP tools, talks to the broker over a socket.
   };
 }

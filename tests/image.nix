@@ -141,7 +141,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the image boots to setup, with nobody to log in as and nothing listening"):
         on_console("Welcome to TorqOS. This machine has no configuration yet")
-        on_console("Machine name [torq]:")
+        on_console("Start [1]:")
         # Under TorqOS's wordmark; and the machine says it is TorqOS, on NixOS (modules/branding.nix).
         on_console("set  |  commit  |  rollback")
         machine.succeed(". /etc/os-release && test \"$NAME $ID $ID_LIKE\" = 'TorqOS torqos nixos' && test \"$VERSION_ID\" = '${self.packages.${pkgs.stdenv.hostPlatform.system}.torq.version}'")
@@ -155,16 +155,21 @@ pkgs.testers.runNixOSTest {
         # done here, on purpose.)
         machine.succeed("printf '\\033[H\\033[2J' > /dev/tty1 && stty -F /dev/tty1 rows 30 cols 100")
         on_console("Welcome to TorqOS. This machine has no configuration yet")
-        on_console("Machine name [torq]:")
+        on_console("Start [1]:")
         machine.succeed("systemctl is-active torq-setup")
         machine.fail("systemctl is-active getty@tty1")
         machine.succeed("passwd -S root | grep -q ' L '")
         # Listening only on the machine itself (systemd-resolved's stub), not on the network.
-        out = machine.succeed("ss -Htln")
-        assert all(l.split()[3].startswith(("127.", "[::1]", "[::ffff:127.")) for l in out.splitlines()), out
+        # TCP and UDP both: what answers names on the link is UDP (the audit of M3, M6).
+        out = machine.succeed("ss -Htuln")
+        # (A DHCP client's own port is a client's, not a service.)
+        local = lambda a: a.startswith(("127.", "[::1]", "[::ffff:127.")) or a.rsplit(":", 1)[-1] in ("68", "546")
+        assert all(local(l.split()[4]) for l in out.splitlines()), out
         machine.fail("test -s /var/lib/torq/state/ledger.jsonl")
 
     with subtest("setup, answered on the console, records change #1 and switches to the machine it described"):
+        on_console("Start [1]:")
+        answer("")
         on_console("Machine name [torq]:")
         answer("first")
         on_console("Time zone [UTC]:")

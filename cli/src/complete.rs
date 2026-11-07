@@ -471,9 +471,9 @@ mod tests {
         let s = schema();
         assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "exit", "file", "help", "quit", "request", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "interfaces", "packages", "services", "system", "users", "version"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "rollback", "storage", "uptime"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "proposals", "remote", "rollback", "snapshots", "storage", "uptime"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["<[Enter]>", "compare", "|"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["password", "repair", "revert", "software", "update"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["apply", "ledger", "password", "pull", "remote", "repair", "revert", "snapshot", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["save", "set", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["file", "help", "request", "show"], "not configure or exit: already here");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
@@ -495,9 +495,10 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set time timeZone"), "Europe/Be")), ["Europe/Belfast", "Europe/Belgrade", "Europe/Berlin"]);
         assert!(choices(&s, Mode::Configuration, &w("set nonsense"), "").is_empty());
         // Config files: `config` at a place, then a file.
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set services httpd"), "c")), ["config"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set services httpd"), "c")), ["config", "configFile"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set serv httpd config"), "")), ["<file>"], "the word, abbreviated place or not: not the option");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set services httpd config"), "")), ["<file>"]);
-        assert!(choices(&s, Mode::Configuration, &w("show services httpd"), "c").is_empty(), "show has no config to attach");
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show services httpd"), "c")), ["configFile"], "show has no config to attach");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("file"), "")), ["delete", "edit", "list", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("load"), "")), ["merge", "override", "set"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "l")), ["load"]);
@@ -544,7 +545,7 @@ mod tests {
     #[test]
     fn requests_for_the_software() {
         let s = schema();
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["password", "repair", "revert", "software", "update"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["apply", "ledger", "password", "pull", "remote", "repair", "revert", "snapshot", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update"), "")), ["<[Enter]>", "all"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system revert"), "")), ["<change>"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system ledger"), "")), ["<[Enter]>", "<count>", "|"]);
@@ -644,10 +645,10 @@ mod tests {
         assert_eq!(read(k, &why).unwrap(), read(k, &["commit".to_string(), "comment".into(), "why not".into()]).unwrap(), "a value stays as it is");
         assert!(x(k, "s").unwrap_err().contains("'s' is ambiguous: save, set, show"));
         let e = x(o, "show system foo").unwrap_err();
-        assert!(e.contains("'foo' is not a word here (after `show system`)") && e.contains("alarms, commit, ledger, rollback"), "{e}");
+        assert!(e.contains("'foo' is not a word here (after `show system`)") && e.contains("alarms, commit, ledger, proposals, remote, rollback"), "{e}");
         assert!(x(o, "show configuraton").unwrap_err().contains("did you mean configuration?"));
         // A line that is not whole says what may follow, what value it needs, or that nothing may.
-        assert_eq!(x(o, "show system").unwrap_err(), "not a whole command: one of these may follow: alarms, commit, ledger, rollback, storage, uptime");
+        assert_eq!(x(o, "show system").unwrap_err(), "not a whole command: one of these may follow: alarms, commit, ledger, proposals, remote, rollback, snapshots, storage, uptime");
         assert_eq!(x(o, "request system revert").unwrap_err(), "needs <change> (the change's number, from show system ledger)");
         assert_eq!(x(o, "show system alarms extra").unwrap_err(), "'extra' is not a word here: nothing may follow `show system alarms`");
         assert_eq!(x(o, "show system rollback x").unwrap_err(), "'x' is not a number (configuration numbers: 0, 1, …)");
@@ -832,7 +833,7 @@ mod tests {
         let at = |mode| At { mode, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(Vec::new), files: vec![], interfaces: vec![] };
         let out = answer(&s, &at(Mode::Operational), &w("show system packages"), "", 80);
         let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(out.contains("'packages' is not a word here (after `show system`)") && out.contains("alarms, commit, ledger, rollback"), "{out}");
+        assert!(out.contains("'packages' is not a word here (after `show system`)") && out.contains("alarms, commit, ledger, proposals, remote, rollback"), "{out}");
         let out = answer(&s, &at(Mode::Operational), &w("show system"), "pac", 80);
         assert!(out.contains("'pac' is not a word here"), "the word being typed too: {out}");
         let out = answer(&s, &at(Mode::Configuration), &w("set system host-name a.b"), "", 80);

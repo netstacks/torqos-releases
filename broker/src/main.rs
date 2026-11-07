@@ -9,6 +9,8 @@
 
 use anyhow::{Context, Result};
 
+mod serve;
+
 use torq_broker::config::{self, Requested, Settings};
 use torq_broker::{ledger::Entry, policy::Actor, Broker, Busy};
 use serde_json::json;
@@ -48,6 +50,22 @@ enum Cmd {
     Log { brief: bool },
     Verify,
     Status,
+    Serve,
+    RemoteKey,
+    Push,
+    RemoteShow,
+    RemoteClear { approved_by: String },
+    Acknowledge { approved_by: String },
+    FetchIncoming,
+    BreakGlass { by: String, reason: String },
+    Snapshots,
+    VerifyStore,
+    RestoreData { seq: u64, path: String, approved_by: String },
+    SnapshotTake { approved_by: String },
+    SnapshotDelete { seq: u64, approved_by: String },
+    AdoptKey { url: String },
+    AdoptInspect { url: String },
+    Adopt { url: String, own: PathBuf, head: String, tip: String, user: String },
 }
 
 /// The command line, declared with clap's builder (its derive macros write an `allow(dead_code)`,
@@ -130,7 +148,7 @@ fn command_line() -> clap::Command {
         .subcommand(
             Command::new("expire-confirm")
                 .about("Roll back the commit confirmed that is waiting (its timer runs this at the deadline).")
-                .arg(Arg::new("seq").value_parser(value_parser!(u64)).help("Only if this applied change is the one waiting."))
+                .arg(Arg::new("seq").value_parser(value_parser!(u64)).help("Only if this applied change, or the timer it names, is the one waiting."))
                 .arg(flag("reboot", "Run at boot: the machine restarted before the change was confirmed.")),
         )
         .subcommand(Command::new("revert").about("Undo one applied change: a new commit that reverts it, rebuild, ledger.").arg(seq()).arg(by()))
@@ -148,6 +166,24 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("verify").about("Verify the ledger hash chain."))
         .subcommand(Command::new("status").about(
             "Compare the machine with its ledger: running system, config repo, interrupted operations, ledger chain. Exits 1 if anything is not as ledgered, 75 if an operation is running.",
+        ))
+        .subcommand(Command::new("remote-key").about("The machine's key for the config repo's remote (ADR-036): made the first time, kept after; its public half printed, to add to the repository as a deploy key with write access."))
+        .subcommand(Command::new("push").about("Push the configuration and the ledger to the remote now (after every change it is pushed anyway; this is the timer's retry): the remote's ledger checked first."))
+        .subcommand(Command::new("remote").about("The remote: its URL, the last push, what its ledger said of this one then, and its alarm, if any."))
+        .subcommand(Command::new("adopt-key").about("First-boot setup: this machine's key for a repository it is about to adopt (ADR-036), made the first time.").arg(Arg::new("url").long("url").required(true)))
+        .subcommand(Command::new("adopt-inspect").about("First-boot setup: fetch the repository into a staging copy and check it (its ledger one line, every push extending the last, its chain whole, main the commit it ends at); changes nothing of the machine.").arg(Arg::new("url").long("url").required(true)))
+        .subcommand(Command::new("adopt").about("First-boot setup: become the machine the repository holds: its history and ledger, this machine's hardware file and software (the files in --own) as a new commit, built, switched to, ledgered.").arg(Arg::new("url").long("url").required(true)).arg(Arg::new("own").long("own").required(true).value_parser(value_parser!(PathBuf))).arg(Arg::new("head").long("head").required(true)).arg(Arg::new("tip").long("tip").required(true)).arg(Arg::new("user").long("user").required(true)))
+        .subcommand(Command::new("break-glass").about("A root shell is about to open (torq break-glass, ADR-035): who and why into the ledger, and to the remote if there is one. Exits 3 if the remote has not got it.").arg(Arg::new("by").long("by").required(true)).arg(Arg::new("reason").long("reason").required(true)))
+        .subcommand(Command::new("snapshot-take").about("A snapshot of the data now (ADR-038), ledgered.").arg(by()))
+        .subcommand(Command::new("snapshot-delete").about("The snapshot of a change gone (ADR-038): on the record first.").arg(seq()).arg(by()))
+        .subcommand(Command::new("verify-store").about("Check the running system's store paths against what the store recorded when each was built (the audit of M3, M5); kept for status."))
+        .subcommand(Command::new("snapshots").about("The snapshots of the data this machine still has (ADR-038)."))
+        .subcommand(Command::new("restore-data").about("Put a path back as it was before a change (ADR-038): as its owner, what is there set aside, ledgered.").arg(seq()).arg(Arg::new("path").long("path").required(true)).arg(by()))
+        .subcommand(Command::new("fetch-incoming").about("Fetch the remote's `incoming` branch into the config repo (refs/torq/incoming), for torqcli's `request system pull` to load into a candidate: nothing is applied."))
+        .subcommand(Command::new("ledger-acknowledge").about("A person has looked into where the ledger and the repository disagree: said no more, and on the record.").arg(by()))
+        .subcommand(Command::new("remote-clear").about("Clear the remote's alarm, having looked into it (ledgered): the next push checks the remote's whole history again, and raises it again if it is still true.").arg(by()))
+        .subcommand(Command::new("serve").about(
+            "Answer one request on the socket (torq-broker.socket hands it the connection as standard input and output): the caller from the kernel (SO_PEERCRED), what it may do by its account and the change's tier, a system change's password through PAM (ADR-040).",
         ))
 }
 
@@ -185,6 +221,22 @@ fn parse_cli() -> Cli {
         "log" => Cmd::Log { brief: sub.get_flag("brief") },
         "verify" => Cmd::Verify,
         "status" => Cmd::Status,
+        "serve" => Cmd::Serve,
+        "remote-key" => Cmd::RemoteKey,
+        "push" => Cmd::Push,
+        "remote" => Cmd::RemoteShow,
+        "remote-clear" => Cmd::RemoteClear { approved_by: by(sub) },
+        "ledger-acknowledge" => Cmd::Acknowledge { approved_by: by(sub) },
+        "fetch-incoming" => Cmd::FetchIncoming,
+        "snapshots" => Cmd::Snapshots,
+        "verify-store" => Cmd::VerifyStore,
+        "snapshot-take" => Cmd::SnapshotTake { approved_by: by(sub) },
+        "snapshot-delete" => Cmd::SnapshotDelete { seq: *sub.get_one::<u64>("seq").unwrap_or(&0), approved_by: by(sub) },
+        "restore-data" => Cmd::RestoreData { seq: *sub.get_one::<u64>("seq").unwrap_or(&0), path: s(sub, "path").unwrap_or_default(), approved_by: by(sub) },
+        "break-glass" => Cmd::BreakGlass { by: s(sub, "by").unwrap_or_default(), reason: s(sub, "reason").unwrap_or_default() },
+        "adopt-key" => Cmd::AdoptKey { url: s(sub, "url").unwrap_or_default() },
+        "adopt-inspect" => Cmd::AdoptInspect { url: s(sub, "url").unwrap_or_default() },
+        "adopt" => Cmd::Adopt { url: s(sub, "url").unwrap_or_default(), own: p(sub, "own").unwrap_or_default(), head: s(sub, "head").unwrap_or_default(), tip: s(sub, "tip").unwrap_or_default(), user: s(sub, "user").unwrap_or_default() },
         other => unreachable!("clap knows no subcommand {other}"),
     };
     Cli {
@@ -204,8 +256,19 @@ fn parse_cli() -> Cli {
 
 fn main() {
     let cli = parse_cli();
+    if matches!(cli.cmd, Cmd::Serve) {
+        std::process::exit(serve::serve());
+    }
     let json = cli.json;
-    if let Err(e) = run(cli) {
+    // How the request came, read before the environment is cleared: from `serve` (the socket), or
+    // through sudo — what root says about itself, marked as such (ADR-040). Neither: the machine's
+    // own units, setup, or root at a shell.
+    let (via, caller) = match (std::env::var("TORQ_VIA").ok().as_deref(), std::env::var_os("SUDO_UID")) {
+        (Some("socket"), _) if config::running_as_root() => (Some("socket".to_string()), std::env::var("TORQ_CALLER").ok()),
+        (_, Some(_)) => (Some("sudo".to_string()), None),
+        _ => (None, None),
+    };
+    if let Err(e) = run(cli, via, caller) {
         // Another operation is running: "try again later", exit 75 (EX_TEMPFAIL) from any command.
         let busy = e.downcast_ref::<Busy>().is_some();
         if json {
@@ -263,17 +326,121 @@ fn settings(cli: &mut Cli) -> Result<Settings> {
     Ok(s)
 }
 
-fn run(mut cli: Cli) -> Result<()> {
+fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> {
     let json = cli.json;
     let s = settings(&mut cli)?;
-    let b = Broker::new(&s.repo, &s.state_dir, &s.rebuild)
+    let mut b = Broker::new(&s.repo, &s.state_dir, &s.rebuild)
         .with_current_system(&s.current_system)
         .with_system_profile(&s.system_profile)
         .with_confirm_commands(&s.build, &s.activate, &s.boot, &s.schedule)
+        .with_snapshots(&s.snapshot)
         .with_people(&s.people)
+        .with_agent_limits(&s.agent)
+        .with_remote(s.remote.as_deref())
         // On a real machine the rollback uses the old system's own commands (its etc/torq/broker.json).
         .with_anchor_settings(config::running_as_root());
+    b.ledger.set_via(via, caller);
+    // Whatever a command that writes the ledger does — and however it ends — the remote gets it
+    // afterwards (ADR-036): best-effort, never failing the command.
+    let writes = matches!(
+        cli.cmd,
+        Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. }
+            | Cmd::ExpireConfirm { .. } | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. }
+    );
+    let _push = writes.then_some(PushAfter(&b, b.ledger.read_all().map_or(0, |l| l.len())));
     match cli.cmd {
+        Cmd::Serve => unreachable!("served before the settings are read"),
+        Cmd::RemoteKey => {
+            let r = b.remote()?.context("no remote is set: `torq remote url <ssh url>` first (a system change)")?;
+            let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+            let key = r.public_key(host.trim())?;
+            if json {
+                println!("{}", json!({ "public_key": key, "url": r.url }));
+            } else {
+                println!("{key}\n\nAdd it to {} as a deploy key, with write access; then: torq-broker push", r.url);
+            }
+        }
+        Cmd::Push => match (b.sync_remote()?, json) {
+            (p, true) => println!("{}", json!({ "pushed": p })),
+            (None, false) => println!("no remote is set (or an operation is running, which pushes when it is done)"),
+            (Some(p), false) if p.ok => println!("pushed: the remote has the configuration and {} ledger entries", p.entries),
+            (Some(p), false) => {
+                println!("not pushed: {}", printable(p.error.as_deref().unwrap_or("?")));
+                std::process::exit(1);
+            }
+        },
+        Cmd::AdoptKey { url } => {
+            let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+            let key = b.adopt_key(&url, host.trim())?;
+            println!("{}", if json { json!({ "public_key": key }).to_string() } else { key });
+        }
+        Cmd::AdoptInspect { url } => {
+            let a = b.adopt_inspect(&url)?;
+            println!("{}", if json { serde_json::to_string(&a)? } else { format!("{a:?}") });
+        }
+        Cmd::Adopt { url, own, head, tip, user } => {
+            let e = b.adopt(&url, &own, &head, &tip, &user)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        Cmd::BreakGlass { by, reason } => {
+            let (e, unsent) = b.break_glass(&by, &reason)?;
+            println!("on the record: ledger #{} ({} breaks the glass)", e.body.seq, printable(&by));
+            if let Some(why) = unsent {
+                println!("the remote has not got it: {}", printable(&why));
+                std::process::exit(3);
+            }
+        }
+        Cmd::Snapshots => println!("{}", serde_json::to_string(&b.snapshots()?)?),
+        Cmd::VerifyStore => {
+            let c = b.verify_store()?;
+            println!("{}", serde_json::to_string(&c)?);
+            if !c.modified.is_empty() {
+                std::process::exit(1);
+            }
+        }
+        Cmd::SnapshotTake { approved_by } => println!("{}", serde_json::to_string(&b.snapshot_now(&approved_by)?)?),
+        Cmd::SnapshotDelete { seq, approved_by } => println!("{}", serde_json::to_string(&b.delete_snapshot(seq, &approved_by)?)?),
+        Cmd::RestoreData { seq, path, approved_by } => {
+            let e = b.restore_data(seq, &path, &approved_by)?;
+            println!("{}", serde_json::to_string(&e)?);
+        }
+        Cmd::FetchIncoming => {
+            let id = b.fetch_incoming()?;
+            if json {
+                println!("{}", json!({ "incoming": id }));
+            } else {
+                println!("{}", id.as_deref().map_or("the remote has no incoming branch".to_string(), |c| format!("incoming: {c} (refs/torq/incoming)")));
+            }
+        }
+        Cmd::Acknowledge { approved_by } => {
+            let e = b.acknowledge_disagreements(&approved_by)?;
+            println!("{}", serde_json::to_string(&e)?);
+        }
+        Cmd::RemoteClear { approved_by } => {
+            let e = b.clear_remote_alarm(&approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        Cmd::RemoteShow => {
+            let r = b.remote()?;
+            let last = r.as_ref().and_then(|r| r.last());
+            let key = r.as_ref().is_some_and(|r| r.key().exists());
+            if json {
+                let alarm = r.as_ref().and_then(|r| r.alarm());
+                println!("{}", json!({ "url": r.as_ref().map(|r| r.url.clone()), "key": key, "last": last, "alarm": alarm }));
+            } else {
+                match (&r, &last) {
+                    (None, _) => println!("no remote: this machine's configuration and ledger are kept here only"),
+                    (Some(r), None) => println!("remote {} (key: {}): nothing pushed yet", r.url, if key { "made" } else { "none yet" }),
+                    (Some(r), Some(p)) => println!("remote {}: last push {} at {}{}", r.url, if p.ok { "went through" } else { "failed" }, p.at, p.error.as_deref().map(|e| format!(" — {}", printable(e))).unwrap_or_default()),
+                }
+            }
+        }
         Cmd::Init => {
             b.init()?;
             if json {
@@ -314,11 +481,20 @@ fn run(mut cli: Cli) -> Result<()> {
                 if tainted { " · TAINTED" } else { "" });
             // (Names as the proposal wrote them: escaped as everything shown is, audit of 2026-11-01, L1.)
             println!("files: {}", printable(&e.body.data["files"].to_string()));
-            println!("\n{}", printable_text(e.body.data["diff"].as_str().unwrap_or_default()));
+            println!("\n{}", printable_text(&b.proposal_text(&e, "diff").unwrap_or_default()));
             println!("approve with: torq-broker apply {} --approved-by <name>", e.body.seq);
         }
         Cmd::Show { seq } => {
-            let e = b.ledger.get(seq)?;
+            let mut e = b.ledger.get(seq)?;
+            // A proposal's diff and what it does, from beside the ledger, as if they were in it: what a
+            // person reads is what was proposed (N19).
+            if e.body.kind == "proposal" {
+                for what in ["diff", "effect"] {
+                    if let Ok(t) = b.proposal_text(&e, what) {
+                        e.body.data[what] = t.into();
+                    }
+                }
+            }
             if json {
                 return print_entry(&e);
             }
@@ -386,7 +562,7 @@ fn run(mut cli: Cli) -> Result<()> {
                     // Ledger text comes from whoever proposed: never let it drive the terminal.
                     println!(
                         "#{:<4} {} {:<12} {:<9} {:<6}{} {}",
-                        e.body.seq, e.body.ts, e.body.kind, e.body.tier, printable(&e.body.actor),
+                        e.body.seq, printable(&e.body.ts), printable(&e.body.kind), printable(&e.body.tier), printable(&e.body.actor),
                         if e.body.tainted { " ⚠" } else { "" }, printable(&e.body.reason)
                     );
                 }
@@ -428,6 +604,10 @@ fn run(mut cli: Cli) -> Result<()> {
                         "interrupted": s.interrupted,
                         "unrestored": s.unrestored,
                         "pending_confirm": s.pending_confirm,
+                        "disagreements": s.disagreements,
+                        "torn": s.torn,
+                        "store_modified": s.store_modified,
+                        "remote_alarm": s.remote_alarm.as_ref().map(|a| json!({ "at": a.at, "why": a.why })),
                     })
                 );
                 std::process::exit(if s.busy.is_some() { 75 } else if problems.is_empty() { 0 } else { 1 });
@@ -490,4 +670,17 @@ fn printable_text(s: &str) -> String {
     s.chars()
         .map(|c| if hidden(c) && c != '\n' && c != '\t' { c.escape_unicode().to_string() } else { c.to_string() })
         .collect()
+}
+
+/// Pushes to the remote when dropped: after a command that writes the ledger, however it ended.
+/// The broker, and how long its ledger was: a command that wrote nothing has nothing to send (a
+/// refused proposal, over and over, was a way to keep the network and the lock busy: the audit of M3, M1).
+struct PushAfter<'a>(&'a Broker, usize);
+
+impl Drop for PushAfter<'_> {
+    fn drop(&mut self) {
+        if self.0.ledger.read_all().map_or(true, |l| l.len() != self.1) {
+            let _ = self.0.sync_remote();
+        }
+    }
 }

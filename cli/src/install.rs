@@ -18,6 +18,9 @@ const BIN: &str = "/run/current-system/sw/bin";
 /// Where, inside the new disk's root, first-boot setup finds the hardware detected here.
 pub const DETECTED: &str = "var/lib/torq/install/hardware-configuration.nix";
 const WELCOME: &str = "Welcome to the TorqOS installer. It puts TorqOS on one of this machine's disks, erasing everything on it.";
+/// The label of `/var/lib/torq`'s own file system on the new disk (hosts/installer/file-systems.nix).
+const TORQ_LABEL: &str = "torq";
+
 /// The image's root file system's label (hosts/image/hardware-configuration.nix).
 const ROOT_LABEL: &str = "nixos";
 /// Its boot partition's (the same file).
@@ -347,10 +350,10 @@ pub fn run() -> Result<()> {
         let _ = Command::new(format!("{BIN}/systemctl")).arg("poweroff").status();
         return Ok(());
     }
-    println!();
+    // The welcome is on the screen already, above the check: the disks follow it.
+    println!("\n");
     let mut closed = 0;
     loop {
-        println!("\n{}\n", welcome());
         let done = install(&image, bytes, &sha);
         closed = if done.as_ref().is_err_and(|e| format!("{e:#}").contains("the console closed")) { closed + 1 } else { 0 };
         match done {
@@ -363,7 +366,7 @@ pub fn run() -> Result<()> {
             // A Ctrl-D starts over; a console that only ever reads as closed has nobody to start
             // over for: ended, for systemd to start the installer again.
             Err(e) if closed >= 3 => return Err(e),
-            Err(e) => println!("\n{e:#}\nStarting over."),
+            Err(e) => println!("\n{e:#}\nStarting over.\n\n{}\n", welcome()),
         }
     }
 }
@@ -421,7 +424,7 @@ fn install(image: &Path, bytes: u64, sha: &str) -> Result<String> {
 /// with a file system labelled the same — an earlier NixOS's root, another ESP — could be the one
 /// it starts from, or grows, or puts its boot loader on. Refused until that disk is out or cleared.
 fn others_labelled(d: &Disk) -> Result<()> {
-    for want in [ROOT_LABEL, BOOT_LABEL] {
+    for want in [ROOT_LABEL, BOOT_LABEL, TORQ_LABEL] {
         // Probed now, not from blkid's cache.
         let o = Command::new(format!("{BIN}/blkid")).args(["-c", "/dev/null", "-o", "device", "-t", &format!("LABEL={want}")]).stdin(Stdio::null()).output().context("running blkid")?;
         let found = labelled(o.status.code(), &String::from_utf8_lossy(&o.stdout), &String::from_utf8_lossy(&o.stderr), want)?;
@@ -659,14 +662,14 @@ fn detect(d: &Disk) -> Result<()> {
         settle();
     }
     settle();
-    // The image's root, by its label, among this disk's partitions only: each checked to be one
+    // The record's file system, by its label, among this disk's partitions only: each checked to be one
     // of the disk written, and from then on used as what was opened, not by its name.
     let root = (1..=16)
         .map(|n| format!("/dev/{}", partition(&d.name, n)))
         .filter(|p| Path::new(p).exists())
         .filter_map(|p| std::fs::File::open(&p).ok())
-        .find(|f| devno(f).and_then(|now| part_of(d, &now, Path::new("/sys"))).is_ok() && label(&fd_path(f)).as_deref() == Some(ROOT_LABEL))
-        .with_context(|| format!("TorqOS's root file system is not on {} after writing it", d.name))?;
+        .find(|f| devno(f).and_then(|now| part_of(d, &now, Path::new("/sys"))).is_ok() && label(&fd_path(f)).as_deref() == Some(TORQ_LABEL))
+        .with_context(|| format!("TorqOS's record file system is not on {} after writing it", d.name))?;
     let detected = tool("nixos-generate-config", &["--show-hardware-config", "--no-filesystems"])?;
     let file = hardware_file(&detected, &read_meta("file-systems.nix")?)?;
     let mnt = tempfile::tempdir().context("a place to mount the new disk")?;
@@ -676,7 +679,7 @@ fn detect(d: &Disk) -> Result<()> {
         .with_context(|| format!("mounting TorqOS's root file system from {} at {}", d.name, at.display()))?;
     let wrote = (|| -> Result<()> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-        let p = at.join(DETECTED);
+        let p = at.join(DETECTED.strip_prefix("var/lib/torq/").context("where the hardware goes")?);
         std::fs::DirBuilder::new().recursive(true).mode(0o755).create(p.parent().context("its folder")?)?;
         let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o644).open(&p)?;
         f.write_all(file.as_bytes())?;

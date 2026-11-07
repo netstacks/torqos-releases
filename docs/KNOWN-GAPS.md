@@ -12,10 +12,16 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    `reconciled_by`; edits made in the repo *during* a rebuild are still reset by a failed
    apply's restore (only reconcile snapshots them). The broker's git runs no hook and no fsmonitor of
    the repo (`core.hooksPath=/dev/null`, `core.fsmonitor=false`; second audit, M1: fixed).
-2. **`verify` cannot detect truncation of the newest entries, and the chain is unkeyed** (second
+2. **With a remote, a cut or rewritten ledger is an alarm (ADR-036, 2026-11-05, `tests/remote.nix`):**
+   the remote holds every ledger pushed, and this one must extend the newest (`status`). Without a
+   remote — the default — what follows still holds. **`verify` cannot detect truncation of the newest entries, and the chain is unkeyed** (second
    audit, H2): it is sha256 over each entry and the one before, so a writer of the file (root)
-   can rewrite the history and recompute the chain; it does not cross-check git `Ledger-Entry`
-   trailers against the ledger, and commits are not signed (L1). What it does catch: an edited,
+   can rewrite the history and recompute the chain; `status` checks each change against its commit (who approved it, which
+   proposal; by the entry's `commit`, as the `Ledger-Entry` trailer can be one short, an entry from
+   break-glass or a restore landing during an apply), so one rewritten alone is seen. Both rewritten
+   together are not, and commits are not signed (L1). A person who has looked into a disagreement says
+   so (`request system ledger acknowledge`), on the record. What it
+   does catch: an edited,
    added or removed field or entry (an added field passed before the audit of 2026-10-31).
    Planned (M3): sign the entries and commits with a broker key, anchor the head hash.
 3. **Path-based tiers cannot see semantic escalation inside system-tier files** — e.g.
@@ -23,7 +29,13 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    `torq.security.lockdown = "none"`, or swapping `torq.url` in `flake.nix`. Today only
    human review of the diff catches these. Needs a design (evaluate the old and new config and
    diff protected options?).
-4. **Caller-supplied identity:** `--actor`, `--tainted` and `--approved-by` are trusted as given.
+4. **Caller-supplied identity — closed on the socket (ADR-040, 2026-11-04, `tests/socket.nix`).**
+   The broker's socket takes the caller from `SO_PEERCRED` and refuses `--actor`, `--approved-by`
+   and any file path; torqcli uses it, without sudo; a system change asks the caller's password
+   (PAM). What stays: `sudo torq-broker` (dev mode and recovery) is root, and still trusts the
+   flags it is given — its entries are marked `via: sudo`; `--tainted` can still only be set by the
+   caller (it only raises). The history of this item, as it stood before:
+   `--actor`, `--tainted` and `--approved-by` are trusted as given.
    (Configuration no longer is: a root broker takes its repo, state directory, rebuild command and
    PATH/HOME only from `/etc/torq/broker.json`, refuses a flag or `TORQ_*` variable that differs,
    and clears its caller's environment — ADR-016, piece 1e.) Fine under sudo in M1; the M3 socket
@@ -38,7 +50,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    The second audit (H1, H5) is this item: the approver and the actor are whoever the caller says,
    so ledger attribution, and the agent's restrictions (which key on `--actor agent`), hold only
    for callers that do not lie. Not fixed by patches: the M3 socket takes identity from the kernel.
-   The broker under sudo is not sandboxed either (L3; the socket service will be).
+   The broker under sudo is not sandboxed either (L3), and neither is its socket service yet (ADR-040: it runs as under sudo, a development source in a home included) — see 6zf.
 5. **`torq.url = "path:…"`** in the config template ignores `.gitignore`, so `broker/target/`
    is copied into the store on every evaluation. Prefer `git+file://`. (Fixed for the config repo
    itself: the broker builds the exact commit, `git+file://<repo>?rev=<commit>` (`{flake}`), never
@@ -50,9 +62,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    (~770 MB). The fix is the one above: the dev source as `git+file:///home/<you>/torq` (committed
    files only, `.gitignore` respected).
 
-6a. **User tier is not bound to a user:** `users/alice/packages.json` is user tier whoever proposes
-   it, so an agent session acting for viper could change alice's apps. Needs the caller identity
-   from #4 (M3 socket). A user's packages also act in that user's *session*: autostart entries,
+6a. **User tier is not bound to a user — closed on the socket (ADR-040):** a person applies their
+   own folder (`users/<them>/`) without a password; anyone else's needs an administrator and their
+   password. Before: `users/alice/packages.json` was user tier whoever proposed
+   it, so an agent session acting for viper could change alice's apps. A user's packages also act in that user's *session*: autostart entries,
    D-Bus session services and systemd user units from their profile (never system-wide).
 
 6b. **Drift detection has blind spots** (ADR-012): a lock that never frees (a leaked holder) makes
@@ -193,7 +206,8 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    included. Reading one when it is asked for would mean evaluating the configuration (seconds).
    Possible: defaults written by NixOS's manual build, or an evaluation per setting in its own
    process.
-6y. **Reading the history asks for the owner's password out of dev mode** — decided: the history is
+6y. **Reading the history** was the owner's alone, with a password, out of dev mode; since the socket
+   broker (ADR-040) it is anyone's on the machine to read, and only the broker writes it. Formerly: the history is
    privileged (ADR-026).
 6z. **A group that does not exist is quietly ignored** (found 2026-11-02, on torq5) — fixed: warned.
    - **What happens:** `set users users viper extraGroups docker`, with Docker off, commits without
@@ -244,13 +258,13 @@ is 6p, N18 is 6 (below).
 | N1 | **high:** a `_`-named `nixos/*.json` file (`_type`, `contents`) gets past the fence | fixed: a file there is named after a top-level NixOS option, never `_` (modules/nixos-settings.nix; tree: nixos-fence-underscore-file) |
 | N2 | **high:** `users extraUsers` (NixOS's alias) gets past the password rule; root can get a password | fixed: the aliases are fenced (settings-fence.nix `aliases`); an assertion keeps root without a password, a config file included (tree: nixos-fence-alias-users, config-root-password) |
 | M2 / N12 | A missing boot profile is not a problem to `status`; `repair` counts it as fine | open (apply/restore half fixed) |
-| M3 | A password change can take effect without its ledger entry; no fsync of the folder | open — one transaction |
+| M3 | A password change can take effect without its ledger entry; no fsync of the folder | fixed: the entry first, `password_failed` after it if the change fails, saying whether the running system has it; the folder synced. Stopped between the two, the ledger says too much, never too little. A crash after the running system has it and before it is kept leaves no `password_failed`, and the next start or build brings the old one back |
 | M4 / N13 | Outside-switch checks are a moment's; `confirm` has none (nor the unledgered-HEAD check) | open |
 | L1 | Proposal file names printed unescaped | fixed: escaped as everything the broker shows |
 | L2 | `XDG_STATE_HOME` taken without an owner check | open |
 | L3 | A save file may hold a file and its deletion marker | open |
 | L4 | Nested `top` without limit | fixed: a command is never inside itself (`top top` refused; the grammar's `Walked::next`, for `?` too) |
-| N3 | A torn ledger append (power cut, full disk) stops every broker command, recovery too | open — write-ahead copy, repaired and ledgered |
+| N3 | A torn ledger append (power cut, full disk) stops every broker command, recovery too | fixed: a last line with no end is read past and said by `status`, and goes at the next entry or push, atomically, its bytes in the entry that says so (`ledger_mended`). One the hash vouches for gets its newline back. A whole line that does not verify is an edit: nothing touches the ledger then |
 | N4 | `propose --reason` may hold newlines: forged git trailers | fixed: a reason is one line, no control characters (refused at propose; torqcli sends one clean line) |
 | N5 | Only torq-broker-init is sandboxed; SECURITY-MODEL says all are | open — sandbox the root units, fix the sentence |
 | N6 | `systemd tmpfiles` and `environment.etc."nixos/*"` reach the broker's inputs and the /etc/nixos guard | open — fence them |
@@ -261,7 +275,7 @@ is 6p, N18 is 6 (below).
 | N11 | The broker takes `$6$` alone as a hash | fixed: crypt's whole form (`policy::password_hash_ok`) |
 | N14 | `TORQ_NIXOS_SCHEMA` honoured in release builds | not so: only a test reads it; torqcli reads /etc/torq/nixos-schema.json, fixed |
 | N15 | Helpers found through PATH (`nix`, `git`, `id`, `ssh-keygen`, …) | open — absolute paths |
-| N16 | The broker reads `--diff`/`--hash-file` without an owner check or O_NOFOLLOW | open (matters with the M3 socket) |
+| N16 | The broker reads `--diff`/`--hash-file` without an owner check or O_NOFOLLOW | closed on the socket (ADR-040): a diff or hash comes in the request, written by the broker to its own 0700 directory; `sudo torq-broker` is root reading root's choice |
 | N17 | The /etc/nixos guard stops the default path only; CLAUDE.md says more | CLAUDE.md reworded; the guard is as SECURITY-MODEL says |
 | N19 | Every proposal's diff is in the ledger; each call parses it all | open — diffs by hash beside it |
 
@@ -341,7 +355,10 @@ Its §5 lists claims without a test.
    in words and exits 0. Scripts and monitoring use `sudo torq-broker --json status` (its `ok`,
    `busy`, exit codes), which is what `torq status` read. Pending-change detail (`torq log <n>`) has
    no torqcli view yet beyond `show system ledger`. (Found by review of 4g.)
-6m. **The fence is not the AI's boundary.** modules/settings-fence.nix keeps the broker's own inputs
+6m. **The fence is not the AI's boundary — the agent's list is (ADR-041, 2026-11-05, `tests/agent.nix`):** the broker
+   refuses every proposal of the agent's account that changes a setting outside `torq.agent.mayPropose`
+   (none by default), or anything that is no setting, and ledgers the refusal. What stays as below
+   is the fence for people's own changes. Before: modules/settings-fence.nix keeps the broker's own inputs
    out of the configuration tree's data and refuses module directives (`_type`) in it, but settings
    that run code as root — a service's script, sudo rules, wrappers, tmpfiles, activation scripts,
    binary caches and their keys, extra groups — stay settable: ordinary system-tier power when a
@@ -397,3 +414,215 @@ Its §5 lists claims without a test.
    glob is linked under its files' own names, not its target, and is not checked for where those
    land (no way to make one land in /etc/torq from the tree was found). The unit fence covers
    `torq-*` services, timers and units, not sockets or paths (the broker has none yet).
+
+6zf. **The socket broker's open ends** (ADR-040; its adversarial review, 2026-11-04). Fixed from
+   that review: faillock's counts in a root-only directory (`/run/torq/faillock`), so the person
+   cannot reset their own; password checks one at a time per account (not yet exercised by a test); `apply --confirm` an
+   administrator's (it holds everyone else's changes back); services' accounts propose nothing;
+   the whole request within 10 s; the reply through a bounded queue, so a caller that stops reading,
+   or reads too slowly, is dropped and the broker never waits on it (the second review); four connections per
+   account; every entry records the kernel-given `caller`; Nix's build users (uid 30001 on) are not
+   people; and sudo, su and passwd lock as the broker does (the owner's decision, 2026-11-04:
+   `torq.security.passwordLockout`, the same count in the same root-only directory). Open:
+   - **The agent as a DynamicUser** (ai.nix's plan) would not be in /etc/passwd, which the broker
+     reads to name its caller: the agent's account (M3's next item) is a static system user.
+   - **Proposals are not limited.** A person (or the agent) can propose as often, and as large
+     (8 MiB a request), as they like, and every proposal stays in the hash-chained ledger for good:
+     a ledger, and disk, that only grow. Wants a limit of open proposals per account and a rate.
+   - **`status` holds the broker lock** while it checks the whole ledger: anyone looping it can
+     make others' changes wait and fail as busy (3 s). Check before taking the lock.
+   - **An own-folder `apply` first runs `reconcile`**, which can finish an interrupted setup or
+     roll back an interrupted commit confirmed — ledgered as approved by that person, though
+     `reconcile` itself is an administrator's. It only restores the ledgered state.
+   - **`via` is what the broker was told.** A wheel member may `sudo TORQ_VIA=socket …`, and `su -`
+     sets no SUDO_UID: `via` and `caller` are evidence only for entries a non-root caller made over
+     the socket; root can write anything.
+   - **Reading is everyone's:** every account — the agent's and services' included — sees every
+     proposal (unapplied too), each person's package list, the reasons. Nothing secret is in the
+     ledger (password hashes are kept outside it), but it is wider than root-only was.
+   - **Not sandboxed**: `torq-broker@` runs as the broker under sudo does (a development source is
+     built from a home). N5's sandboxing comes with the root units' own.
+   - A caller that reads too slowly (the reply queue) is not yet exercised by a test; nor is
+     a switch that changes `torq-broker.socket` while an instance runs.
+
+6zg. **The agent's account, first step (ADR-041).** Fixed from its adversarial review (2026-11-05): a
+   person is shown what a proposal *does* — the diff git writes of its result, recorded by the broker
+   when it is proposed — never the proposer's text, which git can apply differently (lines past a
+   hunk's count); every refusal of the agent's is ledgered, the forbidden ones and the diffs that do
+   not apply included, at most 30 an hour; its reasons at most 200 characters, at most 20 of its
+   proposals waiting; its list checked again at apply; paths given to git literally; a bare `system`
+   refused. From the second review: no refusal is ledgered before the ledger has begun (it would
+   have stopped setup); only proposals that can still land count toward the twenty; the shown
+   diff is forced to text, and git's own files (`.gitattributes`, `.gitignore`, …) are refused for
+   everyone. Open ends:
+   - **`torq agent run` (ADR-041, 5) has a root first step**: `torq-agent-run`, a shell script, runs
+     as root to bind the shared directory, then drops to the agent. It is small and checked (the
+     descriptor's device and inode, the owner, setpriv), but it is root code a person's arguments
+     reach — the kind the broker's rule says should be Rust. And the sandbox is bubblewrap's with
+     the network on: a tool run as the agent can reach anything the machine can.
+   - **A share runs as the person later.** What the agent writes in a shared project — a git hook,
+     `.envrc`, a Makefile, a package's scripts, `.claude/settings.json` hooks — runs as the person
+     the next time they use it there, and the person is an administrator. Not blocked (it is what a
+     shared project is); a review of what changed there (`git status`, `.git/hooks`) after a session
+     is the defence, for now. The agent can also make its own files there unreadable to the person
+     (it owns them); the person can still remove them.
+   - **The agent as a service** (M5) runs as the same account: `torq agent run --share` refuses while
+     any agent process runs, so a running agent service will block sharing until that is designed.
+   - **The agent's own `commit`** (it proposes and stops) is tested in torqcli's unit tests, not in a
+     VM: the VM tests' configurations are stubs torqcli cannot evaluate.
+   - **Stale proposals stay listed.** A proposal prepared against an older configuration is refused
+     at `request system apply` (the configuration has moved on), but `show system proposals` still
+     lists it; there is no way to withdraw or expire one.
+   - **The list is by setting, not by what a setting does.** `services.openssh` allows every option
+     under it — `services.openssh.extraConfig` included. Listing a subtree is trusting the agent
+     with all of it; the narrower the list, the safer.
+   - **`tainted` is the proposer's word.** The agent marks its own proposals as having read untrusted
+     content; a proposal without the mark proves nothing. It should come from the session that runs
+     the agent (M5), not from the agent.
+   - **Past 30 refusals an hour, the rest leave no entry** (a cap, so that refusals cannot fill the
+     ledger): an agent can spend the 30 and then probe unrecorded for the hour. One summary entry
+     ("N more not recorded") would close it.
+   - **A refusal's hash is of the request's file as the broker re-reads it**: over the socket that is
+     the broker's own copy (root's 0700 directory); under sudo, root's word.
+
+6zh. **The remote's open ends (ADR-036, the push and the anchor; its review, 2026-11-05).** Fixed
+   from it: a merge in the remote's ledger history is refused (a rewrite set beside it passed a
+   first-parent walk); the history is checked from the last commit verified, one ledger at a time;
+   every git call to the remote stopped after a minute (a remote that answered but never finished
+   held the broker's lock); `main` not pushed while a commit confirmed waits (its rollback would
+   have forked it); the ledger commit made on the remote's newest; the alarm sticky until a person
+   clears it, ledgered, and raised too for a ledger gone from the remote or a changed host key;
+   a day without a push an alarm; the wording blames neither side; paths quoted. From the second
+   review: `main` never pushed while an operation is unfinished, and pushed apart from the ledger
+   (a `main` the remote refuses — another history there — is a problem of its own, and no longer
+   keeps the ledger from it); a ledger the remote holds but that cannot be read is a disagreement;
+   each URL has its own record (a new one starts afresh); a day after pushes began to fail, an
+   alarm. Open:
+   - **What the anchor needs from the remote:** on `torq-ledger`, for the deploy key, no
+     non-fast-forward update and no deletion. Without them root can replace the remote's history.
+     torq5's remote (`netstacks/torq5-config`) is private and **unprotected** for now: GitHub keeps
+     branch protection on private repositories for paid plans (the owner's choice, 2026-11-05).
+     Protection, when added: `deletion`, `non_fast_forward` on every branch.
+   - **A check from elsewhere must walk every step.** Root may still append any fast-forward commit;
+     a verifier off the machine must check each push extends the one before, not only the tip.
+   - **A remote, or a man in the middle on first contact, can latch the alarm** (a "host key
+     changed", a history it rewrote): pushes stop until an administrator clears it — a denial of
+     service on the owner, never a way in.
+   - **The machine's alarm is root's.** Root can delete `alarm.json` or `verified`, as it can rewrite
+     the ledger. The record root cannot reach is the remote's protected `torq-ledger` branch; a check
+     of it from elsewhere (another machine, a CI job) is what makes the anchor root-proof.
+   - **First contact is trusted.** The host key is pinned when first seen (`accept-new`); a host key
+     given with the URL would close it. A changed key is an alarm; the fix, when it is a rotation,
+     is to remove `remote/known_hosts` as root and clear the alarm.
+   - **Not yet tested in a VM:** a commit confirmed rolled back with a remote (unit reasoning only).
+   - **The key's creation is not ledgered** (`remote-key`); only the URL, a setting, is.
+   - **Pull (`request system pull`)** takes the remote's `incoming` branch, settings and config files
+     only. `incoming` is not cleared after: a second pull of it loads nothing new (the candidate is
+     the configuration in effect). `show system remote` does not yet say whether `incoming` has
+     something this machine has not taken.
+   - **A pull's fetch has no size cap** (only a time limit): a remote, or whoever writes its
+     `incoming`, can put large objects into the config repo; they stay until git collects them.
+   - **The pulled configuration is evaluated before the commit question** — as on any commit, by
+     the person's torqcli (`nix eval`, pure): its Nix may build what it imports (import from
+     derivation) before anyone says yes. It cannot reach root.
+
+6zi. **Adopt at setup (ADR-036).** Open:
+   - **First contact is trusted, and SSH proves nothing about the deploy key.** Anyone answering as the
+     host on first contact is pinned, and can accept any key and serve a forged repository: the
+     console shows the host key's fingerprint and the commits to compare, and only that person's
+     comparing stops it. Pinned host keys for common hosts, or the old ledger's hash typed in, would.
+     Each retry trusts first contact again (a changed key shows once as an error, then is re-pinned).
+   - **The summary reports the tree's SSH settings, not everything.** Other settings and attached
+     files can turn SSH on or do anything else: the console says so. Only an evaluation of the whole
+     configuration, shown before the question, would be complete.
+   - **The staging fetch has a time limit, no size limit**, and the checks after it none of time.
+   - **The trust is the deploy key.** Whoever can add a key to the repository decides what a new
+     machine becomes; commits are not signed yet, so nothing on the machine can tell a repository
+     rewritten by its host from the owner's. The ledger's checks show it is consistent, not whose.
+   - **Only the owner's password is asked.** Other people in the configuration have none on the new
+     machine until `request system password`.
+   - **A broker that dies mid-adopt** after the switch and before the ledger goes in leaves the new
+     system running with no ledger (setup's own record of a cut-short setup does not cover adopt).
+   - **`torq.dev.enable` and every other setting travel** with the configuration: adopting a dev
+     machine makes a dev machine. The summary does not call it out.
+
+6zj. **Strict mode and break-glass (ADR-035).** Open:
+   - **No ledger, no shell, by the owner's decision (2026-11-05: "I prefer secure over back doors").**
+     If the entry cannot be written (a ledger edited or damaged; a power cut's torn line is mended, N3;
+     a full disk is not one any more, since the record has a file system of its own, the audit of M3, M2)
+     break-glass refuses, and with strict mode on sudo offers nothing else.
+     Mending a torn line needs room for a copy of the ledger, on the record's own file system.
+     This is a limit accepted, not a gap to close: do not add a fallback shell. The way back is the
+     console: an older generation from before strict mode, if one is left (they are limited and
+     collected, and an adopted machine may have none), and otherwise external media.
+   - **An older generation is also a way round.** A person at the console who boots a generation from
+     before strict mode has its sudo, and root with no entry. `status` reports the drift afterwards;
+     nothing is ledgered. Physical access is outside what strict mode claims; measured boot is its answer.
+   - **"Yes" at the question leaves the entry on this machine alone.** A person who cuts the network,
+     answers yes and edits the ledger as root leaves the remote no trace of that shell. The remote's
+     check sees a rewritten ledger only if it has already seen the entry.
+   - **What the shell does is not recorded,** only that it opened, who opened it and why.
+   - **It keeps root rare, not absent.** A person with the password can still commit a configuration
+     that runs anything as root: that is a change, ledgered, and it is meant to work.
+
+6zk. **Snapshots of the data (ADR-038).** Open:
+   - **Root can delete them, and so can an administrator,** with a password and on the record. They keep
+     what a person or a program deletes; a root shell can remove
+     them too, as it can anything on the machine. The backup (not built) is what lives elsewhere.
+   - **What is deleted stays on the disk** until its snapshot goes, ten system changes later (`torq snapshots
+     keep`), or an administrator deletes it (`request system snapshot delete`): a person
+     who deletes a secret on purpose has not removed it from the machine, and it counts against the disk.
+   - **Only system changes take one.** A person's own settings do not, or anyone could push everyone's
+     restore points out without a password. So data lost between system changes may have no snapshot,
+     and an administrator's ten changes in a row do move the oldest on, whoever's data they held.
+   - **Folders of root's are not restored** (`/var/lib/systemd`, `/var/lib/private`, a service that runs
+     as root): that takes break-glass. A folder holding several owners' files comes back as far as its
+     owner can write it, all of it theirs.
+   - **A restore is a copy.** Set-id bits are dropped on purpose; extended attributes and ACLs are not
+     carried; it takes the space of what it brings back, and a person's `.restoring-` name beside the
+     target while it runs. If a machine stops mid-copy that name stays, and nothing is ledgered.
+   - **An owner can stall their own restore for as long as they like.** It blocks no one: the lock is
+     not held. The administrator's command waits; there is no time limit, since a large copy takes hours.
+   - **A device node in a folder fails the whole restore:** an owner cannot make one. What is live stays.
+   - **Nothing holds a change off during a copy.** A commit confirmed may begin, or a rollback run, while
+     data comes back; a prune may delete the snapshot being read, and the restore then fails, what is
+     live untouched. The check for a waiting commit is at the start only.
+   - **Parents a restore has to make are the owner's alone (700),** whatever they were in the snapshot, and
+     stay after a failed copy: private, and to be opened up by hand. Restore the folder to get its modes.
+   - **In a folder a person can write and does not own** (a 777 folder of a service's), they can swap
+     in a link and the owner's copy follows it, as that owner. An administrator chooses that path.
+   - **A service is not stopped for its data.** A person stops it first; the command says to restart it.
+   - **A subvolume a person makes in their own home** is not in a snapshot of `/home`: its contents
+     are not kept, and nothing says so.
+   - **Machines on ext4 have none,** torq5 among them, so this is tested in VMs and not lived with.
+   - **The image is not reproducible:** its btrfs and partition ids are random at build, and every
+     copy of one image shares them. Two disks from one image on one machine are the case `not_elsewhere`
+     already refuses to install into; booted, the first found wins.
+   - **CI's disk room is unproved.** The image now takes a further stage to build; the first release
+     build after this will say whether the runner has the space.
+   - **A deleted snapshot is not wiped:** its blocks are free, not overwritten, so a secret in one is out of
+     reach of the file system, not of someone reading the raw disk.
+   - **Not built:** the declared backup, `request system restore`, and offering data at `rollback`.
+
+6zl. **The audit of M3 (2026-11-06).** Fixed from it:
+   - **H1:** a proposal's gate read the tier it was proposed with, while `apply` used what the diff did
+     at HEAD. The socket refuses a proposal with no `--base`; `apply` refuses one that no longer does
+     what was judged, ledgered as `apply_refused`.
+   - **M1:** the push held the broker's lock across the network, and every request pushed: any account
+     could keep every check busy, and so silent. The push has a lock of its own; a command that wrote
+     nothing pushes nothing; `status` waits as an operation does, and says what the record says of
+     itself while busy.
+   - **M2:** any account could fill the one btrfs, and the ledger then had no room: `/var/lib/torq` is a
+     file system of its own (1 GiB, root's). Machines installed from images before 0.2.2 never had btrfs.
+   - **M3:** five wrong `su` attempts by anyone locked the owner out: `su` is root's alone.
+   - **M4 and N19:** the agent could pad the ledger past what adopt takes: diffs and effects are kept
+     beside it by hash, padding is refused, the agent's diffs are at most 1 MiB.
+   - **M5:** a store path changed in place passed every check: a daily check, `repair` puts it back. The
+     claim "cannot outlive a rebuild" is corrected (ADR-035).
+   - **L1:** `show system alarms` names the remote's alarm. **L3:** the fence covers the socket and the PAM
+     stacks. **M6:** tests for the rarest guards (see the commit log for each).
+   Open from it:
+   - **The store's own record of hashes** is root's to rewrite, and then the daily check agrees with it.
+   - **What root leaves outside the configuration** survives a rebuild; only a reinstall clears it.
+   - **unix_chkpwd**, setuid, checks a person's own password with no count: a program running as them can
+     guess it there, slowly. The audit did not raise it; found while fixing M3.

@@ -141,6 +141,11 @@ pub fn tier_for_path(path: &str) -> Tier {
     if p.contains("..") {
         return Tier::Forbidden;
     }
+    // Git's own files in the tree (.gitattributes, .gitignore, .gitmodules) are no configuration, and
+    // change how git shows and applies everything else (the second review of ADR-041).
+    if p.split('/').any(|c| c.starts_with(".git")) {
+        return Tier::Forbidden;
+    }
     if FORBIDDEN_PREFIXES.iter().any(|f| p.starts_with(f)) {
         return Tier::Forbidden;
     }
@@ -158,9 +163,11 @@ pub fn tier_for_paths<S: AsRef<str>>(paths: &[S]) -> Tier {
         .unwrap_or(Tier::Observe)
 }
 
-pub fn check_allowed(actor: Actor, tier: Tier) -> Result<()> {
-    if actor == Actor::Agent && tier == Tier::Forbidden {
-        bail!("refused: the agent may not change forbidden paths (policy, secure boot, ledger)");
+pub fn check_allowed(tier: Tier) -> Result<()> {
+    // For everyone, here, where every way in passes: the socket refusing it was one door of several
+    // (sudo, setup, recovery), and a new one would have had to know (the review of 0.2.1, M2).
+    if tier == Tier::Forbidden {
+        bail!("refused: no one may change forbidden paths (policy, secure boot, the ledger, git's own files)");
     }
     Ok(())
 }
@@ -251,10 +258,19 @@ mod tests {
         assert!(!ok("cli.json", r#"{"style": "j"}"#), "no longer a user leaf (ADR-021)");
     }
 
+    /// The second review of ADR-041: git's own files change how git shows and applies the rest.
     #[test]
-    fn agent_cannot_touch_forbidden() {
-        assert!(check_allowed(Actor::Agent, Tier::Forbidden).is_err());
-        assert!(check_allowed(Actor::User, Tier::Forbidden).is_ok());
-        assert!(check_allowed(Actor::Agent, Tier::System).is_ok());
+    fn gits_own_files_are_no_ones() {
+        for p in [".gitattributes", "nixos/.gitattributes", "users/casey/.gitignore", ".gitmodules"] {
+            assert_eq!(tier_for_path(p), Tier::Forbidden, "{p}");
+        }
+        assert_eq!(tier_for_path("nixos/services.json"), Tier::System);
+    }
+
+    #[test]
+    fn no_one_touches_forbidden() {
+        assert!(check_allowed(Tier::Forbidden).is_err());
+        assert!(check_allowed(Tier::Forbidden).is_err(), "a person's too: sudo, setup and recovery go through here");
+        assert!(check_allowed(Tier::System).is_ok() && check_allowed(Tier::User).is_ok());
     }
 }

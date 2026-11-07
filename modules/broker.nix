@@ -2,8 +2,74 @@
 
 let
   cfg = config.torq.broker;
+  # Read only, and root's alone: what a snapshot holds is every person's files as they were, and
+  # keeping it from them is what lets it outlast what they, or a process of theirs, deletes.
+  snapshot = pkgs.writeShellApplication {
+    name = "torq-snapshot";
+    runtimeInputs = [ pkgs.btrfs-progs pkgs.coreutils pkgs.findutils ];
+    text = ''
+      action=$1 label=$2
+      case "$label" in "" | *[!0-9]*) echo "torq-snapshot: a label is digits" >&2; exit 2 ;; esac
+      dir=/.snapshots/$label
+      forget() {
+        for s in "$1"/*; do
+          [ -e "$s" ] && btrfs -q subvolume delete "$s"
+        done
+        rmdir "$1"
+      }
+      if [ "$action" = delete ]; then
+        [ -d "$dir" ] || { echo "torq-snapshot: no snapshot $label" >&2; exit 1; }
+        forget "$dir"
+        exit 0
+      fi
+      # Room first: a disk too full for this one still gives up its oldest. Oldest first: labels are
+      # times. One that will not go is said and stops nothing: this snapshot is what counts.
+      find /.snapshots -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -printf '%f\n' | sort -n | head -n -${toString (config.torq.snapshots.keep - 1)} | while read -r old; do
+        forget "/.snapshots/$old" || echo "torq-snapshot: $old would not go" >&2
+      done
+      mkdir -m 700 "$dir"
+      if ! { btrfs -q subvolume snapshot -r /home "$dir/home" && btrfs -q subvolume snapshot -r /var/lib "$dir/var-lib"; }; then
+        forget "$dir" || true
+        exit 1
+      fi
+    '';
+  };
 in
 {
+  # The config repo's remote (ADR-036): where the configuration and its ledger also live, pushed after
+  # every change. `torq remote url <ssh url>` in the tree (a system change); none by default (ADR-004).
+  options.torq.remote.url = lib.mkOption {
+    type = lib.types.nullOr (lib.types.strMatching "(ssh://([A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?/[A-Za-z0-9._~/-]+|[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~/][A-Za-z0-9._~/-]*)");
+    default = null;
+    example = "git@github.com:you/torq5-config.git";
+    description = ''
+      The config repo's remote, over SSH only (ssh://host/path, or user@host:path): after every change
+      the broker pushes the configuration and its ledger there, never forced. A private repository,
+      with branch protection (no force-push): then the ledger it holds cannot be taken back, and a
+      ledger rewritten here is an alarm. The machine's key for it: `request system remote key`.
+    '';
+  };
+
+  # Outside `torq.broker`, which the configuration tree may not reach: these are a person's to choose
+  # (`set torq snapshots keep 20`), a system change, and never the agent's. What the broker runs for
+  # them stays fenced.
+  options.torq.snapshots = {
+    enable = lib.mkOption {
+      type = lib.types.bool;
+      default = (config.fileSystems."/.snapshots".fsType or "") == "btrfs";
+      defaultText = lib.literalExpression ''config.fileSystems."/.snapshots".fsType == "btrfs"'';
+      description = ''
+        Snapshot `/home` and `/var/lib` before each system change, read only, in `/.snapshots` (ADR-038). On by
+        itself on a disk laid out for it, as the image's and the ISO's are; an ext4 machine has none.
+      '';
+    };
+    keep = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 10;
+      description = "How many to keep, newest first: what they hold stays on the disk, deleted or not, until they go. Only system changes take one, so only an administrator moves them on.";
+    };
+  };
+
   options.torq.broker = {
     enable = lib.mkOption {
       type = lib.types.bool;
@@ -102,6 +168,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+
     environment.systemPackages = [ cfg.package ];
 
     systemd.tmpfiles.rules = [
@@ -109,6 +176,9 @@ in
       "d ${cfg.stateDir} 0700 root root -"
       "d /run/torq 0755 root root -"
     ];
+    # faillock's counts of wrong passwords (ADR-040): root's alone, so a program running as a person
+    # cannot reset its own between guesses. (The same entry as modules/security.nix's, for sudo and su.)
+    systemd.tmpfiles.settings."10-torq-faillock"."/run/torq/faillock".d = { mode = "0700"; user = "root"; group = "root"; };
 
     # Drift from the ledger (the machine switched to another configuration, the config repo
     # changed behind the broker's back, an interrupted operation, a broken ledger) must not go
@@ -143,10 +213,44 @@ in
         exit 0
       '';
     };
+    # Daily: the running system's store paths against what the store recorded when each was built. A path
+    # changed in place is one no rebuild looks at again (the audit of M3, M5); `status` says so, and
+    # `repair` puts it back.
+    systemd.services.torq-verify-store = {
+      description = "Check the running system's store paths against the store's record of them";
+      restartIfChanged = false;
+      serviceConfig = { Type = "oneshot"; Nice = 19; IOSchedulingClass = "idle"; };
+      script = "${lib.getExe cfg.package} verify-store > /dev/null || true";
+    };
+    systemd.timers.torq-verify-store = {
+      wantedBy = [ "timers.target" ];
+      timerConfig = { OnBootSec = "20min"; OnUnitActiveSec = "1d"; RandomizedDelaySec = "1h"; };
+    };
+
     systemd.timers.torq-status = {
       wantedBy = [ "timers.target" ];
       timerConfig = {
         OnBootSec = "2min";
+        OnUnitActiveSec = "15min";
+      };
+    };
+
+    # With a remote (ADR-036): what a change could not push (the remote out of reach), pushed later.
+    # Never fails: an unreachable remote is recorded for `show system remote`, not a broken unit.
+    systemd.services.torq-remote-push = lib.mkIf (config.torq.remote.url != null) {
+      description = "Push this machine's TorqOS configuration and ledger to its remote";
+      after = [ "network-online.target" "torq-broker-init.service" ];
+      wants = [ "network-online.target" ];
+      restartIfChanged = false;
+      serviceConfig.Type = "oneshot";
+      script = "${lib.getExe cfg.package} push || true";
+      # Each git call to the remote is stopped after a minute (the broker's); the whole, after five.
+      serviceConfig.TimeoutStartSec = "5min";
+    };
+    systemd.timers.torq-remote-push = lib.mkIf (config.torq.remote.url != null) {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "3min";
         OnUnitActiveSec = "15min";
       };
     };
@@ -170,6 +274,7 @@ in
         activate = cfg.activateCommand;
         boot = cfg.bootCommand;
         schedule = cfg.scheduleCommand;
+        snapshot = lib.optionalString config.torq.snapshots.enable "${snapshot}/bin/torq-snapshot {action} {label}";
         currentSystem = "/run/current-system";
         systemProfile = "/nix/var/nix/profiles/system";
         # The tools undo depends on, by store path first: a reviewed but mistaken change that drops
@@ -178,13 +283,21 @@ in
         path = lib.makeBinPath [
           config.nix.package
           pkgs.gitMinimal
+          # The remote (ADR-036): git over SSH, and the machine's key for it.
+          pkgs.openssh
           pkgs.coreutils
+          pkgs.gnutar
+          pkgs.util-linux
           pkgs.bash
           config.systemd.package
         ] + ":/run/current-system/sw/bin";
         home = "/root";
         # The only accounts whose password the broker sets (modules/accounts.nix).
         people = config.torq.accounts.people;
+        # What the agent may propose (ADR-041, modules/agent.nix).
+        agent = { inherit (config.torq.agent.mayPropose) users settings; };
+        # The config repo's remote (ADR-036): none, or an SSH URL.
+        remote = config.torq.remote.url;
       };
      }
 
@@ -198,7 +311,7 @@ in
           This machine is managed by TorqOS. Its configuration is ${cfg.configRepo}, and only
           torq-broker changes it, so that every change is ledgered and can be undone:
             torqcli                     (configure; set …; commit — software, services, settings)
-            sudo torq-broker propose --diff change.diff --reason "..."   (anything else)
+            sudo torq-broker propose --diff change.diff --reason "..."   (anything else; not in strict mode)
           Do not build /etc/nixos or any other configuration yourself: it would replace
           this whole system with a stock NixOS one, outside the ledger.
         '';
@@ -242,11 +355,14 @@ in
       done
     '';
     system.activationScripts.etc.deps = lib.mkIf cfg.guardEtcNixos [ "torq-guard-etc-nixos" ];
-    assertions = lib.mkIf cfg.guardEtcNixos [{
+    assertions = lib.mkMerge [ [{
+      assertion = !config.torq.snapshots.enable || (lib.all (m: (config.fileSystems.${m}.fsType or "") == "btrfs") [ "/home" "/var/lib" "/.snapshots" ] && config.fileSystems ? "/var/lib/torq" && config.fileSystems."/var/lib/torq".device != config.fileSystems."/var/lib".device);
+      message = "torq.snapshots: /home, /var/lib and /.snapshots must each be a btrfs subvolume, and /var/lib/torq a file system of its own: otherwise every snapshot of /var/lib would hold the ledger and the password hashes, and filling the disk would leave the record no room. Without that layout, set torq.snapshots.enable = false.";
+    }] (lib.mkIf cfg.guardEtcNixos [{
       # With a mutable /etc overlay, moving the old file aside leaves a whiteout that hides the stub.
       assertion = !(config.system.etc.overlay.enable or false);
       message = "torq.broker.guardEtcNixos does not support system.etc.overlay yet.";
-    }];
+    }]) ];
 
     # Initialise repo + ledger once a config flake has been placed in the repo directory.
     # Runs exactly once: after that, only the broker writes to the repo. Re-running it on every
@@ -275,6 +391,54 @@ in
         NoNewPrivileges = true;
       };
     };
+
+    # The broker's door (ADR-040): a socket anyone may connect to, because who may do what is
+    # decided inside — by the caller's uid, from the kernel (SO_PEERCRED), and the change's tier.
+    # Each connection is one `torq-broker serve`, as root, its standard input and output the
+    # connection. torqcli needs no sudo; `sudo torq-broker` stays the recovery door, but for strict
+    # mode, where sudo does not run it (modules/strict.nix): there the door is break-glass.
+    systemd.sockets.torq-broker = {
+      description = "TorqOS change broker";
+      wantedBy = [ "sockets.target" ];
+      socketConfig = {
+        ListenStream = "/run/torq/broker.sock";
+        SocketMode = "0666";
+        Accept = true;
+        # A queue, not a crowd: the broker's lock serialises changes anyway.
+        MaxConnections = 16;
+        # Per account (a Unix socket counts its peers by uid): no one holds every connection.
+        MaxConnectionsPerSource = 4;
+      };
+    };
+    systemd.services."torq-broker@" = {
+      description = "TorqOS change broker: one request";
+      after = [ "torq-broker-init.service" ];
+      # Never stopped or restarted by a switch — the switch it is running, often.
+      restartIfChanged = false;
+      stopIfChanged = false;
+      serviceConfig = {
+        ExecStart = "${lib.getExe cfg.package} serve";
+        StandardInput = "socket";
+        StandardOutput = "socket";
+        StandardError = "journal";
+        # Its settings (and PATH) come from /etc/torq/broker.json, and it runs as it does under
+        # sudo: no ProtectHome, since a development source (`path:/home/…`, ADR-009) is built from
+        # a home.
+      };
+    };
+
+    # A system change's password (ADR-040), checked by the broker as root: the account's own
+    # password (pam_unix, never an empty one), and faillock counting failures, so that guessing
+    # is slow, logged, and stops — five wrong, ten minutes locked.
+    security.pam.services.torq-approve.text = ''
+      auth     required       ${pkgs.pam}/lib/security/pam_faillock.so preauth dir=/run/torq/faillock deny=5 unlock_time=600
+      auth     [success=1 default=ignore] ${pkgs.pam}/lib/security/pam_unix.so
+      auth     [default=die]  ${pkgs.pam}/lib/security/pam_faillock.so authfail dir=/run/torq/faillock deny=5 unlock_time=600
+      auth     sufficient     ${pkgs.pam}/lib/security/pam_faillock.so authsucc dir=/run/torq/faillock deny=5 unlock_time=600
+      auth     required       ${pkgs.pam}/lib/security/pam_deny.so
+      account  required       ${pkgs.pam}/lib/security/pam_faillock.so dir=/run/torq/faillock
+      account  required       ${pkgs.pam}/lib/security/pam_unix.so
+    '';
 
     # A commit confirmed still waiting at boot was not confirmed before the machine restarted: its
     # timer was transient and is gone, and the boot default was never changed, so this boot already

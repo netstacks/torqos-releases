@@ -269,6 +269,15 @@ impl Whole<'_> {
     /// `networking hostName`), so where a setting is kept is decided on its name, never on how it was
     /// typed; words the tree does not take (an old name: `system host-name`) as they are.
     fn spelled(&self, words: &[String]) -> Vec<String> {
+        // `<place> config <file>` attaches a file, though `config` would also abbreviate an option there
+        // (`configFile` on Apache): only the place is written out. `attachment` says when it is one, so
+        // NixOS's own `config` (`containers <name> config`), and an entry's name, stay as they were.
+        if let Some(i) = words.iter().rposition(|w| w == "config") {
+            let attached = [self.spelled(&words[..i]), words[i..].to_vec()].concat();
+            if self.attachment(&attached).is_some() {
+                return attached;
+            }
+        }
         match self.tree.locate(words) {
             Ok((loc, _, values)) => [loc, values].concat(),
             Err(_) => words.to_vec(),
@@ -590,6 +599,37 @@ mod tests {
         assert!(x.set(&mut d, &w("config ../x.nix")).is_err());
     }
 
+
+    /// `config` is the attach word, typed, even where it would also abbreviate an option: Apache has
+    /// `configFile`, the only option there starting that way, and the word was written out to it first.
+    #[test]
+    fn attaching_where_an_option_begins_with_config() {
+        let t = t();
+        let x = Whole { schema: &t.schema, tree: &t.tree };
+        let mut d = Data::default();
+        x.set(&mut d, &w("services httpd config a.nix")).unwrap();
+        assert_eq!(d.attached["services httpd"].len(), 1);
+        // The place may be abbreviated, as anywhere: it is the same place.
+        x.set(&mut d, &w("serv httpd config b.nix")).unwrap();
+        assert_eq!(d.attached["services httpd"].len(), 2);
+        x.set(&mut d, &w("services httpd config [ c.nix d.nix ]")).unwrap();
+        assert_eq!(d.attached["services httpd"].len(), 4);
+        assert!(x.show(&d, &w("services httpd")).unwrap().contains("config ["));
+        // Deleting and showing go by the same words.
+        assert_eq!(x.delete(&mut d, &w("serv httpd config b.nix")).unwrap(), Deleted::Done);
+        assert_eq!(d.attached["services httpd"].len(), 3);
+        assert_eq!(x.delete(&mut d, &w("services httpd config")).unwrap(), Deleted::Done);
+        assert!(!d.attached.contains_key("services httpd"));
+        // The option is still there, by its name and by a shorter abbreviation.
+        x.set(&mut d, &w("services httpd configFile /etc/a.conf")).unwrap();
+        assert!(x.show(&d, &w("services httpd")).unwrap().contains("configFile /etc/a.conf"));
+        x.set(&mut d, &w("services httpd conf /etc/b.conf")).unwrap();
+        assert!(x.show(&d, &w("services httpd")).unwrap().contains("configFile /etc/b.conf"));
+        assert!(!d.attached.contains_key("services httpd"), "neither is an attachment");
+        // An entry may not take the word: below named entries it stays refused, not attached.
+        let e = format!("{:#}", x.set(&mut d, &w("services httpd virtualHosts config forceSSL true")).unwrap_err());
+        assert!(e.contains("keeps the word") && d.attached.is_empty(), "{e}");
+    }
     #[test]
     fn deleting_a_whole_place_and_the_catalog_says_its_new_name() {
         let t = t();

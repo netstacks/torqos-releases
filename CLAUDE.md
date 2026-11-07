@@ -62,7 +62,7 @@ broker/                Rust crate: torq-broker (ledger, policy, git, rebuild, ro
 cli/                   Rust crate: torqcli — the grammar, the candidate, the tree (ADR-025)
 tests/                 NixOS VM tests
 release/               allowed_signers: the keys a machine trusts a release from
-.github/workflows/     test on every push, weekly nixpkgs bump, release on a v* tag
+.github/workflows/     test (pull requests, by hand, each release), weekly nixpkgs bump, release on a v* tag
 branding/              the TorqOS logo, icons, terminal logos and palette (modules/branding.nix)
 docs/                  design docs and decision log
 ```
@@ -82,7 +82,7 @@ machine stays thin. `nix develop` for a shell, or `nix develop --command …` fo
 nix develop --command bash -c 'cd broker && cargo test'   # incl. ledger tamper detection
 nix develop --command bash -c 'cd cli    && cargo test'   # the grammar, candidate, tree
 
-# Nix — x86_64 here; aarch64 is CI's (ADR-030), assume nothing about it locally
+# Nix — x86_64 only: aarch64 is neither built nor tested during development (ADR-030, amended)
 nix flake check                                   # eval + tree checks + VM tests
 nix build .#checks.x86_64-linux.trust-loop        # one VM test
 nix build .#checks.x86_64-linux.image             # boot, setup, a commit, a signed update
@@ -102,7 +102,17 @@ sudo torq-broker log && sudo torq-broker verify && sudo torq-broker status
 The VM tests need `/dev/kvm` to be quick; on `torq5` it is there (ESXi exposes nested
 virtualisation). Without it QEMU falls back to TCG and they take minutes.
 
-## Current milestone (M2) — Install: TorqOS as a ready image
+## Current milestone — 0.3.0: M3 finished, data, and the agent's non-GUI half
+
+As of 2026-11-07 the owner set 0.3.0's scope: everything that is not desktop or GUI. M3's build list is done
+(the socket broker, the agent's account and `torq agent run`, the remote with push, anchor, pull and adopt,
+strict mode and break-glass, btrfs images with data snapshots, ledger hardening) and its audit
+(`~/torq-audit-m3/`, kept off the repository until its findings are fixed; KNOWN-GAPS 6zl) is being
+worked through. Then: the release path (A2, A3), `commit at`, `configure exclusive`, systemd-repart;
+the declared backup and `request system restore` (ADR-038); the agent's doctor mode, proposals with
+taint tracking, and session trust (M5, AI-LAYER.md). The desktop (M4) and the agent's GUI parts come after.
+
+### Earlier: M2 — Install: TorqOS as a ready image
 
 Nobody has to build TorqOS to install it: a release is an image to download and boot. Done — the
 qcow2 and the ESXi VMDK, first-boot setup at the console, customer-safe defaults, signed releases a
@@ -158,7 +168,7 @@ broker first.
 
 ## Current status (read this first) — 2026-11-04
 
-- **Handoff (2026-11-04, M2 done; `v0.2.0` is the owner's tag to push):** on `main`, each branch
+- **Handoff (2026-11-04, M2 done; **v0.2.0 released** 2026-11-04, `stable` moved):** on `main`, each branch
   reviewed in a fresh session and its findings fixed: the ISO installer (ADR-031; KNOWN-GAPS 6zc);
   the skeleton (ADR-032; 6zd); the EFI-partition test (`tests/boot.nix`, check `boot`) —
   ADR-033's Lanzaboote **deferred** to Secure Boot (its premise was false: Python stays for
@@ -170,14 +180,14 @@ broker first.
   ledgering a failed switch) fixed, A3 and A11 in part, A2 and the rest in KNOWN-GAPS' audit table
   for M3. The version is 0.2.0 (`scripts/bump-version`, which with `--release` also tags and pushes); release.yml refuses a tag that is not the
   source's version, or would move `stable` back. torq5 runs this `main` (change #23, TorqOS 0.2.0).
-  `nix flake check` green on 2026-11-04. **Next:** the owner runs `scripts/bump-version 0.2.0 --release` (CONTRIBUTING.md,
-  "Releasing") once CI is green on `main`; then M3, starting with the socket broker (A2 with it).
+  `nix flake check` green on 2026-11-04. **Next:** the owner's end-to-end ESXi install from the v0.2.0 ISO (CONTRIBUTING.md,
+  "Releasing" for later ones); then M3, starting with the socket broker (A2 with it). The repo is public since 2026-11-04 (rulesets on `main` and `v*`, SECURITY.md).
 - **Development moved to `torq5`** (ADR-030), an x86_64 ESXi VM with KVM, 64 GB and 1 TB; the
-  aarch64 UTM VM on the M4 Mac is retired and aarch64 is CI's alone. `docs/DEV-SETUP.md` is
+  aarch64 UTM VM on the M4 Mac is retired, and aarch64 waits for a stable x86_64 release. `docs/DEV-SETUP.md` is
   written for this host. Tests here: **broker 118, torqcli 241** (`cargo test` in `nix develop`,
   also run in the Nix build sandbox).
 - **M2 is essentially done** — images (qcow2 + ESXi VMDK, both arches), first-boot setup,
-  customer-safe defaults, signed releases (ADR-028; v0.1.0 and v0.1.1 out), the test/bump/release
+  customer-safe defaults, signed releases (ADR-028; v0.1.0, v0.1.1 and v0.2.0 out), the test/bump/release
   workflows, and `tests/image.nix`. `torq5` was installed from the v0.1.1 image and its first
   update moved it to the releases repo, which was the last acceptance criterion for releases.
   The **ISO installer** (ADR-031, `tests/installer.nix`) is built: USB stick → chosen disk → its
@@ -223,7 +233,7 @@ broker first.
 - Host **`torq5`**, an x86_64 VM on a VMware ESXi server (ADR-030), user **`viper`** (the template
   no longer names a user; `torq user` in the config repo's `nixos/torq.json` is the one place,
   since S3d). 8 vCPU, 64 GB, 1 TB, nested virtualisation on — so `/dev/kvm` is there and the VM
-  tests run at native speed. **aarch64 is CI's**: there is no arm64 machine to develop on, so
+  tests run at native speed. **aarch64 is set aside** until x86_64 is stable (no arm64 machine; not built in CI either), so
   assume nothing about it locally.
 - It is a **normal install** — made from a release image (2026-11-02), then updated to the signed
   releases repo — with two ledgered, reversible commits on top, both applied on 2026-11-03:
@@ -249,7 +259,9 @@ broker first.
   torqcli -c "request system update; configure; show | compare; commit comment \"…\""   # asks y/N
   ```
   Read the prompt before answering: it must show only `[edit system software]` (not `[edit system
-  software torq]`, which would change where TorqOS comes from).
+  software torq]`, which would change where TorqOS comes from). From ADR-040 on (the broker on a
+  socket), torqcli needs no sudo, and a system commit then asks the owner's password at the
+  terminal — the owner gives it for dev work; it is never written into the repo or memory.
   To change the machine's config repo itself (not just bump inputs), do it by hand:
   ```bash
   rm -rf /tmp/cfg && cp -r /var/lib/torq/config /tmp/cfg && cd /tmp/cfg   # edit, then:

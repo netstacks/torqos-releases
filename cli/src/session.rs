@@ -9,6 +9,9 @@ use crate::tree::Schema;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
+/// The agent's account (ADR-041, modules/agent.nix): its commit proposes and stops.
+const AGENT: &str = "torq-agent";
+
 /// What the session needs from the machine: evaluation and the broker.
 pub trait Machine {
     /// `commit check`: does the configuration at commit `base`, with these tree files changed
@@ -53,6 +56,29 @@ pub trait Machine {
     fn ssh_keys(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(String, Vec<String>)>;
     /// `show system ledger <count>`: the ledger's last entries, as a person reads them.
     fn ledger(&self, count: usize, fit: Option<usize>) -> Result<String>;
+    /// The proposals waiting for a person (ADR-041): `show system proposals`.
+    fn proposals(&self, fit: Option<usize>) -> Result<String>;
+    /// `show system remote`: the configuration's remote, and how the last push went (ADR-036).
+    fn remote(&self) -> Result<String>;
+    /// `request system remote key`: this machine's key for the remote, made the first time.
+    fn remote_key(&self) -> Result<String>;
+    /// `request system ledger acknowledge` (as `me`, with their password).
+    fn acknowledge(&self, me: &str) -> Result<String>;
+    /// `request system snapshot take` / `delete`: as `me`, with their password.
+    fn snapshot_take(&self, me: &str) -> Result<String>;
+    fn snapshot_delete(&self, change: u64, me: &str) -> Result<String>;
+    /// `show system snapshots`: the snapshots of the data still here.
+    fn snapshots(&self) -> Result<String>;
+    /// `request system snapshot restore`: put a path back (as `me`, with their password).
+    fn restore_data(&self, change: u64, path: &str, me: &str) -> Result<String>;
+    /// `request system remote clear`: clear the remote's alarm (as `me`, with their password).
+    fn remote_clear(&self, me: &str) -> Result<String>;
+    /// The remote's incoming branch, fetched into the config repo: its commit (None: there is none).
+    fn fetch_incoming(&self) -> Result<Option<String>>;
+    /// `request system apply <n>`: show proposal <n>, ask, apply it (as `me`).
+    fn apply_proposal(&self, seq: u64, me: &str) -> Result<String>;
+    /// Propose `diff` against `base` and stop there (the agent's commit, ADR-041): the proposal's number.
+    fn propose(&self, diff: &str, base: &str, reason: &str) -> Result<u64>;
     /// The running machine: its versions, uptime, interfaces and disks (facts.rs).
     fn facts(&self) -> Result<crate::facts::Facts>;
     /// `request system revert <change>`: undo that one change (a new change forward), asked as a
@@ -398,7 +424,7 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers => {
+            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowSnapshots | Op::ShowRemote => {
                 self.show_operational(op)
             }
             Op::Request(r) => self.request(r),
@@ -693,6 +719,9 @@ impl<'a> Session<'a> {
                 }
             }
             Op::ShowAlarms { display } => self.machine.alarms(display == Some(Display::Detail), self.fit),
+            Op::ShowProposals => self.machine.proposals(self.fit),
+            Op::ShowSnapshots => self.machine.snapshots(),
+            Op::ShowRemote => self.machine.remote(),
             Op::ShowServices => {
                 // What the configuration in effect turns on: NixOS's services (`services <name> enable`,
                 // `virtualisation <name> enable`), and what the old list still turns on.
@@ -910,6 +939,14 @@ impl<'a> Session<'a> {
             syntax::Request::Repair => self.machine.repair(),
             syntax::Request::Password { user } => self.machine.set_password(user.as_deref().unwrap_or(&self.me.clone())),
             syntax::Request::Revert { change } => self.machine.revert(change, &self.me),
+            syntax::Request::Apply { proposal } => self.machine.apply_proposal(proposal, &self.me),
+            syntax::Request::RemoteKey => self.machine.remote_key(),
+            syntax::Request::RemoteClear => self.machine.remote_clear(&self.me),
+            syntax::Request::LedgerAcknowledge => self.machine.acknowledge(&self.me),
+            syntax::Request::RestoreData { change, path } => self.machine.restore_data(change, &path, &self.me),
+            syntax::Request::SnapshotTake => self.machine.snapshot_take(&self.me),
+            syntax::Request::SnapshotDelete { change } => self.machine.snapshot_delete(change, &self.me),
+            syntax::Request::Pull => self.pull(),
             syntax::Request::Update { all } => self.update(all),
             syntax::Request::SoftwareRollback { n } => self.software_rollback(n),
         }
@@ -965,6 +1002,59 @@ impl<'a> Session<'a> {
         let Some(rev) = crate::software::release_commit(lock, &repo) else { return Ok(String::new()) };
         self.machine.check_release(&repo, &rev)?;
         Ok(self.said(&format!("TorqOS release {}: signed by the TorqOS release key.", short(&rev))))
+    }
+
+    /// `request system pull` (ADR-036): the configuration waiting on the remote — its `incoming`
+    /// branch — into the candidate, to read (`show | compare`) and commit, or not. Its settings and
+    /// its config files; never this machine's hardware file (hardware does not travel), never its
+    /// software (`flake.nix`, `flake.lock`: `request system update` is how software changes).
+    /// Nothing is applied: the commit is the person's, as any other.
+    fn pull(&mut self) -> Result<String> {
+        const HARDWARE: &str = "hardware-configuration.nix";
+        let Some(id) = self.machine.fetch_incoming()? else {
+            return Ok(self.said("The remote has no incoming configuration (its branch `incoming`): nothing to pull."));
+        };
+        let base = self.repo.head()?;
+        let before = self.pending()?;
+        let mut c = Candidate::from_repo(&self.repo, &self.schema, &id)?;
+        c.base = base.clone();
+        // This machine's hardware, where it is attached here, and nowhere else.
+        let here = Candidate::from_repo(&self.repo, &self.schema, &base)?;
+        for files in c.attached.values_mut() {
+            files.remove(HARDWARE);
+        }
+        c.attached.retain(|_, f| !f.is_empty());
+        for place in here.attached.iter().filter(|(_, f)| f.contains(HARDWARE)).map(|(p, _)| p) {
+            c.attached.entry(place.clone()).or_default().insert(HARDWARE.to_string());
+        }
+        // The remote's config files, where they differ from this machine's; this machine's that the
+        // remote has not, gone.
+        let theirs: std::collections::BTreeSet<&String> = crate::attach::files(&c.attached).filter(|f| f.as_str() != HARDWARE).collect();
+        for f in &theirs {
+            let remote = self.repo.file_at(&id, f)?.map(String::from_utf8).transpose().with_context(|| format!("{f}: not text"))?;
+            // A file newly attached is shown whole, even if its text is here already (detached, kept):
+            // what will be imported is what the person reads (the review of pull).
+            let attached_here = crate::attach::files(&here.attached).any(|h| h == *f);
+            if !attached_here || remote != self.repo.file_at(&base, f)?.map(String::from_utf8).transpose()? {
+                c.nix.insert(f.to_string(), remote);
+            }
+        }
+        for f in crate::attach::files(&here.attached).filter(|f| f.as_str() != HARDWARE && !theirs.contains(f)) {
+            c.nix.insert(f.clone(), None);
+        }
+        self.candidate = Some(c);
+        self.save()?;
+        let after = self.pending()?;
+        let what = match after {
+            0 => "it is the same as the configuration in effect".to_string(),
+            n => format!("{} from the configuration in effect (`show | compare` lists them; `commit` makes it the machine's)", changes(n)),
+        };
+        let discarded = if before > 0 { format!(" (The candidate's {} before it were discarded.)", changes(before)) } else { String::new() };
+        Ok(self.said(&format!(
+            "Loaded the remote's incoming configuration ({}): {what}. Kept as this machine's own: its hardware file and its software. \
+             Its boot and file-system settings, and its config files, come with it: read them.{discarded}",
+            short(&id)
+        )))
     }
 
     /// `request system software rollback <n>`: commit n's software into the candidate.
@@ -1234,6 +1324,19 @@ impl<'a> Session<'a> {
             (_, false) => Some(format!("This changes the settings of: {}.", others.join(", "))),
             _ => None,
         };
+        // The agent proposes, and a person applies (ADR-040, ADR-041): its commit stops at the
+        // proposal — there is no one here to ask, and nothing it could approve.
+        if self.me == AGENT {
+            if o.confirm.is_some() {
+                bail!("not proposed: the agent proposes, and a commit confirmed is a person's to make");
+            }
+            let scratch = tempfile::tempdir()?;
+            let diff = candidate::unified_diff(scratch.path(), &changes)?;
+            let reason = crate::history::one_line(&o.comment.clone().unwrap_or_else(|| summary(&compare)), usize::MAX);
+            let seq = self.machine.propose(&diff, &base, &reason)?;
+            self.discard()?;
+            return Ok(warned + &self.said(&format!("proposed as #{seq}: a person applies it (request system apply {seq})")));
+        }
         // Asked: the warnings were shown with the question; not asked, they come with the outcome.
         let warned = if why.is_some() { String::new() } else { warned };
         if let Some(why) = why {
@@ -1953,6 +2056,8 @@ mod tests {
         release_checks: RefCell<Vec<String>>,
         /// What the configuration warns of, when checked.
         warnings: Vec<String>,
+        /// The commit `fetch_incoming` answers.
+        incoming: Option<String>,
     }
     impl Machine for Fake {
         fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<Vec<String>> {
@@ -2035,6 +2140,43 @@ mod tests {
                 (Some(before), true) => Ok(("dev".into(), before.clone())),
                 _ => Ok(("dev".into(), self.keys.clone())),
             }
+        }
+        fn remote(&self) -> Result<String> {
+            Ok("no remote\n".into())
+        }
+        fn fetch_incoming(&self) -> Result<Option<String>> {
+            Ok(self.incoming.clone())
+        }
+        fn remote_clear(&self, me: &str) -> Result<String> {
+            Ok(format!("cleared for {me}\\n"))
+        }
+        fn acknowledge(&self, me: &str) -> Result<String> {
+            Ok(format!("acknowledged by {me}\n"))
+        }
+        fn snapshot_take(&self, me: &str) -> Result<String> {
+            Ok(format!("taken for {me}\n"))
+        }
+        fn snapshot_delete(&self, change: u64, me: &str) -> Result<String> {
+            Ok(format!("#{change} deleted for {me}\n"))
+        }
+        fn snapshots(&self) -> Result<String> {
+            Ok("no snapshots\n".into())
+        }
+        fn restore_data(&self, change: u64, path: &str, me: &str) -> Result<String> {
+            Ok(format!("{path} before #{change} for {me}\n"))
+        }
+        fn remote_key(&self) -> Result<String> {
+            Ok("ssh-ed25519 AAAA test\n".into())
+        }
+        fn proposals(&self, _fit: Option<usize>) -> Result<String> {
+            Ok("(no proposals)\n".into())
+        }
+        fn apply_proposal(&self, seq: u64, me: &str) -> Result<String> {
+            Ok(format!("applied proposal #{seq} for {me}\n"))
+        }
+        fn propose(&self, diff: &str, base: &str, reason: &str) -> Result<u64> {
+            self.commits.borrow_mut().push((diff.into(), base.into(), "proposed".into(), reason.into(), None));
+            Ok(41)
         }
         fn revert(&self, seq: u64, me: &str) -> Result<String> {
             Ok(format!("reverted {seq} for {me}\n"))
@@ -3299,6 +3441,37 @@ mod tests {
         }
     }
 
+    /// ADR-036: a pull loads the remote's incoming configuration into the candidate — its settings
+    /// and config files — and keeps this machine's hardware file and software; nothing is committed.
+    #[test]
+    fn a_pull_loads_the_remotes_configuration_but_not_its_hardware() {
+        let d = repo();
+        sh(d.path(), "printf '{ \"\": \"hardware-configuration.nix\" }\\n' > config-files.json && echo '{ local = 1; }' > hardware-configuration.nix \
+            && git add -A && git commit -qm attach \
+            && git checkout -q -b incoming && printf '{ \"host-name\": \"three\" }\\n' > system/host.json \
+            && echo '{ remote = 1; }' > hardware-configuration.nix && echo '{ extra = 1; }' > extra.nix \
+            && printf '{ \"\": [\"hardware-configuration.nix\", \"extra.nix\"] }\\n' > config-files.json && git add -A && git commit -qm incoming \
+            && git checkout -q main");
+        let id = String::from_utf8(std::process::Command::new("git").args(["-C"]).arg(d.path()).args(["rev-parse", "incoming"]).output().unwrap().stdout).unwrap().trim().to_string();
+        let m = Fake { incoming: Some(id.clone()), ..Fake::default() };
+        let mut s = session(d.path(), None, &m);
+        let out = run(&mut s, &["request system pull"]);
+        assert!(out.contains(&format!("Loaded the remote's incoming configuration ({})", short(&id))) && out.contains("Kept as this machine's own: its hardware file and its software"), "{out}");
+        let c = s.candidate().unwrap().clone();
+        assert!(c.attached[""].contains("extra.nix") && c.attached[""].contains("hardware-configuration.nix"), "{:?}", c.attached);
+        assert_eq!(c.nix.get("extra.nix"), Some(&Some("{ extra = 1; }\n".to_string())));
+        assert!(!c.nix.contains_key("hardware-configuration.nix"), "the hardware file is this machine's");
+        assert!(c.lock.is_none() && c.source.is_none(), "the software is this machine's");
+        s.exec("configure").unwrap();
+        let compare = s.exec("show | compare").unwrap();
+        assert!(compare.contains("+   hostName three;") && !compare.contains("remote = 1"), "{compare}");
+        assert!(m.commits.borrow().is_empty(), "nothing is committed");
+        // No incoming branch: said, nothing loaded.
+        let m = Fake::default();
+        let mut s = session(d.path(), None, &m);
+        assert!(run(&mut s, &["request system pull"]).contains("nothing to pull"));
+    }
+
     #[test]
     fn commit_check_and_commit_confirmed() {
         let (d, m) = (repo(), Fake { answer: true, ..Fake::default() });
@@ -3318,6 +3491,23 @@ mod tests {
         let m = Fake::default();
         let mut s = session(d.path(), None, &m);
         assert_eq!(run(&mut s, &["configure", "commit"]), "Entering configuration mode\ncommit complete (no changes)\n");
+    }
+
+    /// ADR-041: the agent's commit proposes and stops — no question (no one to ask), never applied;
+    /// a commit confirmed is not the agent's.
+    #[test]
+    fn the_agents_commit_proposes_and_stops() {
+        let (d, m) = (repo(), Fake { answer: false, ..Fake::default() });
+        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, AGENT);
+        let out = run(&mut s, &["configure", "set system time-zone UTC", "commit"]);
+        assert!(out.contains("proposed as #41: a person applies it (request system apply 41)"), "{out}");
+        assert!(!out.contains("Commit?") && !out.contains("commit complete"), "{out}");
+        assert_eq!(m.commits.borrow().len(), 1);
+        assert_eq!(m.commits.borrow()[0].2, "proposed", "proposed, not committed");
+        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, AGENT);
+        run(&mut s, &["configure", "set system time-zone UTC"]);
+        let e = format!("{:#}", s.exec("commit confirmed 5").unwrap_err());
+        assert!(e.contains("a commit confirmed is a person's"), "{e}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # The TorqOS image as the ISO installer carries it (ADR-031): the same disk, raw, compressed, with
 # its size and SHA-256 once decompressed, which `torq install` checks as it writes and reads back.
-# `image`: the image builder's qemu-efi output (a NixOS system's system.build.images.qemu-efi).
+# `image`: the image's disk (a NixOS system's system.build.torqDisk, hosts/image/disk.nix).
 { pkgs, image }:
 
 pkgs.runCommand "torqos-installer-image-${pkgs.stdenv.hostPlatform.system}" { nativeBuildInputs = [ pkgs.qemu-utils pkgs.zstd ]; } ''

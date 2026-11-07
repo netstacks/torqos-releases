@@ -58,7 +58,9 @@ pkgs.testers.runNixOSTest {
         m.succeed("/run/current-system/activate")
         # The settings sshd runs with.
         conf = m.succeed("sshd -T -f /etc/ssh/sshd_config").lower()
-        assert "permitrootlogin no" in conf and "maxauthtries 3" in conf and "allowusers alice" in conf, conf
+        lines = conf.splitlines()
+        # Whole lines: "maxauthtries 3" is also the start of "maxauthtries 30" (the audit of M3, M6).
+        assert "permitrootlogin no" in lines and "maxauthtries 3" in lines and "allowusers alice" in lines, conf
     client.wait_for_open_port(22, "keys")
     client.wait_for_open_port(22, "passwords")
 

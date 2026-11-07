@@ -5,7 +5,7 @@
 #![forbid(unsafe_code)]
 #![forbid(dead_code)]
 
-use torq_broker::{policy::Actor, Broker};
+use torq_broker::{ledger::{Ledger, NewEntry}, policy::Actor, repo::Repo, Broker};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -24,7 +24,8 @@ fn config_dir() -> (tempfile::TempDir, std::path::PathBuf) {
 
 fn setup(rebuild: &str) -> (tempfile::TempDir, Broker) {
     let (dir, repo) = config_dir();
-    let b = Broker::new(&repo, dir.path().join("state"), rebuild);
+    // The agent may propose casey's packages (ADR-041: the owner's, by default), nothing else.
+    let b = Broker::new(&repo, dir.path().join("state"), rebuild).with_agent_limits(&torq_broker::agent::Limits { users: vec!["casey".into()], settings: vec![] });
     b.init().unwrap();
     (dir, b)
 }
@@ -41,7 +42,7 @@ const NIGHT_LIGHT: &str = "--- a/desktop.nix\n+++ b/desktop.nix\n@@ -1 +1 @@\n-{
 fn propose_apply_revert() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
-    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Night light at sunset", Actor::Agent, false).unwrap();
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Night light at sunset", Actor::User, false).unwrap();
     assert_eq!(p.body.tier, "system");
 
     let a = b.apply(p.body.seq, "casey", false).unwrap();
@@ -78,7 +79,7 @@ fn agent_cannot_touch_policy() {
 fn tainted_needs_explicit_confirmation() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
-    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "a web page suggested this", Actor::Agent, true).unwrap();
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "a web page suggested this", Actor::User, true).unwrap();
     assert!(b.apply(p.body.seq, "casey", false).is_err());
     b.apply(p.body.seq, "casey", true).unwrap();
 }
@@ -223,7 +224,7 @@ fn user_tier_file_can_be_deleted() {
 fn user_module_is_system_tier() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "t.diff", THEME);
-    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "light theme", Actor::Agent, false).unwrap();
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "light theme", Actor::User, false).unwrap();
     assert_eq!(p.body.tier, "system");
 }
 
@@ -548,7 +549,7 @@ fn propose_refuses_until_reconcile_runs() {
     assert_killed(&run_cli(dir.path(), CRASH, &["apply", &p.body.seq.to_string(), "--approved-by", "casey"]));
 
     let t = write_diff(dir.path(), "theme.diff", THEME);
-    let err = format!("{:#}", b.propose_on(Some(&b.repo.head().unwrap()), &t, "Light theme", Actor::Agent, false).unwrap_err());
+    let err = format!("{:#}", b.propose_on(Some(&b.repo.head().unwrap()), &t, "Light theme", Actor::User, false).unwrap_err());
     assert!(err.contains("torq-broker reconcile"), "{err}");
 
     let out = run_cli(dir.path(), "true", &["reconcile", "--approved-by", "casey"]);
@@ -557,7 +558,7 @@ fn propose_refuses_until_reconcile_runs() {
     let out = run_cli(dir.path(), "true", &["reconcile", "--approved-by", "casey"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("nothing to reconcile"), "{out:?}");
 
-    b.propose_on(Some(&b.repo.head().unwrap()), &t, "Light theme", Actor::Agent, false).unwrap();
+    b.propose_on(Some(&b.repo.head().unwrap()), &t, "Light theme", Actor::User, false).unwrap();
     assert_eq!(kinds(&b), ["init", "proposal", "interrupted", "proposal"]);
     b.ledger.verify().unwrap();
 }
@@ -977,7 +978,7 @@ fn log_neutralises_control_characters_and_brief_drops_diffs() {
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
     // (Control characters are refused at propose now; hidden ones that are not — a bidi override, a
     // zero-width space — still reach the ledger, and entries from before may hold either.)
-    b.propose_on(Some(&b.repo.head().unwrap()), &d, "x\u{202e}#99 applied fake\u{200b}", Actor::Agent, false).unwrap();
+    b.propose_on(Some(&b.repo.head().unwrap()), &d, "x\u{202e}#99 applied fake\u{200b}", Actor::User, false).unwrap();
     let out = run_cli(dir.path(), "true", &["log"]);
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(!text.contains('\u{202e}') && !text.contains('\u{200b}'), "{text:?}");
@@ -985,7 +986,10 @@ fn log_neutralises_control_characters_and_brief_drops_diffs() {
     let brief = String::from_utf8(run_cli(dir.path(), "true", &["log", "--json", "--brief"]).stdout).unwrap();
     assert!(!brief.contains("\"diff\":"), "{brief}");
     let full = String::from_utf8(run_cli(dir.path(), "true", &["log", "--json"]).stdout).unwrap();
-    assert!(full.contains("\"diff\":"));
+    // Diffs are beside the ledger now (N19): the entry names them by hash, and `show` reads them.
+    assert!(full.contains("\"diff_sha256\":") && !full.contains("\"diff\":"), "{full}");
+    let shown = String::from_utf8(run_cli(dir.path(), "true", &["--json", "show", "2"]).stdout).unwrap();
+    assert!(shown.contains("\"diff\":"), "{shown}");
 }
 
 /// `show` is where a person reviews an agent's change: a bidi override in the diff ("Trojan Source")
@@ -999,7 +1003,7 @@ fn show_and_propose_neutralise_hidden_characters_in_diffs() {
         "--- a/desktop.nix\n+++ b/desktop.nix\n@@ -1 +1 @@\n-{ nightLight = false; }\n+{ nightLight = true; /* \u{202e} } \u{2066} */ \u{1b}[2K}\n",
     );
     let head = b.repo.head().unwrap();
-    let out = run_cli(dir.path(), "true", &["propose", "--diff", d.to_str().unwrap(), "--reason", "r", "--actor", "agent", "--base", &head]);
+    let out = run_cli(dir.path(), "true", &["propose", "--diff", d.to_str().unwrap(), "--reason", "r", "--actor", "user", "--base", &head]);
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains(r"\u{202e}") && text.contains(r"\u{1b}"), "{text}");
     assert!(!text.contains('\u{202e}') && !text.contains('\u{1b}'), "{text:?}");
@@ -1507,7 +1511,7 @@ fn commit_confirmed_then_confirm() {
     assert_eq!(Confirmable::link(&m.profile), SYS1, "the boot default is untouched: a reboot rolls back");
     // Built, then the rollback scheduled, and only then activated: never the new system without a timer.
     let log = m.log();
-    let sched = format!("schedule {} 600 /nix/store/old-broker/bin/torq-broker ", a.body.seq);
+    let sched = format!("schedule {} 600 /nix/store/old-broker/bin/torq-broker ", c["timer"]);
     let (b, s, act) = (log.find("build").unwrap(), log.find(&sched).unwrap(), log.find(&format!("activate {SYS2}")).unwrap());
     assert!(b < s && s < act, "{log}");
     assert!(log[s..].lines().next().unwrap().ends_with(" UTC"), "a wall-clock deadline: {log}");
@@ -2047,7 +2051,8 @@ fn an_agent_says_its_base_and_no_proposal_is_huge() {
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
     let err = format!("{:#}", b.propose(&d, "x", Actor::Agent, false).unwrap_err());
     assert!(err.contains("needs --base"), "{err}");
-    b.propose_on(Some(&b.repo.head().unwrap()), &d, "x", Actor::Agent, false).unwrap();
+    let pkgs = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    b.propose_on(Some(&b.repo.head().unwrap()), &pkgs, "x", Actor::Agent, false).unwrap();
     b.propose(&d, "a person's needs none", Actor::User, false).unwrap();
     let big = dir.path().join("big.diff");
     fs::File::create(&big).unwrap().set_len(torq_broker::MAX_DIFF + 1).unwrap();
@@ -2183,10 +2188,690 @@ fn a_password_is_kept_outside_the_repo_and_ledgered_without_it() {
     for (user, bad) in [("casey", "plaintext"), ("casey", "$6$a:b"), ("casey", "$6$a\nroot:$6$x"), ("../x", hash), ("Casey", hash), ("root", hash), ("sshd", hash), ("nixbld1", hash), ("nobody", hash)] {
         assert!(b.set_password(user, bad, "casey").is_err(), "{user} {bad:?}");
     }
-    // Not set in the running system (no such account): nothing kept, nothing ledgered.
+    // Not set in the running system (no such account): nothing kept, and the ledger says it failed.
     let failing = Broker::new(b.repo.root(), dir.path().join("state"), "true").with_passwords(&pw, "false").with_people(&people);
     let before = b.ledger.read_all().unwrap().len();
     assert!(failing.set_password("casey", "$6$other$hash", "casey").is_err());
     assert_eq!(fs::read_to_string(pw.join("casey")).unwrap(), format!("{hash}\n"), "kept as it was");
-    assert!(b.ledger.read_all().unwrap().len() == before);
+    // On the record first, so a change is never silent: the attempt, then that it failed.
+    let after = b.ledger.read_all().unwrap();
+    assert_eq!(after.len(), before + 2);
+    assert_eq!((after[before].body.kind.as_str(), after[before + 1].body.kind.as_str()), ("password", "password_failed"));
+}
+
+/// ADR-041: what the agent may propose is a default-deny list, judged by what the change does, and
+/// a refusal is on the record (kind `refused`: the files, why, the diff's hash — not the diff).
+#[test]
+fn the_agent_proposes_only_what_its_list_allows_and_a_refusal_is_ledgered() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    // A file that is not a setting (desktop.nix), and another person's packages: refused, ledgered.
+    for (name, body, why) in [
+        ("nl.diff", NIGHT_LIGHT, "not a setting"),
+        ("sam.diff", "--- /dev/null\n+++ b/users/sam/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n", "packages only for casey"),
+        ("svc.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}}\n", "may not change services.openssh.enable"),
+        ("torq.diff", "--- /dev/null\n+++ b/nixos/torq.json\n@@ -0,0 +1 @@\n+{\"agent\": {}}\n", "may not change torq.agent"),
+    ] {
+        let d = write_diff(dir.path(), name, body);
+        let err = format!("{:#}", b.propose_on(Some(&head), &d, "try", Actor::Agent, false).unwrap_err());
+        assert!(err.contains(why), "{name}: {err}");
+        let last = b.ledger.read_all().unwrap().pop().unwrap();
+        assert_eq!((last.body.kind.as_str(), last.body.actor.as_str()), ("refused", "agent"), "{name}");
+        assert!(last.body.data["why"].as_str().unwrap().contains(why) && last.body.data.get("diff").is_none(), "{name}: {:?}", last.body.data);
+    }
+    // A person may propose the same: the list is the agent's alone.
+    let d = write_diff(dir.path(), "svc2.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}}\n");
+    assert_eq!(b.propose_on(Some(&head), &d, "a person's", Actor::User, false).unwrap().body.kind, "proposal");
+    // Listed by the owner: services.openssh, and nothing beside it.
+    let (dir, b) = setup("true");
+    let b = b.with_agent_limits(&torq_broker::agent::Limits { users: vec![], settings: vec!["services.openssh".into()] });
+    let head = b.repo.head().unwrap();
+    let ok = write_diff(dir.path(), "ok.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}}\n");
+    assert_eq!(b.propose_on(Some(&head), &ok, "ssh", Actor::Agent, false).unwrap().body.kind, "proposal");
+    let both = write_diff(dir.path(), "both.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}, \"nginx\": {\"enable\": true}}\n");
+    let err = format!("{:#}", b.propose_on(Some(&head), &both, "ssh and more", Actor::Agent, false).unwrap_err());
+    assert!(err.contains("services.nginx.enable"), "{err}");
+    b.ledger.verify().unwrap();
+}
+
+/// The audit of ADR-041, its 1: a diff's text can say one thing while `git apply` does another
+/// (lines past a hunk's count are ignored). What is recorded to show a person is what git does.
+#[test]
+fn what_a_person_is_shown_is_what_git_does() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let smuggled = write_diff(dir.path(), "s.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"nmap\"]\n-[\"nmap\"]\n+[\"htop\"]\n");
+    let p = b.propose_on(Some(&head), &smuggled, "htop for casey", Actor::Agent, false).unwrap();
+    let effect = &b.proposal_text(&p, "effect").unwrap();
+    assert!(effect.contains("+[\"nmap\"]") && !effect.contains("htop"), "{effect}");
+    b.apply(p.body.seq, "casey", false).unwrap();
+    assert_eq!(fs::read_to_string(b.repo.root().join("users/casey/packages.json")).unwrap().trim(), "[\"nmap\"]", "what was shown is what landed");
+}
+
+/// Its 2 and 3: every refusal of the agent's is on the record (the forbidden ones, a diff that does
+/// not apply), within limits that keep it from filling the ledger.
+#[test]
+fn every_refusal_of_the_agents_is_ledgered_within_limits() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let count = |b: &Broker| b.ledger.read_all().unwrap().iter().filter(|e| e.body.kind == "refused").count();
+    let policy = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/policy/new.toml\n@@ -0,0 +1 @@\n+x = 1\n");
+    let e = format!("{:#}", b.propose_on(Some(&head), &policy, "loosen", Actor::Agent, false).unwrap_err());
+    assert!(e.contains("forbidden"), "{e}");
+    assert_eq!(count(&b), 1, "a forbidden attempt is on the record");
+    let broken = write_diff(dir.path(), "b.diff", "--- a/nothing.json\n+++ b/nothing.json\n@@ -1 +1 @@\n-x\n+y\n");
+    assert!(b.propose_on(Some(&head), &broken, "nothing", Actor::Agent, false).is_err());
+    assert_eq!(count(&b), 2, "so is a diff that does not apply");
+    // A person's refusal is not the agent's record.
+    assert!(b.propose_on(Some(&head), &broken, "nothing", Actor::User, false).is_err());
+    assert_eq!(count(&b), 2);
+    // A long reason: refused (and ledgered, shortened).
+    let ok = write_diff(dir.path(), "ok.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    let long = "x".repeat(torq_broker::AGENT_REASON_MAX + 1);
+    assert!(format!("{:#}", b.propose_on(Some(&head), &ok, &long, Actor::Agent, false).unwrap_err()).contains("at most"));
+    let last = b.ledger.read_all().unwrap().pop().unwrap();
+    assert_eq!(last.body.reason.chars().count(), torq_broker::AGENT_REASON_MAX);
+    // At most so many waiting at once.
+    for i in 0..torq_broker::AGENT_WAITING_MAX {
+        b.propose_on(Some(&head), &ok, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
+    assert!(format!("{:#}", b.propose_on(Some(&head), &ok, "one more", Actor::Agent, false).unwrap_err()).contains("waiting"));
+    // And refusals ledgered at most so many an hour: the rest turned away without an entry each.
+    for _ in 0..torq_broker::AGENT_REFUSALS_AN_HOUR + 5 {
+        let _ = b.propose_on(Some(&head), &policy, "again", Actor::Agent, false);
+    }
+    assert_eq!(count(&b), torq_broker::AGENT_REFUSALS_AN_HOUR);
+    b.ledger.verify().unwrap();
+}
+
+/// Its 6: the agent's list as it is when a person applies, not as it was when it proposed.
+#[test]
+fn the_agents_list_is_checked_again_at_apply() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let ok = write_diff(dir.path(), "ok.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    let p = b.propose_on(Some(&head), &ok, "htop", Actor::Agent, false).unwrap();
+    let narrowed = b.with_agent_limits(&torq_broker::agent::Limits::default());
+    let err = format!("{:#}", narrowed.apply(p.body.seq, "casey", false).unwrap_err());
+    assert!(err.contains("no longer allow"), "{err}");
+}
+
+/// The second review of ADR-041: a refusal before the ledger has begun is not entry #1 (setup
+/// would take it for a machine already set up); and the agent's waiting proposals are only those
+/// that can still land — once a person changes anything, the older ones no longer count.
+#[test]
+fn the_agents_record_never_blocks_setup_or_the_agent() {
+    let (dir, repo) = config_dir();
+    let fresh = Broker::new(&repo, dir.path().join("state"), "true");
+    let d = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    assert!(fresh.propose_on(Some(&"a".repeat(40)), &d, "before setup", Actor::Agent, false).is_err());
+    assert!(fresh.ledger.read_all().unwrap().is_empty(), "no entry before init");
+    fresh.init().unwrap();
+    assert_eq!(fresh.ledger.read_all().unwrap()[0].body.kind, "init");
+
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    for i in 0..torq_broker::AGENT_WAITING_MAX {
+        b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
+    assert!(b.propose_on(Some(&head), &d, "one more", Actor::Agent, false).is_err());
+    // A person's change moves the configuration on: the twenty can no longer land, nor count.
+    let mine = write_diff(dir.path(), "m.diff", NIGHT_LIGHT);
+    let p = b.propose(&mine, "mine", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    b.propose_on(Some(&b.repo.head().unwrap()), &d, "htop, now", Actor::Agent, false).unwrap();
+}
+
+/// ADR-036, the review of adopt: what a repository must be for a new machine to adopt it. A staged
+/// repository (as `stage_from` leaves one) built here from a real broker's repo and ledger.
+#[test]
+fn a_hostile_repository_is_refused_before_anything_is_adopted() {
+    let sh = |dir: &Path, script: &str| {
+        let ok = std::process::Command::new("sh").arg("-c").arg(script).current_dir(dir).status().unwrap().success();
+        assert!(ok, "{script}");
+    };
+    // A machine as setup leaves one.
+    let (dir, repo) = config_dir();
+    sh(&repo, "mkdir -p nixos system && echo '{\"user\": \"alice\"}' > nixos/torq.json && echo '{\"host-name\": \"first\"}' > system/host.json \
+        && echo '{\"\": \"hardware-configuration.nix\"}' > config-files.json && echo '{ }' > hardware-configuration.nix && rm -rf policy");
+    let b = Broker::new(&repo, dir.path().join("state"), "true");
+    b.init().unwrap();
+    let new_machine = Broker::new(dir.path().join("new-config"), dir.path().join("new-state"), "true");
+    fs::create_dir_all(dir.path().join("new-state")).unwrap();
+    let url = "git@host:x.git";
+    // Its repository as staged: main (`git_step` on a working copy) and the ledger, as pushed.
+    let stage_with = |name: &str, git_step: &str, ledger: &Path| -> Repo {
+        let work = dir.path().join(format!("{name}-work"));
+        let stage = dir.path().join(format!("{name}.git"));
+        sh(dir.path(), &format!("git clone -q {} {}", repo.display(), work.display()));
+        if !git_step.is_empty() {
+            sh(&work, &format!("{git_step} && git add -Af . && git -c user.name=t -c user.email=t@t commit -qm step"));
+        }
+        sh(dir.path(), &format!("git clone -q --bare {} {}", work.display(), stage.display()));
+        sh(&stage, &format!("b=$(git hash-object -w {}) && t=$(printf '100644 blob %s\\tledger.jsonl\\n' $b | git mktree) && c=$(git -c user.name=t -c user.email=t@t commit-tree $t -m l) && git update-ref refs/torq/remote-ledger $c && git symbolic-ref HEAD refs/heads/main", ledger.display()));
+        Repo::new(stage)
+    };
+    let ledger = b.ledger.path().to_path_buf();
+    let a = new_machine.check_stage(&stage_with("good", "", &ledger), url).unwrap();
+    assert_eq!((a.user.as_str(), a.host.as_str()), ("alice", "first"));
+    // What is adopted is what was shown: the commits and the owner, or nothing (no second fetch).
+    sh(dir.path(), &format!("cp -r good.git {}", dir.path().join("new-state/adopt.git").display()));
+    let own = dir.path().join("own");
+    let e = format!("{:#}", new_machine.adopt(url, &own, &"0".repeat(40), &a.tip, &a.user).unwrap_err());
+    assert!(e.contains("not what was shown"), "{e}");
+    let e = format!("{:#}", new_machine.adopt(url, &own, &a.head, &a.tip, "mallory").unwrap_err());
+    assert!(e.contains("not what was shown"), "{e}");
+    assert!(!new_machine.repo.is_initialised(), "nothing adopted");
+    for (name, step, why) in [
+        ("link", "rm hardware-configuration.nix && ln -s /etc/shadow hardware-configuration.nix", "not a plain file"),
+        ("lock", "ln -s ../state/remote/key flake.lock", "not a plain file"),
+        ("attrs", "echo '* -diff' > .gitattributes", "may not"),
+        ("policy", "mkdir policy && echo x > policy/tiers.toml", "may not"),
+        // A link anywhere (Nix reads through it, this check would not): a setting hidden from the console.
+        ("linked", "ln -s other.json nixos/services.json && echo '{\"openssh\":{\"enable\":true}}' > nixos/other.json", "not a plain file"),
+        // What cannot be read is refused, never reported as off.
+        ("huge", "head -c 2000000 /dev/zero | tr '\\0' ' ' > nixos/services.json", "larger than a setting"),
+        ("broken", "echo '{ not json' > nixos/services.json", "not JSON this machine can read"),
+        ("noread", "echo '{}' > config-files.json", "does not read a hardware file"),
+        ("moved", "echo x > stray.txt", "is not the commit its ledger ends at"),
+    ] {
+        let e = format!("{:#}", new_machine.check_stage(&stage_with(name, step, &ledger), url).unwrap_err());
+        assert!(e.contains(why), "{name}: {e}");
+    }
+    // Every way the tree turns SSH on is reported: the option, its alias, the old list. (A step leaves
+    // main ahead of the ledger, so each ledger here is one that ends at that commit.)
+    for (name, step) in [
+        ("sshd", "echo '{\"sshd\":{\"enable\":true}}' > nixos/services.json"),
+        ("openssh", "echo '{\"openssh\":{\"enable\":true}}' > nixos/services.json"),
+        ("oldlist", "echo '[\"ssh\"]' > services.json"),
+    ] {
+        let work = dir.path().join(format!("ssh-{name}"));
+        sh(dir.path(), &format!("cp -r {} {}", repo.display(), work.display()));
+        sh(&work, &format!("{step} && git add -A && git -c user.name=t -c user.email=t@t commit -qm step"));
+        let head = String::from_utf8(Command::new("git").arg("-C").arg(&work).args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap().trim().to_string();
+        let l = dir.path().join(format!("{name}.jsonl"));
+        fs::copy(&ledger, &l).unwrap();
+        torq_broker::ledger::Ledger::open(&l).append(torq_broker::ledger::NewEntry {
+            actor: "user".into(), approved_by: Some("alice".into()), kind: "applied".into(), tier: "system".into(), tainted: false, reason: "ssh".into(),
+            data: serde_json::json!({ "commit": head }),
+        }).unwrap();
+        let stage = dir.path().join(format!("ssh-{name}.git"));
+        sh(dir.path(), &format!("git clone -q --bare {} {}", work.display(), stage.display()));
+        sh(&stage, &format!("b=$(git hash-object -w {}) && t=$(printf '100644 blob %s\\tledger.jsonl\\n' $b | git mktree) && c=$(git -c user.name=t -c user.email=t@t commit-tree $t -m l) && git update-ref refs/torq/remote-ledger $c", l.display()));
+        assert!(new_machine.check_stage(&Repo::new(stage), url).unwrap().ssh, "{name}");
+    }
+    // A ledger whose entry names an option for a commit, a chain well made: refused before it is trusted.
+    let optioned = dir.path().join("optioned.jsonl");
+    fs::copy(&ledger, &optioned).unwrap();
+    torq_broker::ledger::Ledger::open(&optioned).append(torq_broker::ledger::NewEntry { actor: "user".into(), approved_by: None, kind: "proposal".into(), tier: "user".into(), tainted: false, reason: "x".into(), data: serde_json::json!({ "commit": "--output=/root/.ssh/authorized_keys" }) }).unwrap();
+    let e = format!("{:#}", new_machine.check_stage(&stage_with("optioned", "", &optioned), url).unwrap_err());
+    assert!(e.contains("is not a commit"), "{e}");
+    // A chain that does not verify: an entry's reason changed, and its hash with it.
+    let broken = dir.path().join("broken.jsonl");
+    fs::write(&broken, fs::read_to_string(&ledger).unwrap().replacen("\"init\"", "\"init\"", 1).replacen("Config repository initialised", "Config repository INITIALISED", 1)).unwrap();
+    let e = format!("{:#}", new_machine.check_stage(&stage_with("unchained", "", &broken), url).unwrap_err());
+    assert!(e.contains("does not verify"), "{e}");
+    // A ledger that ends in the middle of a line: less than the remote holds, or something else.
+    let cutoff = dir.path().join("cutoff.jsonl");
+    let whole = fs::read(&ledger).unwrap();
+    fs::write(&cutoff, [&whole[..whole.len() - 1], b"x"].concat()).unwrap();
+    let e = format!("{:#}", new_machine.check_stage(&stage_with("cutoff", "", &cutoff), url).unwrap_err());
+    assert!(e.contains("middle of a line"), "{e}");
+    // A ledger with a commit confirmed waiting would drive the boot's rollback: refused.
+    let waiting = dir.path().join("waiting.jsonl");
+    fs::copy(&ledger, &waiting).unwrap();
+    let forged = torq_broker::ledger::Ledger::open(&waiting);
+    forged.append(torq_broker::ledger::NewEntry {
+        actor: "user".into(), approved_by: Some("alice".into()), kind: "applied".into(), tier: "system".into(), tainted: false, reason: "x".into(),
+        data: serde_json::json!({ "commit": b.repo.head().unwrap(), "confirm": { "deadline": "2099-01-01T00:00:00Z", "anchor_commit": "a".repeat(40), "anchor_system": "/nix/store/x-system", "boot_id": "b" } }),
+    }).unwrap();
+    let e = format!("{:#}", new_machine.check_stage(&stage_with("waiting", "", &waiting), url).unwrap_err());
+    assert!(e.contains("still waiting"), "{e}");
+}
+
+/// ADR-035: a stuck operation holds the broker's lock for as long as it is stuck, and that is when a
+/// person needs the shell. Break-glass is recorded through it, and what it needs of its text.
+#[test]
+fn break_glass_is_recorded_while_an_operation_holds_the_lock() {
+    let (dir, repo) = config_dir();
+    let state = dir.path().join("state");
+    let b = Broker::new(&repo, &state, "true");
+    b.init().unwrap();
+    let held = fs::File::create(state.join("broker.lock")).unwrap();
+    held.try_lock().unwrap();
+    let (e, unsent) = b.break_glass("alice", "the switch is stuck").unwrap();
+    assert_eq!((e.body.kind.as_str(), e.body.approved_by.as_deref()), ("break_glass", Some("alice")));
+    assert_eq!(unsent, None, "no remote: nothing to send");
+    drop(held);
+    b.ledger.verify().unwrap();
+    for (by, why) in [("alice", ""), ("alice", "  "), ("alice", "a\nb"), ("../x", "why")] {
+        assert!(b.break_glass(by, why).is_err(), "{by:?} {why:?}");
+    }
+    assert_eq!(b.ledger.read_all().unwrap().len(), e.body.seq as usize, "refused: nothing written");
+}
+
+/// Writers of the ledger do not interleave: appends from many threads leave one unbroken chain.
+#[test]
+fn ledger_appends_at_once_leave_one_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.jsonl");
+    let threads: Vec<_> = (0..8).map(|i| {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            for j in 0..10 {
+                torq_broker::ledger::Ledger::open(&path).append(torq_broker::ledger::NewEntry {
+                    actor: "user".into(), approved_by: None, kind: "refused".into(), tier: "system".into(), tainted: false,
+                    reason: format!("{i}-{j}"), data: serde_json::json!({}),
+                }).unwrap();
+            }
+        })
+    }).collect();
+    threads.into_iter().for_each(|t| t.join().unwrap());
+    assert_eq!(torq_broker::ledger::Ledger::open(&path).verify().unwrap(), 80);
+}
+
+/// An entry that lands while a commit confirmed builds (break-glass takes no operation's lock) must
+/// not disarm its timer: the rollback is what saves a change that cut off a remote machine.
+#[test]
+fn break_glass_during_a_build_leaves_the_commit_confirmed_timer_armed() {
+    let build = format!("{} --repo DIR/none --state-dir DIR/state break-glass --by alice --reason mid-build > /dev/null; {BUILD}", env!("CARGO_BIN_EXE_torq-broker"));
+    let m = Confirmable::new_with(&build, ACTIVATE, SCHEDULE);
+    let anchor = m.b.repo.head().unwrap();
+    let seq = m.propose_theme();
+    let a = m.b.apply_confirmed(seq, "casey", false, 1).unwrap();
+    assert_eq!(a.body.seq, seq + 2, "the entry landed mid-build: {}", m.log());
+    assert_eq!(m.b.status().unwrap().disagreements, Vec::<String>::new(), "the trailer is one short: the commit is what counts");
+    // What the timer was told, as the timer would say it.
+    let named: u64 = m.log().lines().find_map(|l| l.strip_prefix("schedule ")?.split(' ').next()?.parse().ok()).unwrap();
+    let r = m.b.expire_confirm(Some(named), false).unwrap().expect("rolled back");
+    assert_eq!(r.body.kind, "rolled_back");
+    m.assert_back(&anchor);
+}
+
+/// A proposal that failed may be applied again, while the first attempt's timer still waits: that
+/// timer is not this attempt's, and has no say over it.
+#[test]
+fn an_earlier_attempts_timer_has_no_say_over_a_retry() {
+    let activate = format!("test -e DIR/second && {ACTIVATE}");
+    let m = Confirmable::new_with(BUILD, &activate, SCHEDULE);
+    let seq = m.propose_theme();
+    assert!(m.b.apply_confirmed(seq, "casey", false, 1).is_err());
+    fs::write(m.dir.path().join("second"), "").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let a = m.b.apply_confirmed(seq, "casey", false, 600).unwrap();
+    let named: Vec<u64> = m.log().lines().filter_map(|l| l.strip_prefix("schedule ")?.split(' ').next()?.parse().ok()).collect();
+    assert_eq!(named.len(), 2, "{}", m.log());
+    assert_ne!(named[0], named[1], "each attempt its own: systemd refuses a unit name twice");
+    assert!(m.b.expire_confirm(Some(named[0]), false).unwrap().is_none(), "the first attempt's timer finds nothing");
+    assert_eq!(a.body.data["confirm"]["timer"], named[1]);
+    assert!(m.b.expire_confirm(Some(named[1]), false).unwrap().is_some(), "its own does");
+}
+
+/// Before a machine's ledger begins, an entry would be #1, and setup would take it for set up.
+#[test]
+fn break_glass_is_refused_before_the_ledger_begins() {
+    let (dir, repo) = config_dir();
+    let b = Broker::new(&repo, dir.path().join("state"), "true");
+    assert!(format!("{:#}", b.break_glass("alice", "why").unwrap_err()).contains("not set up"));
+    assert!(b.ledger.read_all().unwrap().is_empty());
+    b.init().unwrap();
+    assert_eq!(b.ledger.read_all().unwrap()[0].body.kind, "init");
+}
+
+/// ADR-038: a snapshot before each system change, named in its entry; one that fails is said and stops
+/// nothing. Not for a person's own settings: anyone could then push everyone's restore points out.
+#[test]
+fn a_system_change_records_its_snapshot_and_a_failed_one_stops_nothing() {
+    let m = Confirmable::new();
+    let seen = m.dir.path().join("taken");
+    let state = m.dir.path().join("state");
+    let system = write_diff(m.dir.path(), "sys.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}}\n");
+    let b = Broker::new(m.b.repo.root(), &state, "true").with_snapshots(format!("echo {{label}} >> {}", seen.display()));
+    // A person's own: none.
+    let own = write_diff(m.dir.path(), "own.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"hello\"]\n");
+    let p = b.propose(&own, "Hello", Actor::User, false).unwrap().body.seq;
+    let a = b.apply(p, "casey", false).unwrap();
+    assert_eq!(a.body.tier, "user");
+    assert!(a.body.data.get("snapshot").is_none() && !seen.exists(), "{:?}", a.body.data);
+    // A system change: taken before the entry was written, and its revert takes one too.
+    let p = b.propose(&system, "SSH on", Actor::User, false).unwrap().body.seq;
+    let a = b.apply(p, "casey", false).unwrap();
+    let label = a.body.data["snapshot"]["label"].as_str().unwrap().to_string();
+    assert_eq!(fs::read_to_string(&seen).unwrap().trim(), label);
+    let r = b.revert(a.body.seq, "casey").unwrap();
+    assert!(r.body.data["snapshot"]["label"].is_string(), "{:?}", r.body.data);
+    // None configured: nothing in the entry.
+    let p = m.b.propose(&system, "SSH on", Actor::User, false).unwrap().body.seq;
+    let a = m.b.apply(p, "casey", false).unwrap();
+    assert!(a.body.data.get("snapshot").is_none());
+    m.b.revert(a.body.seq, "casey").unwrap();
+    // It fails: the change goes through, and the entry says why there is none.
+    let b = Broker::new(m.b.repo.root(), &state, "true").with_snapshots("false");
+    let p = b.propose(&system, "SSH on", Actor::User, false).unwrap().body.seq;
+    let a = b.apply(p, "casey", false).unwrap();
+    assert!(a.body.data["snapshot"]["error"].as_str().unwrap().contains("snapshot command failed"), "{:?}", a.body.data);
+    b.ledger.verify().unwrap();
+}
+
+/// A restore holds the lock as long as its copy takes: not while a rollback may need it.
+#[test]
+fn no_restore_while_a_commit_confirmed_waits() {
+    let m = Confirmable::new();
+    let seq = m.propose_theme();
+    m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
+    let e = format!("{:#}", m.b.restore_data(seq, "/home/alice/a", "casey").unwrap_err());
+    assert!(e.contains("commit confirmed is waiting"), "{e}");
+}
+
+/// N3: a power cut in the middle of an append left a line with no end, and every command after it,
+/// recovery too, refused. Read past, said by `status`, and gone at the next entry, its bytes in the
+/// entry that says so. A whole line that does not verify is an edit, and nothing touches it.
+#[test]
+fn a_torn_last_line_is_mended_and_an_edit_is_not() {
+    use std::io::Write;
+    let torn = |bytes: &[u8]| {
+        let (dir, repo) = config_dir();
+        let b = Broker::new(&repo, dir.path().join("state"), "true");
+        b.init().unwrap();
+        let mut f = fs::OpenOptions::new().append(true).open(b.ledger.path()).unwrap();
+        f.write_all(bytes).unwrap();
+        (dir, b)
+    };
+    let cut = br#"{"seq":2,"ts":"2026-11-06T00:00:00Z","actor":"us"#;
+    // Cut short, cut in the middle of a character, and the zeros a file system can leave.
+    for tail in [&cut[..], "{\"reason\":\"é".as_bytes().split_last().unwrap().1, &[0u8; 64][..]] {
+        let (_dir, b) = torn(tail);
+        // Read past: what looks at the ledger sees what was finished, and is told.
+        assert_eq!(b.ledger.verify().unwrap(), 1, "{tail:?}");
+        let s = b.status().unwrap();
+        assert!(s.problems().iter().any(|p| p.contains("cut short")) && !s.drift().iter().any(|p| p.contains("cut short")), "{:?}", s.problems());
+        // Mended at the next entry, whoever writes it: break-glass, the way back, above all.
+        let (e, _) = b.break_glass("alice", "after the power cut").unwrap();
+        let all = b.ledger.read_all().unwrap();
+        assert_eq!((all[1].body.kind.as_str(), all[1].body.actor.as_str(), e.body.seq), ("ledger_mended", "broker", 3));
+        assert_eq!(all[1].body.data["bytes"], tail.len());
+        assert_eq!(all[1].body.data["tail"].as_str().unwrap(), hex::encode(tail), "what the line said is kept");
+        b.ledger.verify().unwrap();
+        assert!(!b.status().unwrap().problems().iter().any(|p| p.contains("cut short")));
+    }
+    // A whole line that is not an entry is an edit: refused, and left exactly as it was.
+    let (_dir, b) = torn(b"{\"seq\":2}\n");
+    assert!(b.ledger.verify().is_err());
+    assert!(b.break_glass("alice", "why").is_err());
+    assert!(b.ledger.mend().unwrap().is_none());
+    // An edit with a torn line after it: nothing removed, whatever asks. It is evidence.
+    let (_dir, b) = torn(b"{\"seq\":2}\n{\"cut");
+    let before = fs::read(b.ledger.path()).unwrap();
+    assert!(b.ledger.mend().is_err() && b.break_glass("alice", "why").is_err());
+    assert_eq!(fs::read(b.ledger.path()).unwrap(), before);
+    // A whole entry that lost its newline stands: the hash vouches for it. It is not a power cut's.
+    let (_dir, b) = torn(b"");
+    let e = b.break_glass("alice", "kept").unwrap().0;
+    let whole = fs::read(b.ledger.path()).unwrap();
+    fs::write(b.ledger.path(), &whole[..whole.len() - 1]).unwrap();
+    assert!(b.ledger.mend().unwrap().is_none());
+    assert_eq!(fs::read(b.ledger.path()).unwrap(), whole);
+    assert_eq!(b.ledger.read_all().unwrap().last().unwrap().hash, e.hash);
+}
+
+/// A machine's first entry cut short: it must still start as a new machine, with `init` as its first
+/// entry, which setup and the agent's refusals go by. The torn bytes are kept beside the ledger.
+#[test]
+fn a_torn_first_line_leaves_a_new_machine() {
+    let (dir, repo) = config_dir();
+    let state = dir.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let b = Broker::new(&repo, &state, "true");
+    fs::write(b.ledger.path(), b"{\"seq\":1,\"ts").unwrap();
+    assert!(b.ledger.mend().unwrap().is_none());
+    assert_eq!(fs::read(b.ledger.path()).unwrap(), b"");
+    let kept: Vec<_> = fs::read_dir(&state).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains("torn-")).collect();
+    assert_eq!(fs::read(kept[0].path()).unwrap(), b"{\"seq\":1,\"ts");
+    b.init().unwrap();
+    assert_eq!(b.ledger.read_all().unwrap()[0].body.kind, "init");
+}
+
+/// The password set in the running system and then not kept: the ledger must not say it was not changed.
+#[test]
+fn a_password_set_but_not_kept_is_said_as_that() {
+    let (dir, repo) = config_dir();
+    let pw = dir.path().join("pw");
+    let people = vec!["casey".to_string()];
+    // `cat`, which reads what it is given: `true` exits first, and the write then fails, or not, by luck.
+    let b = Broker::new(&repo, dir.path().join("state"), "true").with_passwords(&pw, "cat").with_people(&people);
+    b.init().unwrap();
+    // A folder at the name: the rename fails, after the running system has it.
+    fs::create_dir_all(pw.join("casey/x")).unwrap();
+    assert!(b.set_password("casey", "$6$other$hash", "casey").is_err());
+    let all = b.ledger.read_all().unwrap();
+    let last = all.last().unwrap();
+    assert_eq!((last.body.kind.as_str(), last.body.data["running"].as_bool()), ("password_failed", Some(true)));
+    assert!(last.body.reason.contains("set in the running system"), "{}", last.body.reason);
+    // Failing before the running system has it says the other thing.
+    fs::remove_dir_all(pw.join("casey")).unwrap();
+    let no = Broker::new(&repo, dir.path().join("state"), "true").with_passwords(&pw, "false").with_people(&people);
+    assert!(no.set_password("casey", "$6$other$hash", "casey").is_err());
+    let all = no.ledger.read_all().unwrap();
+    assert_eq!(all.last().unwrap().body.data["running"].as_bool(), Some(false));
+    assert!(!pw.join("casey").exists() && !pw.join(".casey.new").exists(), "nothing kept");
+}
+
+/// The ledger and the repository each say who approved what: rewriting one alone is seen. By the entry's
+/// commit, so an entry landing during an apply, and a rolled-back commit, raise nothing.
+#[test]
+fn the_ledger_is_checked_against_the_repository() {
+    let m = Confirmable::new();
+    let p = m.propose_theme();
+    let a = m.b.apply(p, "casey", false).unwrap();
+    let r = m.b.revert(a.body.seq, "casey").unwrap();
+    assert_eq!(m.b.status().unwrap().disagreements, Vec::<String>::new());
+    // Rolled back: its commit gone from history is no disagreement.
+    let p = m.propose_theme();
+    let c = m.b.apply_confirmed(p, "casey", false, 1).unwrap();
+    m.b.expire_confirm(Some(c.body.seq), false).unwrap().expect("rolled back");
+    assert_eq!(m.b.status().unwrap().disagreements, Vec::<String>::new());
+    // The commit rewritten to say someone else approved it.
+    let commit = r.body.data["commit"].as_str().unwrap();
+    let msg = git(&m.b, &["log", "-1", "--format=%B", commit]).replace("Approved-By: casey", "Approved-By: mallory");
+    let tree = git(&m.b, &["rev-parse", &format!("{commit}^{{tree}}")]);
+    let parent = git(&m.b, &["rev-parse", &format!("{commit}^")]);
+    let forged = git(&m.b, &["-c", "user.name=m", "-c", "user.email=m@m", "commit-tree", tree.trim(), "-p", parent.trim(), "-m", msg.trim()]);
+    git(&m.b, &["update-ref", "refs/heads/main", forged.trim()]);
+    let d = m.b.status().unwrap().disagreements;
+    assert!(d.iter().any(|x| x.contains(&format!("#{}", r.body.seq)) && x.contains("not in the machine")), "{d:?}");
+}
+
+/// The ledger rewritten alone, chain and all, as root could: the repository still says otherwise. And
+/// a person who has looked says so, on the record, and it is said no more until there is something new.
+#[test]
+fn a_ledger_rewritten_alone_is_seen_and_a_person_can_say_they_looked() {
+    let m = Confirmable::new();
+    let p = m.propose_theme();
+    let a = m.b.apply(p, "casey", false).unwrap();
+    let path = m.b.ledger.path().to_path_buf();
+    let rewrite = |approved: &str, proposal: u64| {
+        let forged = path.with_extension("forged");
+        let _ = fs::remove_file(&forged);
+        let l = Ledger::open(&forged);
+        for e in m.b.ledger.read_all().unwrap() {
+            let mut b = e.body;
+            if b.seq == a.body.seq {
+                b.approved_by = Some(approved.into());
+                b.data["proposal"] = proposal.into();
+            }
+            l.append(NewEntry { actor: b.actor, approved_by: b.approved_by, kind: b.kind, tier: b.tier, tainted: b.tainted, reason: b.reason, data: b.data }).unwrap();
+        }
+        fs::read(&forged).unwrap()
+    };
+    let real = fs::read(&path).unwrap();
+    fs::write(&path, rewrite("mallory", p)).unwrap();
+    m.b.ledger.verify().unwrap();
+    let d = m.b.status().unwrap().disagreements;
+    assert!(d.iter().any(|x| x.contains("says mallory approved it")), "{d:?}");
+    fs::write(&path, rewrite("casey", p + 40)).unwrap();
+    let s = m.b.status().unwrap();
+    assert!(s.disagreements.iter().any(|x| x.contains("its commit says")), "{:?}", s.disagreements);
+    // No rebuild puts this right: it is not the machine's drift, and repair says there is nothing to do.
+    assert!(s.drift().is_empty() && !s.problems().is_empty());
+    assert!(format!("{:#}", m.b.repair("casey").unwrap_err()).contains("nothing to repair"));
+    // Looked into: said no more, on the record.
+    let e = m.b.acknowledge_disagreements("casey").unwrap();
+    assert_eq!(e.body.data["entries"], serde_json::json!([a.body.seq]));
+    assert_eq!(m.b.status().unwrap().disagreements, Vec::<String>::new());
+    assert!(m.b.acknowledge_disagreements("casey").is_err(), "nothing left to acknowledge");
+    // Something else wrong with the same entry is new: said, whatever was looked into before.
+    let looked = fs::read(&path).unwrap();
+    fs::write(&path, rewrite("mallory", p + 40)).unwrap();
+    let d = m.b.status().unwrap().disagreements;
+    assert!(d.iter().any(|x| x.contains("says mallory approved it")), "{d:?}");
+    fs::write(&path, looked).unwrap();
+    fs::write(&path, real).unwrap();
+}
+
+/// By hand: one taken is listed and named by its entry; one deleted is on the record first, whatever
+/// becomes of the deleting. On a machine with none, each says so and writes nothing.
+#[test]
+fn a_snapshot_by_hand_and_one_deleted() {
+    let (dir, repo) = config_dir();
+    let (state, snaps) = (dir.path().join("state"), dir.path().join("snaps"));
+    fs::create_dir_all(&snaps).unwrap();
+    let cmd = format!("case {{action}} in take) mkdir {0}/{{label}} ;; delete) rm -r {0}/{{label}} ;; esac", snaps.display());
+    let b = Broker::new(&repo, &state, "true").with_snapshots(cmd).with_snapshot_dir(&snaps);
+    b.init().unwrap();
+    let e = b.snapshot_now("casey").unwrap();
+    assert_eq!((e.body.kind.as_str(), e.body.approved_by.as_deref()), ("snapshot_taken", Some("casey")));
+    let list = b.snapshots().unwrap();
+    assert_eq!((list.len(), list[0].change), (1, e.body.seq));
+    let d = b.delete_snapshot(e.body.seq, "casey").unwrap();
+    assert_eq!(d.body.kind, "snapshot_deleted");
+    assert!(b.snapshots().unwrap().is_empty());
+    assert!(format!("{:#}", b.delete_snapshot(e.body.seq, "casey").unwrap_err()).contains("already gone"));
+    assert!(format!("{:#}", b.delete_snapshot(1, "casey").unwrap_err()).contains("has no snapshot"));
+    // It will not go: what was said stands, and what happened is said after it.
+    let keep = Broker::new(&repo, &state, "true").with_snapshots(format!("case {{action}} in take) mkdir {0}/{{label}} ;; delete) false ;; esac", snaps.display())).with_snapshot_dir(&snaps);
+    let e = keep.snapshot_now("casey").unwrap();
+    assert!(keep.delete_snapshot(e.body.seq, "casey").is_err());
+    let all = keep.ledger.read_all().unwrap();
+    let [.., said, failed] = all.as_slice() else { panic!() };
+    assert_eq!((said.body.kind.as_str(), failed.body.kind.as_str()), ("snapshot_deleted", "snapshot_delete_failed"));
+    assert!(failed.body.reason.contains("still there"), "{}", failed.body.reason);
+    // A snapshot that fails is no entry.
+    let n = keep.ledger.read_all().unwrap().len();
+    let bad = Broker::new(&repo, &state, "true").with_snapshots("false").with_snapshot_dir(&snaps);
+    assert!(format!("{:#}", bad.snapshot_now("casey").unwrap_err()).contains("no snapshot was taken"));
+    assert_eq!(bad.ledger.read_all().unwrap().len(), n);
+    // None here at all.
+    let none = Broker::new(&repo, &state, "true");
+    assert!(format!("{:#}", none.snapshot_now("casey").unwrap_err()).contains("does not take snapshots"));
+    assert!(format!("{:#}", none.delete_snapshot(e.body.seq, "casey").unwrap_err()).contains("does not take snapshots"));
+}
+
+/// The audit of M3, H1: a diff that is nothing to another's file at one commit and something at the
+/// next. Its own folder at the gate, and written over theirs at apply, with no password. Whatever the
+/// socket requires, apply refuses a proposal that no longer does what was judged.
+#[test]
+fn a_proposal_that_now_does_more_than_was_judged_is_refused() {
+    let (dir, repo) = config_dir();
+    let list = "[\n  \"hello\",\n  \"jq\",\n  \"tree\"\n]\n";
+    for who in ["dev", "sam"] {
+        fs::create_dir_all(repo.join("users").join(who)).unwrap();
+        fs::write(repo.join("users").join(who).join("packages.json"), list).unwrap();
+    }
+    let b = Broker::new(&repo, dir.path().join("state"), "true");
+    b.init().unwrap();
+    let crafted = write_diff(dir.path(), "crafted.diff", "diff --git a/users/dev/packages.json b/users/dev/packages.json\ndeleted file mode 100644\n--- a/users/dev/packages.json\n+++ /dev/null\n@@ -1,5 +0,0 @@\n-[\n-  \"hello\",\n-  \"jq\",\n-  \"tree\"\n-]\ndiff --git a/users/sam/packages.json b/users/dev/packages.json\nsimilarity index 100%\ncopy from users/sam/packages.json\ncopy to users/dev/packages.json\ndiff --git a/users/sam/packages.json b/users/sam/packages.json\n--- a/users/sam/packages.json\n+++ b/users/sam/packages.json\n@@ -4,2 +4,2 @@\n-  \"tree\"\n+  \"tmux\"\n ]\n");
+    let p = b.propose(&crafted, "mine", Actor::User, false).unwrap();
+    assert_eq!(p.body.tier, "user", "as the gate reads it: {:?}", p.body.data["files"]);
+    // The configuration moves on, by a change of the proposer's own.
+    let own = write_diff(dir.path(), "own.diff", "--- a/users/sam/packages.json\n+++ b/users/sam/packages.json\n@@ -2,3 +2,3 @@\n   \"hello\",\n-  \"jq\",\n+  \"vim\",\n   \"tree\"\n");
+    let o = b.propose(&own, "mine too", Actor::User, false).unwrap().body.seq;
+    b.apply(o, "sam", false).unwrap();
+    let e = format!("{:#}", b.apply(p.body.seq, "sam", false).unwrap_err());
+    assert!(e.contains("no longer does what it was judged on"), "{e}");
+    assert_eq!(fs::read_to_string(repo.join("users/dev/packages.json")).unwrap(), list, "the other person's list");
+    assert_eq!(kinds(&b).iter().filter(|k| *k == "apply_refused").count(), 1);
+    // Again and again: nothing more on the record, and still refused.
+    assert!(b.apply(p.body.seq, "sam", false).is_err());
+    assert_eq!(kinds(&b).iter().filter(|k| *k == "apply_refused").count(), 1);
+    b.ledger.verify().unwrap();
+}
+
+/// The audit of M3, M4 (and N19): a proposal's diff and effect are kept beside the ledger by their
+/// hash, so the ledger stays small; padding before a diff is refused; the agent's are smaller; and a
+/// diff changed where it is kept is refused at apply, not applied.
+#[test]
+fn diffs_beside_the_ledger_and_no_padding() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let big: String = (0..20_000).map(|i| format!("+line {i}\n")).collect();
+    let d = write_diff(dir.path(), "big.diff", &format!("--- /dev/null\n+++ b/users/casey/notes.txt\n@@ -0,0 +1,20000 @@\n{big}"));
+    let p = b.propose_on(Some(&head), &d, "notes", Actor::User, false).unwrap();
+    let line = fs::read_to_string(b.ledger.path()).unwrap().lines().last().unwrap().len();
+    assert!(line < 2000, "the entry is {line} bytes: the diff is not in it");
+    assert!(b.proposal_text(&p, "diff").unwrap().contains("+line 19999"));
+    // Padding: refused, whoever sends it.
+    let padded = write_diff(dir.path(), "pad.diff", &format!("{}\n--- /dev/null\n+++ b/users/casey/x.txt\n@@ -0,0 +1 @@\n+x\n", "x".repeat(1000)));
+    for actor in [Actor::User, Actor::Agent] {
+        let e = format!("{:#}", b.propose_on(Some(&head), &padded, "pad", actor, false).unwrap_err());
+        assert!(e.contains("nothing before it"), "{e}");
+    }
+    // The agent's: at most a megabyte.
+    let huge: String = (0..200_000).map(|i| format!("+line {i}\n")).collect();
+    let d = write_diff(dir.path(), "huge.diff", &format!("--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1,200000 @@\n{huge}"));
+    assert!(format!("{:#}", b.propose_on(Some(&head), &d, "huge", Actor::Agent, false).unwrap_err()).contains("at most"));
+    // Changed where it is kept: refused at apply.
+    let sha = p.body.data["diff_sha256"].as_str().unwrap();
+    let kept = dir.path().join("state/proposals").join(sha);
+    fs::write(&kept, fs::read_to_string(&kept).unwrap().replace("+line 5\n", "+line five\n")).unwrap();
+    assert!(format!("{:#}", b.apply(p.body.seq, "casey", false).unwrap_err()).contains("was changed"));
+}
+
+/// The numbers the agent is held to, as numbers: changing one is a decision, not a refactor (the
+/// audit of M3, M6).
+#[test]
+fn the_agents_limits_are_these_numbers() {
+    use torq_broker::{AGENT_MAX_DIFF, AGENT_REASON_MAX, AGENT_REFUSALS_AN_HOUR, AGENT_WAITING_MAX, MAX_DIFF};
+    assert_eq!((AGENT_REASON_MAX, AGENT_WAITING_MAX, AGENT_REFUSALS_AN_HOUR), (200, 20, 30));
+    assert_eq!((MAX_DIFF, AGENT_MAX_DIFF), (4 << 20, 1 << 20));
+}
+
+/// A commit confirmed is settled only by an entry after it: one before, naming its number in advance,
+/// settles nothing (the audit of M3, M6).
+#[test]
+fn an_entry_before_a_commit_confirmed_does_not_settle_it() {
+    let m = Confirmable::new();
+    let seq = m.propose_theme();
+    let next = m.b.ledger.read_all().unwrap().len() as u64 + 2;
+    m.b.ledger.append(torq_broker::ledger::NewEntry { actor: "user".into(), approved_by: None, kind: "confirmed".into(), tier: "system".into(), tainted: false, reason: "early".into(), data: serde_json::json!({ "applied": next }) }).unwrap();
+    let a = m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
+    assert_eq!(a.body.seq, next);
+    assert!(m.b.status().unwrap().pending_confirm.is_some(), "still waiting");
+}
+
+/// The review of 0.2.1, M2: a forbidden path is no one's, by sudo too, not the socket's rule alone.
+#[test]
+fn a_person_may_not_change_forbidden_paths_either() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "attr.diff", "--- /dev/null\n+++ b/.gitattributes\n@@ -0,0 +1 @@\n+* -diff\n");
+    let e = format!("{:#}", b.propose_on(Some(&head), &d, "attributes", Actor::User, false).unwrap_err());
+    assert!(e.contains("no one may change forbidden paths"), "{e}");
+}
+
+/// The review of 0.2.1, H1: a commit named in a ledger is text whoever wrote the ledger chose, and an
+/// option to git given as one (`--output=<file>`) wrote that file as root. Refused at git, and at adopt.
+#[test]
+fn a_commit_named_in_the_ledger_is_never_an_option_to_git() {
+    let (dir, b) = setup("true");
+    let target = dir.path().join("written");
+    let e = b.ledger.append(torq_broker::ledger::NewEntry { actor: "user".into(), approved_by: None, kind: "proposal".into(), tier: "user".into(), tainted: false, reason: "x".into(), data: serde_json::json!({ "commit": format!("--output={}", target.display()) }) }).unwrap();
+    let out = run_cli(dir.path(), "true", &["show", &e.body.seq.to_string()]);
+    assert!(!target.exists(), "git wrote {}: {out:?}", target.display());
+    assert!(b.repo.show(&format!("--output={}", target.display())).is_err());
+    for bad in ["--output=/x", "HEAD~1", "main", "-S", "refs/../x", &"a".repeat(39)] {
+        assert!(torq_broker::repo::revision(bad).is_err(), "{bad}");
+    }
+    for good in ["HEAD", "refs/torq/ledger", &"a".repeat(40)] {
+        assert!(torq_broker::repo::revision(good).is_ok(), "{good}");
+    }
 }

@@ -454,6 +454,10 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   working tree, uncommitted edits included (KNOWN-GAPS, "Dev mode"), so what the ledger records on
   the dev machine is reversible but not always reproducible from the repository. `docs/DEV-SETUP.md` is written for this
   host; the Mac/UTM instructions are in git history.
+- **Amended (2026-11-05, the owner):** during development the tests run here, not on every push:
+  `nix flake check` on torq5 before each merge to `main`. CI's `test` runs for pull requests, by
+  hand, and as the first step of every release. And aarch64 is set aside: no images until x86_64
+  has a stable release (the flake still defines it; image.yml's matrix has it commented out).
 
 ## ADR-031 — The ISO installer writes the image, and detects the hardware
 - **Context:** M2's last piece is TorqOS on real hardware: an ISO to boot from a USB stick that
@@ -698,9 +702,10 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
      machine — to the config repo's remote (ADR-036), as its own ref; with the remote refusing
      force-pushes, it is append-only in practice. Root can rewrite local history; the anchor
      disagrees, and `verify` says so. Signing entries on the machine is not the defence (N9): a key
-     on the box is a key root can read, a TPM key one root can use. What root changes on the machine
-     does not survive a rebuild from the configuration (the store is read-only; `request system
-     repair`), and data it deletes comes back from snapshots (ADR-038).
+     on the box is a key root can read, a TPM key one root can use. What root changes that the
+     configuration names does not survive a rebuild (and a store path changed in place, `request system
+     repair`, after the daily check); what it leaves elsewhere survives until a reinstall; data it deletes
+     comes back from snapshots, if it did not delete those too (ADR-038; the audit of M3, M5).
 - **Not:** preventing root. The only OS that does is one with no shell at all (Talos); strict mode
   without break-glass is that, and stays an owner's option for later, once every task an owner
   needs is a torqcli command.
@@ -708,10 +713,25 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   broker gains a socket service and loses `sudo` as its door; `torq-broker` under sudo stays for
   dev mode and recovery. Measured boot (SECURITY-MODEL) and data snapshots come after, as planned.
   What TorqOS can then say, truthfully: *the agent cannot get root; the owner can, but not
-  silently; and what root does here cannot rewrite the record elsewhere or outlive a rebuild.*
+  silently; and what root does here cannot rewrite the record elsewhere, nor, where the configuration
+  names it, outlive a rebuild.* (Corrected by the audit of M3, M5: it said "or outlive a rebuild", which
+  claimed more than a rebuild looks at.)
+- **Amended (2026-11-05): strict mode and break-glass built.** `torq.security.strict.enable`, off by
+  default, a choice in the tree. An administrator's sudo runs two things: break-glass and the
+  agent's launcher. Not the broker, though this ADR said "TorqOS's own commands": torqcli needs no
+  sudo (ADR-040), and the broker's commands under sudo are root's own (it reads any file named to
+  it, and sets passwords), so a rule naming it was a quiet way round. Polkit's administrator is root
+  alone, and no one may be in a group that is root by another name (docker, disk …). `torq break-glass
+  "<why>"` asks the person's password every time, writes the entry, pushes it, and only
+  then opens the shell; if the remote cannot be reached it says so and asks. The ledger has its own
+  lock, held for one append, so a stuck switch cannot keep the entry out; since an entry can then land
+  during an apply, a commit confirmed's timer has an id of its own for each attempt (`confirm.timer`),
+  never a ledger number predicted. If the ledger cannot be
+  written there is no shell, and no fallback: the owner's decision, "I prefer secure over back doors".
 
-## ADR-036 — The config repo's remote: the machine is a URL (proposed)
-- **Status:** proposed, 2026-11-03. Keeps ADR-004's default (local, never pushed) and adds the
+## ADR-036 — The config repo's remote: the machine is a URL
+- **Status:** accepted (the owner, 2026-11-05: "yes"); the push and the anchor built 2026-11-05, pull and
+  adopt next. Keeps ADR-004's default (local, never pushed) and adds the
   remote as a setting; answers VISION's two "far future" questions.
 - **Context:** The config repo is the machine minus its data: `flake.nix`, `flake.lock`, the tree's
   JSON, attached Nix files, `hardware-configuration.nix`, `users/<name>/*.json`. Secrets are kept
@@ -747,6 +767,52 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   minus data (ADR-038). Setup gains an online path (the default stays offline). New: `torq remote
   …` settings, `request system pull`, the remote in `show system alarms`. ADR-004's "network is
   download-only" becomes "download-only until the owner names a remote".
+- **Amended (2026-11-05): built — the push and the anchor** (`tests/remote.nix`; reviewed). The URL
+  is a setting, `torq remote url` (`torq.remote.url`): SSH only — a git URL can run a command
+  (`ext::`) — judged by the broker (`url_ok`), git allowed no other transport, no ssh configuration
+  read, paths quoted. The credential: a key the broker makes in its state (`request system remote
+  key`; a deploy key with write access); the host key pinned at first contact. After every command
+  that writes the ledger the broker fetches the remote's ledger and checks it — one line of commits
+  (no merge), still holding the commit it checked last, each push since starting with the one
+  before, and this ledger starting with the newest — then pushes the ledger, as a commit on top of
+  the remote's newest, to the branch `torq-ledger` (a branch, so branch protection keeps it), and
+  `main` with it (not while a commit confirmed waits: `main` is never rewound), atomic, never
+  forced. Any disagreement — and a ledger gone from the remote, or a changed host key — raises an
+  alarm that stays until a person clears it (`request system remote clear`, ledgered) and stops
+  the pushes. Every git call to the remote is stopped after a minute. Out of reach, a change still
+  lands; the push waits (a timer, 15 min), and a day without one is an alarm.
+  **What it is, honestly:** the alarm on the machine is root's to rewrite, as the ledger is. The
+  check root cannot reach is the remote's `torq-ledger` branch, protected there (no force-push, no
+  deletion, linear history), read from anywhere.
+- **Amended (2026-11-05): pull** (`tests/remote.nix`). `request system pull` loads the remote's
+  `incoming` branch — never `main`, which only the machine writes: a commit made here from what was
+  pulled is not that commit, and `main` is never forced — into the candidate: its settings and
+  config files, not this machine's hardware file (hardware does not travel), not its software
+  (`flake.nix`, `flake.lock`: `request system update` is how software changes). The broker only
+  fetches it (`fetch-incoming`, a read for anyone); the person reads `show | compare` and commits,
+  or not. Nothing from the remote is applied by any other path. `incoming` is where a person, another
+  tool or a pull request puts what this machine should take; it stays there after. Only people fetch
+  it (not the agent, not services: it goes to the network, as root), under a lock of its own, and
+  not from a remote whose ledger disagrees. **What travels:** everything but the hardware *file* —
+  boot and file-system *settings*, and config files that set them, come with it, shown in the
+  compare; read them.
+- **Amended (2026-11-05): adopt** (`tests/adopt.nix`; the owner's choice). First-boot setup asks: a new
+  machine, or from a repository? The new machine makes its key and shows it; the person adds it to the
+  repository — only someone who can administer it can, and that, not a signature, is the trust: the
+  broker does not sign its commits yet (signing, and checking it here, is its own item). The
+  broker fetches into a staging repository and checks it: the ledger one line, each push extending
+  the one before, the chain whole, `main` the commit it ends at; setup shows the machine, owner and
+  changes, asks the owner's password (it is not in the repository) and asks before anything
+  changes. An adopted machine **continues** the old one: its repo history and ledger, then one
+  commit putting in this machine's hardware file and the image's software (`flake.nix`, `flake.lock`:
+  a repository's may name a source that was the old machine's own), and one entry, `adopted`. So the
+  remote's ledger stays this one's start, and pushing goes on. From its review: adopted is exactly
+  what was shown — the commits and owner are pinned, nothing is fetched after the question — and a
+  repository is refused for a link at any of this machine's own files (written without following
+  anything), a path no one may change, no hardware file read, a commit confirmed still waiting in
+  its ledger (which would drive the boot's rollback, as root), or a size past reason. The console
+  shows the commits and the host key's fingerprint to compare, and says what is being given: this
+  configuration runs here as root, SSH on or off, who has keys, which Nix files it attaches.
 
 ## ADR-037 — Applications: a ladder, every rung declared (proposed)
 - **Status:** proposed, 2026-11-03; the design for M4's applications. Rung 3 needs its own small
@@ -780,8 +846,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   compositor; disk for runtimes; the agent builds Nix packages, not Flatpaks. The repository shows
   every application on the machine, by rung.
 
-## ADR-038 — Data: what a rebuild does not bring back, and what TorqOS does about it (proposed)
-- **Status:** proposed, 2026-11-03. The snapshot decision belongs with the installer (ADR-031).
+## ADR-038 — Data: what a rebuild does not bring back, and what TorqOS does about it
+- **Status:** proposed, 2026-11-03; local snapshots accepted and built 2026-11-06 (the owner: btrfs in
+  new images, snapshots on system changes only), the backup and sync parts still proposed.
 - **Context:** The repository rebuilds the machine, not the person's life on it. A laptop's data is
   five kinds: documents and media (catastrophic to lose); application settings (annoying);
   secrets — SSH and GPG keys, saved passwords, tokens (serious, and never in the repository);
@@ -811,6 +878,28 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   settings, data. To build: `request system restore`, the restore step in setup, the snapshot hook
   in the broker, the installer's file-system choice. Everything else is NixOS options the tree
   already has, plus telling people the honest thing.
+- **Amended (2026-11-06): local snapshots built.** Every new machine is on btrfs: the image and the
+  ISO, one layout, no choice at install. `/var/lib/torq` is a subvolume of its own, so no snapshot of
+  `/var/lib` holds the ledger, the configuration or the password hashes: restoring data can never
+  rewind the record. Snapshots are read only and root's alone, taken before each system change only (a
+  person's own settings would let anyone push the others out), the newest ten kept, the label in the
+  change's entry. A snapshot that fails stops nothing and is said in the entry: a disk too full to
+  snapshot may need a change to clear it, and a snapshot is a way back, not a guarantee.
+  `rollback` does not bring data back by itself, as this ADR first had it: putting a live service's
+  files back under it is a person's decision. `show system snapshots`, then `request system snapshot
+  restore <n> <path>`, an administrator's, with their password, ledgered. Root reads the snapshot into a
+  pipe and the owner of the folder writes it: the owner holds nothing of the snapshot, which a
+  descriptor would let them walk up, and root writes nothing into a folder of theirs:
+  it is theirs to fill with links, and a root copy into
+  it would go where they point. It goes to a name beside the target, private until done, and what is
+  live changes by a rename once it is all there: a failure leaves it as it was. What was there is set
+  aside, not overwritten. The broker's lock covers the checks and not the copy, so an owner who stops
+  their half stops no one else. Set-id
+  bits never come back, and the group is the account's now. Machines already on ext4
+  (torq5 among them) have no snapshots, and nothing moves them.
+  `torq snapshots keep` and `enable` are a person's, in the tree: a system change, never the agent's; what the
+  broker runs for them stays fenced. `request system snapshot take` and `delete <n>` are an administrator's,
+  with their password. A delete removes a way back, so its entry comes first, as a password's does.
 
 ## ADR-039 — Upstreams: what TorqOS owes, and what it depends on
 - **Context:** TorqOS redistributes images made of other people's software: nixpkgs and NixOS's
@@ -860,3 +949,130 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   others, `enableRedistributableFirmware`) and the image does not. It checks itself: each of the
   eight ways planted in the image is caught. (Review of 2026-11-03: the first version checked only
   `torq.unfree`.)
+
+## ADR-040 — The broker on a socket: who is asking is the kernel's answer
+- **Status:** accepted, 2026-11-04 (the owner: both the password at system changes, dev mode included, and PAM in the broker); ADR-035's first lever, the first item of M3. Built on a branch,
+  reviewed fresh (docs/DRIVING.md) before `main`.
+- **Context:** Today torqcli reaches the broker through `sudo torq-broker …` and tells it who is
+  asking: `--actor`, `--approved-by $(id -un)`, `--tainted` (KNOWN-GAPS 4). Anything running as a
+  wheel user can therefore commit as that user, and only wheel users can use torqcli at all; user
+  tier is not bound to the user it names (6a); the broker opens the `--diff` and `--hash-file`
+  paths it is given, as root (N16). The human gate for a system change is sudo's password — gone
+  in dev mode, and the same password that opens every other root door.
+- **Decision:**
+  1. **A socket, activated by systemd.** `torq-broker.socket` listens on `/run/torq/broker.sock`
+     (mode 0666: who may do what is decided inside, by uid, not by who can connect);
+     `torq-broker.service` runs as root with today's hardening, started on demand, one connection
+     at a time (the broker's lock already serialises changes). The protocol is one request per
+     connection, a length-limited JSON line, and the reply a stream of output lines and an exit
+     code — a build's progress shows as it happens, and a client that hangs up does not stop a
+     switch already started. A change's diff, a password hash, a reason travel **in the request**,
+     never as a path: the broker opens no file a caller names (closes N16).
+  2. **Identity from the kernel.** The broker reads `SO_PEERCRED` (uid, pid) and decides the actor
+     from the uid alone: the `torq-agent` account is the agent; any other non-root account is a
+     user, by name; there are no `--actor` or `--approved-by` on the socket. `--tainted` stays, but
+     only raises: a caller may mark its own proposal untrusted, never clear a mark the broker set.
+     torqcli runs without sudo and without `torq-broker` on its PATH.
+  3. **Who may do what** (the tier, `broker/src/policy.rs`, is the change's; the caller is the uid):
+     - *observe* (`log`, `verify`, `status`, `show`): any local account.
+     - *user tier*: a user's own `users/<name>/` only — a change to another's is system tier (6a).
+     - *system tier*: the owner (`torq.user`) and any account the configuration makes an
+       administrator; applying one asks that account's **password, checked by the broker through
+       PAM** (`security.pam.services.torq-approve`: pam_unix with faillock, so guessing is slowed and
+       logged). torqcli reads it from the terminal with echo off and sends it in the request; the
+       broker checks it, forgets it, and ledgers who approved. A script in the owner's shell has the
+       uid but not the password; that is the human gate ADR-035 asks for. No terminal, no system
+       change — as today.
+     - *the agent*: propose only; never apply, confirm, revert or reconcile; never a password
+       check (its uid has none). What it may propose is the next item (the allow-list, KNOWN-GAPS 6m).
+     - *forbidden*: refused for everyone, as now.
+  4. **sudo stays the recovery door, and says so.** `sudo torq-broker …` keeps working for dev mode
+     and recovery (a broken socket, a broken PAM), its entries ledgered as `via sudo` with the
+     invoking user sudo reports (`SUDO_UID`) — what root says about itself, marked as such. Strict
+     mode (ADR-035) was built narrower than this: `torq break-glass` and the agent's launcher, not the
+     broker (ADR-035, amended).
+  5. **Built from maintained parts.** systemd socket activation (no listener code of TorqOS's
+     own); PAM through a maintained Rust binding (its `unsafe` is the binding's, not TorqOS's
+     crates', as rustix's is — ADR-020); `SO_PEERCRED` through rustix. torqcli marks itself
+     non-dumpable while it holds a password, so another program of the same uid cannot read it out.
+- **Tested** (a VM test, `tests/socket.nix`, each would fail if its claim broke): a user commits
+  their own folder without sudo; the same user cannot change another user's folder, or the
+  system, without their password; a wrong password is refused and faillock counts it; `--actor`,
+  `--approved-by` or a file path in a request is refused; the agent account can propose and can do
+  nothing else; observe works for every account; a client killed mid-switch leaves the switch to
+  finish and the ledger consistent; `sudo torq-broker` still works and is ledgered `via sudo`.
+- **Not:** a daemon of TorqOS's own that listens on the network, ever; polkit (its agent and
+  rules engine are more than this needs on a server, and the desktop's dialog can talk to the same
+  socket, M4); signing requests (the uid is the kernel's word; a key would be root's to read, N9).
+- **Consequences:** Closes KNOWN-GAPS 4 (identity), 6a (user tier bound to its user), N16; the
+  system-tier gate becomes the owner's password even in dev mode (dev mode keeps passwordless
+  sudo, for building TorqOS, not for approving changes). The CLI's `sudo` handling
+  (`cli/src/main.rs` `BROKER`, the "sudo asks for your password" errors) goes. A2 comes next on the
+  same branch or the one after: with requests no longer root's own, the broker re-fetches each
+  changed input itself and checks its hash and signature.
+
+## ADR-041 — The agent's account: `torq-agent`, and what it may propose
+- **Status:** accepted (the owner, 2026-11-04: "do it"); 1–4 built 2026-11-05, 5 designed and next. ADR-035's account lever, after ADR-040 (the socket). The owner:
+  people will drive TorqOS with the AI tools they already use — Claude Code first — so the account
+  is made to be one such a tool can run as, not only TorqOS's own agent (M5).
+- **Context:** ADR-040 made identity the kernel's: whatever arrives from the `torq-agent` uid is
+  the agent, and it may only propose. But nothing makes that account yet (the socket test creates
+  one by hand), and a proposal from it may still touch anything a person's could: the settings
+  fence (`modules/settings-fence.nix`) keeps out the broker's own inputs, not the settings that
+  run code as root — a service's script, sudo rules, tmpfiles, binary caches and their keys
+  (KNOWN-GAPS 6m). A person reviews each proposal, but a review is not a boundary; a default-deny
+  list at the broker is.
+- **Decision:**
+  1. **The account** (`modules/agent.nix`, always present): a static system user `torq-agent` —
+     static, because the broker names its caller from /etc/passwd (a DynamicUser is not there,
+     KNOWN-GAPS 6zf) — in its own group, no password, no login shell (`nologin`: no SSH, no
+     console), in no other group (no `wheel`, so no sudo; no device groups). Its home,
+     `/var/lib/torq-agent` (0700, its own), is where a tool keeps its state and credentials (Claude
+     Code's `~/.claude`), so they are never the owner's. It reaches the system only through the
+     broker's socket, as torqcli does; what it runs, it runs with its own uid.
+  2. **What it may propose: a default-deny list at the broker**, checked on every proposal from the
+     agent's uid, by what the change *does*, not only which files it touches:
+     - **Never:** anything outside the tree's settings — the config files (`config-files.json` and
+       the Nix files it attaches), `flake.nix`, `flake.lock`, the hardware file — and anything in
+       `torq.*` (the agent's own limits live there) or the fence's list.
+     - **A person's packages** (`users/<name>/packages.json`): the owner's (`torq.user`) by default;
+       `torq.agent.mayPropose.users` names others.
+     - **Settings** (`nixos/<top>.json`, `system/<name>.json`): only the subtrees
+       `torq.agent.mayPropose.settings` lists (default: none — the agent may propose packages and
+       nothing else until the owner says otherwise). The broker compares each JSON file before and
+       after the change and checks every setting that changes against the list: `services.openssh`
+       allows `services.openssh.settings.PasswordAuthentication`, not `services.nginx`.
+     - The list is the broker's (`/etc/torq/broker.json`, from the module), and `torq.*` is never on
+       it, so the agent cannot propose widening its own list.
+  3. **A refusal is ledgered** (`kind: refused`: who, which files, why, the diff's hash — not the
+     diff), so an agent that tries is on the record, not only turned away.
+  4. **People see and approve the agent's proposals in torqcli:** the agent's `commit` proposes and
+     stops (`proposed as #n: a person applies it`); `show system proposals` lists what waits;
+     `request system apply <n>` shows its diff (and whether its session read untrusted content),
+     asks, and applies it — with the person's password for a system change, as their own commit.
+  5. **A tool like Claude Code, run as the agent (built 2026-11-05, `tests/agent-run.nix`).**
+     `torq agent run [--share <dir>] [--] <command>` — `torq agent run --share ~/project -- claude`.
+     An administrator starts it without a password; sudo runs `torq-agent-run` as root, which, in a
+     mount namespace of its own, binds the shared directory where it is — checked to be the very
+     directory torqcli opened as the person (device and inode of the descriptor it is handed), and
+     theirs — hides every home around it, and then drops to `torq-agent` for good (`setpriv`: its
+     uid, no capabilities, no new privileges) before running anything, in bubblewrap: the people's
+     runtime directories hidden, /tmp its own, the agent's home its home, network on. Sharing is an
+     ACL on what of the directory is the person's (default ACLs, so files either makes stay both
+     of theirs); the agent gets no permission on the home itself (the owner's choice, 2026-11-05: a
+     pass-through ACL let the agent read the home's world-readable files by name). A sandbox of the
+     tool's own (Claude Code's bubblewrap) runs inside; nothing it starts outlives it (its own process
+     namespace); the share is nosuid and nodev; one session at a time while sharing. **What a share
+     means:** whatever the agent writes there may later run as the person — a git hook, `.envrc`, a
+     Makefile, a package's scripts, a tool's own hooks (`.claude/settings.json`) — so a share is
+     trusting the agent with the person's next `git commit` there. Not settled: what "tainted" means for a tool
+     that reads the web (the agent still marks its own).
+- **Tested** (`tests/agent.nix`, each failing if its claim broke): the account exists as stated (no
+  password, nologin, no groups, its home 0700); as it, a proposal of the owner's packages is
+  accepted; a system setting not on the list, a setting on the list beside one that is not, a config
+  file, `flake.nix`, `torq.*`, and another person's packages are each refused **and ledgered**; with
+  `mayPropose.settings = [ "services.openssh" ]` an `openssh` change is accepted and an `nginx` one
+  refused; the agent's torqcli `commit` proposes and stops; a person's `request system apply`
+  applies it, asking the password for a system change.
+- **Not:** the agent applying anything, ever (ADR-040); the launcher (5) in this step; the agent's
+  model, tools or prompts (M5).

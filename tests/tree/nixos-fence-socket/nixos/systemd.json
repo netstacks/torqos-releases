@@ -1,0 +1,1 @@
+{ "sockets": { "torq-broker": { "socketConfig": { "SocketMode": "0600" } } } }

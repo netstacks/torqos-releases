@@ -20,7 +20,7 @@
       imageAs = pkgs: ext: args:
         let
           system = pkgs.stdenv.hostPlatform.system;
-          whole = self.nixosConfigurations."image-${system}".config.system.build.images.qemu-efi;
+          whole = self.nixosConfigurations."image-${system}".config.system.build.torqDisk;
         in
         pkgs.runCommand "torqos-${ext}-${system}" { nativeBuildInputs = [ pkgs.qemu-utils ]; } ''
           mkdir $out
@@ -29,7 +29,7 @@
       # The image as the ISO installer carries it (ADR-031, hosts/installer/payload.nix).
       payload = pkgs: import ./hosts/installer/payload.nix {
         inherit pkgs;
-        image = self.nixosConfigurations."image-${pkgs.stdenv.hostPlatform.system}".config.system.build.images.qemu-efi;
+        image = self.nixosConfigurations."image-${pkgs.stdenv.hostPlatform.system}".config.system.build.torqDisk;
       };
     in
     {
@@ -40,7 +40,7 @@
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
       })) (forSystems linuxSystems (pkgs: {
         # The TorqOS image (docs/INSTALL.md): a disk to download and boot; first-boot setup on its
-        # console. NixOS's image builder makes it whole; qemu-img writes it in the form a platform
+        # console. Made by hosts/image/disk.nix; qemu-img writes it in the form a platform
         # takes. `nix build .#image`: a qcow2, compressed (a download a third the size or less; UTM,
         # QEMU and Proxmox run it as it is). `nix build .#image-vmdk`: the same disk for VMware ESXi
         # (a sparse VMDK, which `vmkfstools -i` makes the host's own disk).
@@ -109,6 +109,13 @@
       checks = forSystems linuxSystems (pkgs: {
         broker = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
         trust-loop = import ./tests/trust-loop.nix { inherit pkgs self; };
+        socket = import ./tests/socket.nix { inherit pkgs self; };
+        agent = import ./tests/agent.nix { inherit pkgs self; };
+        agent-run = import ./tests/agent-run.nix { inherit pkgs self; };
+        remote = import ./tests/remote.nix { inherit pkgs self; };
+        adopt = import ./tests/adopt.nix { inherit pkgs self; };
+        strict = import ./tests/strict.nix { inherit pkgs self; };
+        snapshots = import ./tests/snapshots.nix { inherit pkgs self; };
         # How a machine starts: a real EFI partition and its boot menu (ADR-033).
         boot = import ./tests/boot.nix { inherit pkgs self; };
         tree = import ./tests/tree.nix { inherit pkgs self; };
@@ -199,6 +206,8 @@
       devShells = forSystems allSystems (pkgs: {
         default = pkgs.mkShell ({
           packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer git nixfmt-rfc-style ];
+          # The broker links PAM (ADR-040: a system change's password, checked as root).
+          buildInputs = [ pkgs.pam ];
         } // self.packages.${pkgs.stdenv.hostPlatform.system}.torq.filterEnv);
       });
     };

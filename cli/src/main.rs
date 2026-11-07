@@ -10,6 +10,7 @@
 #![cfg_attr(not(test), forbid(dead_code))]
 #![cfg_attr(test, deny(dead_code))]
 
+mod agent;
 mod facts;
 mod grammar;
 mod near;
@@ -46,8 +47,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const REPO: &str = "/var/lib/torq/config";
-/// By absolute path: nothing earlier on PATH can stand in for sudo or the broker.
-const BROKER: &str = "/run/wrappers/bin/sudo /run/current-system/sw/bin/torq-broker";
+/// The machine's broker: its socket (run.rs `SOCKET`, ADR-040), or — for root — the broker itself.
+const BROKER: &str = "socket";
+/// By absolute path: nothing earlier on PATH can stand in for the broker.
+const DIRECT_BROKER: &str = "/run/current-system/sw/bin/torq-broker";
 /// The configuration the broker builds, whatever the host is called (torq.broker.configName).
 const CONFIG: &str = "torq";
 
@@ -303,32 +306,39 @@ fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<(String, Strin
     Ok(keys)
 }
 
-/// The ledger, read through the broker (it is root-only).
+/// The ledger, read through the broker (its state directory is root's): any account may read it.
 fn read_ledger(cli: &Cli) -> Result<Vec<history::Entry>> {
-    let out = broker(cli, &["log", "--json", "--brief"])?
-        .stderr(Stdio::inherit())
-        .output()
-        .context("running the broker")?;
-    if !out.status.success() {
+    let (code, stdout) = run::read(broker(cli, &["log", "--json", "--brief"])?)?;
+    if code != Some(0) {
         bail!("could not read the ledger (see above)");
     }
-    history::parse(&String::from_utf8_lossy(&out.stdout))
+    history::parse(&String::from_utf8_lossy(&stdout))
 }
 
 /// The broker. Its repo is never passed: the real broker (as root) manages the machine's config
 /// repo and nothing else, and `change` has refused to read a different one with it.
-/// Reached through sudo, as the owner (their password): where sudo would ask and there is no
-/// terminal to ask at (a script, `ssh host torqcli …`), said so before anything runs — not sudo's
-/// failure read as the broker's ("stopped unexpectedly").
-fn broker(cli: &Cli, args: &[&str]) -> Result<Command> {
+/// The real one is its socket (ADR-040): no sudo — who is asking is the kernel's answer, and a
+/// system change asks the caller's password itself. Root runs the broker directly (as setup and
+/// the machine's units do). A test broker (`TORQ_BROKER`, a development build) is a command, and
+/// one through sudo where sudo would ask with no terminal to ask at is said so before anything
+/// runs — not sudo's failure read as the broker's ("stopped unexpectedly").
+fn broker(cli: &Cli, args: &[&str]) -> Result<run::Call> {
     use std::io::IsTerminal as _;
+    if cli.broker == BROKER {
+        if rustix::process::geteuid().is_root() {
+            let mut c = Command::new(DIRECT_BROKER);
+            c.args(args);
+            return Ok(run::Call::Exec(c));
+        }
+        return Ok(run::Call::Socket(args.iter().map(|a| a.to_string()).collect()));
+    }
     if !std::io::stdin().is_terminal() && asks_for_password(cli) {
         bail!("this goes through the broker, as root: sudo asks for your password, and there is no terminal to ask at (run it at one, or `sudo -v` first)");
     }
     let mut words = cli.broker.split_whitespace();
     let mut c = Command::new(words.next().unwrap_or("torq-broker"));
     c.args(words).args(args);
-    Ok(c)
+    Ok(run::Call::Exec(c))
 }
 
 /// A repo override only makes sense with a test broker: with the real one (anything run through

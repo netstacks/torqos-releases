@@ -81,6 +81,29 @@
       "systemd",
       "units",
       "torq-*"
+    ],
+    [
+      "systemd",
+      "sockets",
+      "torq-*"
+    ],
+    [
+      "security",
+      "pam",
+      "services",
+      "torq-*"
+    ],
+    [
+      "security",
+      "pam",
+      "services",
+      "su"
+    ],
+    [
+      "security",
+      "pam",
+      "services",
+      "sudo"
     ]
   ],
   "settings": [
@@ -220,6 +243,17 @@
       ],
       "type": {
         "name": "strMatching \"^\\$|^[[:alnum:]]([[:alnum:]_-]{0,61}[[:alnum:]])?\\$\""
+      }
+    },
+    {
+      "help": "Override the configuration file used by Apache. By default, NixOS generates one automatically.",
+      "loc": [
+        "services",
+        "httpd",
+        "configFile"
+      ],
+      "type": {
+        "name": "path"
       }
     },
     {

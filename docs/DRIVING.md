@@ -13,6 +13,9 @@ Three rules that cover most of what goes wrong:
    session, given only the diff and the ADR — not the builder's summary — tells you whether it does.
 3. **Nothing ships from a dirty tree.** `git status` before `request system update` on torq5: a
    `path:` source builds whatever is on disk, committed or not.
+4. **The tests run here.** `nix flake check` on torq5, green, before anything merges to `main` —
+   not GitHub's CI, which runs only for pull requests, by hand and at each release (ADR-030,
+   amended). aarch64 is set aside until x86_64 is stable: not built, not tested.
 
 ## The loop, for one piece of work
 
@@ -77,7 +80,7 @@ torqcli -c "request system update; configure; show | compare; commit comment \"M
 ```
 
 Read the prompt: `[edit system software]` only. If the machine misbehaves: `rollback 1`.
-Push `main`; CI runs both architectures — aarch64 is only tested there (ADR-030).
+Push `main` (no CI runs on a push: the full check ran here, rule 4).
 
 ### 7. Record
 Tick the ROADMAP line, with the date and the test's name in italics as the others are. If the
@@ -118,22 +121,22 @@ before you go on. A ⏹ with *adversarial* means both kinds.
 
 ### M3 — trust (ADR-035, ADR-036)
 Order matters: the socket first, because everything after keys on identity.
-- [ ] The broker as a socket service; `SO_PEERCRED`; torqcli without sudo; the owner's password
+- [x] The broker as a socket service (ADR-040, on `main` 2026-11-05, three reviews); `SO_PEERCRED`; torqcli without sudo; the owner's password
       for system tier. *Test:* a VM test that a caller cannot name its actor or approver.
       **⏹ adversarial.**
-- [ ] The agent's account `torq-agent` and the allow-list at the broker. *Test:* `torq-agent`
+- [x] The agent's account `torq-agent` and the allow-list at the broker (ADR-041, on `main` 2026-11-05; `torq agent run` too). *Test:* `torq-agent`
       proposing a system path, a config file, a `users/<other>` file — each refused and ledgered.
       **⏹ adversarial.**
-- [ ] The remote: settings, push after apply, ledger as a ref, `verify` against it, `request
+- [x] The remote: settings, push after apply, ledger as a ref, `verify` against it, `request
       system pull` as a proposal. *Test:* a VM with a bare remote: a rewritten local ledger is an
       alarm; a remote commit lands in the candidate and nowhere else. **⏹ review:** nothing from
       the remote is ever applied unasked — find the path that would.
-- [ ] Adopt at setup. *Test:* two VMs: the second, pointed at the first's repo, is the first
+- [x] Adopt at setup. *Test:* two VMs: the second, pointed at the first's repo, is the first
       (same tree, its own hardware file, its own password). **⏹ review.**
-- [ ] Strict mode and `torq break-glass`. *Test:* a shell leaves a ledger entry before it opens;
+- [x] Strict mode and `torq break-glass`. *Test:* a shell leaves a ledger entry before it opens;
       `sudo bash` is refused. **⏹ adversarial:** get root without an entry.
-- [ ] Snapshots before each commit (needs the installer's btrfs choice). *Test:* a file deleted
-      by a commit's activation is back after `rollback 1`.
+- [x] Snapshots before each system change, on btrfs in new images. *Test:* a file deleted is back
+      after `request system snapshot restore` (a person's act, not `rollback`'s: ADR-038, amended).
 - [ ] **⏹ audit** — end of M3. This is the audit that matters most: after it, the security claims
       in SECURITY-MODEL should each name a test.
 

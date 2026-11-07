@@ -1,4 +1,4 @@
-{ lib, rustPlatform, git }:
+{ lib, rustPlatform, git, pam }:
 
 rustPlatform.buildRustPackage {
   pname = "torq-broker";
@@ -8,6 +8,9 @@ rustPlatform.buildRustPackage {
 
   # Generate once with `cargo generate-lockfile` in broker/ and commit Cargo.lock.
   cargoLock.lockFile = ./Cargo.lock;
+
+  # PAM: a system change's password, checked by the broker itself (ADR-040).
+  buildInputs = [ pam ];
 
   # Integration tests drive a real git repo, single-threaded (see .cargo/config.toml).
   nativeCheckInputs = [ git ];

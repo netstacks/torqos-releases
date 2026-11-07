@@ -17,7 +17,7 @@
   <a href="https://github.com/netstacks/torqos-releases/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/netstacks/torqos-releases?label=release&color=FF7A1A&labelColor=101216"></a>
   <a href="https://github.com/netstacks/torqos/actions/workflows/test.yml"><img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/netstacks/torqos/test.yml?branch=main&label=tests&labelColor=101216"></a>
   <a href="LICENSE"><img alt="Licence: Apache 2.0" src="https://img.shields.io/badge/licence-Apache%202.0-5B6270?labelColor=101216"></a>
-  <img alt="Platforms: x86_64, aarch64" src="https://img.shields.io/badge/platforms-x86__64%20%7C%20aarch64-8A93A3?labelColor=101216">
+  <img alt="Platform: x86_64" src="https://img.shields.io/badge/platform-x86__64-8A93A3?labelColor=101216">
   <img alt="Built on NixOS 26.05" src="https://img.shields.io/badge/built%20on-NixOS%2026.05-7EE2A8?labelColor=101216">
 </p>
 
@@ -151,10 +151,11 @@ TorqOS is installed from an image: download it, check it, boot it, answer a few 
 | File | For |
 |---|---|
 | `torqos-x86_64-linux.qcow2` | QEMU/KVM, Proxmox VE, libvirt (x86_64) |
-| `torqos-aarch64-linux.qcow2` | UTM on Apple silicon, QEMU (aarch64) |
 | `torqos-x86_64-linux.vmdk.gz` | VMware ESXi (x86_64); `gunzip` it first |
-| `torqos-aarch64-linux.vmdk.gz` | VMware on arm64; `gunzip` it first |
 | `torqos-x86_64-linux.iso` | A real machine: the installer, written to a USB stick as it is (from `v0.2.0`) |
+
+x86_64 only while TorqOS is in development; aarch64 images come back with the first stable
+release (v0.2.0 and earlier have them too).
 
 **2. Check it**, with the release's `SHA256SUMS`, `SHA256SUMS.sig` and `allowed_signers`, using only
 OpenSSH and coreutils:
@@ -288,6 +289,13 @@ nix develop -c sh -c 'cd broker && cargo test'   # the broker's unit tests
 |---|---|
 | `tree` | The configuration tree is read as documented, and what it may never set is refused (evaluation only) |
 | `trust-loop` | Commits, confirmed commits, rollbacks, the ledger and the shell, on a real NixOS |
+| `socket` | The broker's door: who is asking is the kernel's answer; a system change takes an administrator's password; five wrong lock it, at sudo and su too |
+| `agent` | The agent's account proposes only what its list allows, every refusal ledgered; a person sees what a proposal does and applies it |
+| `agent-run` | A program (Claude Code) run as the agent: one shared directory, nothing else of any home, nothing that outlives it |
+| `remote` | Every change pushed to the remote; a ledger cut short or rewritten here — or pushed on top by root — is an alarm |
+| `adopt` | A new machine chooses a repository at setup and becomes that machine: its history goes on, with its own hardware, software and password |
+| `snapshots` | A snapshot of the data before each change, read only, the ledger never in one; a restore runs as the folder's owner, so a planted link leads nowhere they could not go |
+| `strict` | An administrator's sudo runs break-glass and the agent's launcher and nothing else; a root shell leaves its ledger entry, and pushes it, before it opens |
 | `accounts`, `ssh` | Who can log in, and how; passwords never in the configuration |
 | `image` | The release image from first boot through setup to its first signed update |
 | `installer` | The ISO from a USB stick to a chosen disk, and that disk's first boot |
@@ -295,8 +303,9 @@ nix develop -c sh -c 'cd broker && cargo test'   # the broker's unit tests
 | `free`, `size` | Nothing unfree in an image or the ISO; a new machine within its size budget |
 | `broker` | The broker's own tests, in the build sandbox |
 
-CI runs them on every push and pull request, builds the images for both architectures, and publishes
-a release on each `v*` tag. Developing TorqOS in a VM: [docs/DEV-SETUP.md](docs/DEV-SETUP.md).
+They run on the dev host before every merge; CI runs them for pull requests and every release,
+builds the x86_64 images, and publishes a release on each `v*` tag. Developing
+TorqOS in a VM: [docs/DEV-SETUP.md](docs/DEV-SETUP.md).
 
 ## Repository layout
 

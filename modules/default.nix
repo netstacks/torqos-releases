@@ -5,6 +5,8 @@
     ./desktop.nix
     ./broker.nix
     ./ai.nix
+    ./agent.nix
+    ./strict.nix
     ./dev.nix
     ./packages.nix
     ./unfree.nix

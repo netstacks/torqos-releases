@@ -1,0 +1,1 @@
+{ "pam": { "services": { "torq-approve": { "text": "auth sufficient pam_permit.so" } } } }

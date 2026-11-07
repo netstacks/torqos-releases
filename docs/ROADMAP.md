@@ -119,7 +119,7 @@ first.
       moves it there. v0.1.0 out (2026-11-02), checked from outside. Done: `torq5`, installed from
       the image, had its first update move its source from the image's own store path to
       `git+…/torqos-releases?ref=stable` as one ledgered change, and runs a release.*
-- [x] **CI (GitHub Actions):** *test* on every push and pull request (`nix flake check`: tree
+- [x] **CI (GitHub Actions):** *test* on pull requests, by hand and in every release (not on every push since 2026-11-05: the dev host runs it before each merge) (`nix flake check`: tree
       checks and the VM tests, with KVM); *(the `test` workflow, 2026-11-02, with the DCO
       sign-off check on pull requests)* *nixpkgs bump* weekly, as a pull request the tests run
       on *(the `bump` workflow, 2026-11-02: one branch, `bump/nixpkgs`, replaced each week until
@@ -161,25 +161,25 @@ Before an agent exists it needs an identity the kernel vouches for, and before a
 its record has to live off the machine. Both faces want this: a server's ledger anchored in git is
 the sysadmin's audit trail; a laptop's is what makes the agent's access safe.
 
-- [ ] **The broker as a socket service**, identity from `SO_PEERCRED`; `torqcli` without sudo;
+- [x] **The broker as a socket service** (ADR-040, `tests/socket.nix`; on `main` 2026-11-05), identity from `SO_PEERCRED`; `torqcli` without sudo;
       `--actor` and `--approved-by` no longer taken from the caller (KNOWN-GAPS 4, 6a). System-tier
       approval asks the owner's password (a terminal now; a dialog on the desktop, M4). `torq-broker`
       under sudo stays for dev mode and recovery. The audit's socket items (N16, N15) with it.
-- [ ] **The agent's account**: `torq-agent`, unprivileged, sandboxed, no sudo, no shell; what it may
+- [x] **The agent's account** (built 2026-11-05, ADR-041, `tests/agent.nix`; Claude Code run as it with `torq agent run`, `tests/agent-run.nix`): `torq-agent`, unprivileged, sandboxed, no sudo, no shell; what it may
       propose a default-deny allow-list at the broker, by identity (KNOWN-GAPS 6m); config files
       refused to it outright.
-- [ ] **The config repo's remote** (ADR-036): `torq remote …` settings; push after every applied
+- [x] **The config repo's remote** (ADR-036; push, anchor and pull built 2026-11-05, `tests/remote.nix`): `torq remote …` settings; push after every applied
       change, the ledger as `refs/torq/ledger`; `verify` against the remote's head (KNOWN-GAPS 2);
       `show system remote`, `request system pull` as a proposal into the candidate; the credential
       in the broker's state, scoped to one repo. Default stays local (ADR-004).
-- [ ] **Adopt at setup**: "a fresh machine, or from a repository?" — the owner's key enrolled,
+- [x] **Adopt at setup** (ADR-036, `tests/adopt.nix`; trust by the deploy key, signing later): "a fresh machine, or from a repository?" — the owner's key enrolled,
       HEAD's signature checked, this machine's hardware file kept, the owner's password asked,
       change #1. A VM test: a machine rebuilt from another's repo is that machine.
-- [ ] **Strict mode and `torq break-glass`** (ADR-035): sudoers limited to TorqOS's commands; a root
+- [x] **Strict mode and `torq break-glass`** (ADR-035): sudoers limited to TorqOS's commands; a root
       shell only after a ledger entry, anchored. A VM test that a shell leaves its entry.
-- [ ] **Data snapshots before each commit** (ADR-038) on a snapshot-capable file system — the
-      installer's partition choice (ADR-031 follow-up); `rollback` offering the data.
-- [ ] Ledger hardening carried over: N3 (a torn append), M3 (password change in one transaction),
+- [x] **Data snapshots before each system change** (ADR-038) on btrfs, in new images; restored by a person, with `request system snapshot restore`. The
+      backup and offering data at `rollback` are not built.
+- [x] Ledger hardening carried over: N3 (a torn append), M3 (password change in one transaction),
       the `Ledger-Entry` trailer cross-check.
 
 ### M4 — The desktop as a configuration (ADR-034, ADR-037, ADR-038)

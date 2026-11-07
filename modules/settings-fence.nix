@@ -51,6 +51,13 @@ rec {
     [ "systemd" "services" "torq-*" ]
     [ "systemd" "timers" "torq-*" ]
     [ "systemd" "units" "torq-*" ]
+    # The broker's door and its password gate (ADR-040): its socket, and the PAM stack that checks the
+    # password (the audit of M3, L3).
+    [ "systemd" "sockets" "torq-*" ]
+    [ "security" "pam" "services" "torq-*" ]
+    # And what decides who answers for whom there: su, sudo, and the lockout's count.
+    [ "security" "pam" "services" "su" ]
+    [ "security" "pam" "services" "sudo" ]
   ];
 
   # The settings TorqOS keeps in files of its own (torqcli's whole.rs MAP): one setting, one place —

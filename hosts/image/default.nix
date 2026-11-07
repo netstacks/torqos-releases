@@ -3,7 +3,7 @@
 #   nix build .#image   (on aarch64-linux: a qcow2 for UTM, QEMU, Proxmox)
 { ... }:
 {
-  imports = [ ./hardware-configuration.nix ];
+  imports = [ ./hardware-configuration.nix ./disk.nix ];
   torq.setup.enable = true;
   networking.hostName = "torq";
   boot.loader.systemd-boot.enable = true;

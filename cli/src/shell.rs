@@ -135,6 +135,217 @@ impl Machine for Real<'_> {
         Ok(warnings)
     }
 
+    fn remote(&self) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["remote"])?, &log)?, "show system remote")?;
+        let Some(url) = v["url"].as_str() else {
+            return Ok("No remote: this machine's configuration and its ledger are kept here only (torq remote url <ssh url> names one).\n".into());
+        };
+        let mut out = format!("Remote: {}\n", history::one_line(url, 120));
+        if let Some(why) = v["alarm"]["why"].as_str() {
+            out.push_str(&format!(
+                "  ⚠ This machine's ledger and the remote's disagree (since {}): {}\n    Nothing more is pushed until a person looks into it; then: request system remote clear.\n",
+                history::one_line(v["alarm"]["at"].as_str().unwrap_or("?"), 30),
+                history::one_line(why, 300)
+            ));
+        }
+        if !v["key"].as_bool().unwrap_or(false) {
+            out.push_str("  No key yet: request system remote key makes one, to add to the repository as a deploy key.\n");
+        }
+        let last = &v["last"];
+        match last["ok"].as_bool() {
+            None => out.push_str("  Nothing pushed yet.\n"),
+            Some(ok) => {
+                let at = history::one_line(last["at"].as_str().unwrap_or("?"), 30);
+                if ok {
+                    out.push_str(&format!("  Last push: {at}, the configuration and {} ledger entries.\n", last["entries"].as_u64().unwrap_or(0)));
+                } else {
+                    out.push_str(&format!("  Last push: {at}, failed: {}\n", history::one_line(last["error"].as_str().unwrap_or("?"), 200)));
+                }
+            }
+        }
+        if let Some(why) = last["main"].as_str() {
+            out.push_str(&format!("  The configuration ({}) was not pushed: {}\n", "main", history::one_line(why, 200)));
+        }
+        match last["anchor"]["state"].as_str() {
+            Some("agrees") => out.push_str(&format!(
+                "  Its ledger: the first {} of this machine's {} entries, as they are here.\n",
+                last["anchor"]["remote"].as_u64().unwrap_or(0),
+                last["anchor"]["local"].as_u64().unwrap_or(0)
+            )),
+            Some("differs") => out.push_str(&format!(
+                "  At the last push it disagreed: {}\n",
+                history::one_line(last["anchor"]["why"].as_str().unwrap_or("?"), 200)
+            )),
+            Some("unreachable") => out.push_str("  It could not be reached at the last push.\n"),
+            _ => {}
+        }
+        Ok(out)
+    }
+
+    fn fetch_incoming(&self) -> Result<Option<String>> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["fetch-incoming"])?, &log)?, "request system pull")?;
+        let id = v["incoming"].as_str().map(String::from);
+        if id.as_ref().is_some_and(|c| c.len() != 40 || !c.bytes().all(|b| b.is_ascii_hexdigit())) {
+            bail!("the broker's answer is not a commit");
+        }
+        Ok(id)
+    }
+
+    fn remote_clear(&self, me: &str) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["remote-clear", "--approved-by", me])?, &log)?, "request system remote clear")?;
+        Ok(format!(
+            "The remote's alarm is cleared (ledger #{}): the next push checks its whole history again, and raises it again if it is still true.\n",
+            v["seq"].as_u64().unwrap_or(0)
+        ))
+    }
+
+    fn acknowledge(&self, me: &str) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["ledger-acknowledge", "--approved-by", me])?, &log)?, "request system ledger acknowledge")?;
+        Ok(format!("On the record (ledger #{}): what was said is said no more. A new disagreement is said as ever.\n", v["seq"].as_u64().unwrap_or(0)))
+    }
+
+    fn snapshot_take(&self, me: &str) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["snapshot-take", "--approved-by", me])?, &log)?, "request system snapshot take")?;
+        let seq = v["seq"].as_u64().unwrap_or(0);
+        Ok(format!("A snapshot of the data, as #{seq}: request system snapshot restore {seq} <path> brings a path back.\n"))
+    }
+
+    fn snapshot_delete(&self, change: u64, me: &str) -> Result<String> {
+        let log = run::start_log()?;
+        let seq = change.to_string();
+        let v = done(run::broker_json(broker(self.cli, &["snapshot-delete", &seq, "--approved-by", me])?, &log)?, "request system snapshot delete")?;
+        Ok(format!("The snapshot from before #{change} is deleted (ledger #{}).\n", v["seq"].as_u64().unwrap_or(0)))
+    }
+
+    fn snapshots(&self) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["snapshots"])?, &log)?, "show system snapshots")?;
+        let list = v.as_array().map(Vec::as_slice).unwrap_or_default();
+        if list.is_empty() {
+            return Ok("No snapshots of the data here (a disk laid out for them has one before each change).\n".into());
+        }
+        let mut out = String::from("The data as it was before each change (request system snapshot restore <n> <path>):\n");
+        for s in list {
+            out.push_str(&format!(
+                "  #{:<4} {}  {}\n",
+                s["change"].as_u64().unwrap_or(0),
+                history::one_line(s["ts"].as_str().unwrap_or("?"), 25),
+                history::one_line(s["reason"].as_str().unwrap_or(""), 70)
+            ));
+        }
+        Ok(out)
+    }
+
+    fn restore_data(&self, change: u64, path: &str, me: &str) -> Result<String> {
+        let log = run::start_log()?;
+        let seq = change.to_string();
+        let v = done(run::broker_json(broker(self.cli, &["restore-data", &seq, "--path", path, "--approved-by", me])?, &log)?, "request system snapshot restore")?;
+        let kept = v["data"]["set_aside"].as_str().map_or(String::new(), |a| format!(" What was there is at {}.", history::one_line(a, 120)));
+        Ok(format!(
+            "{} is back as it was before #{change} (ledger #{}).{kept} A service using it should be restarted.\n",
+            history::one_line(path, 120),
+            v["seq"].as_u64().unwrap_or(0)
+        ))
+    }
+
+    fn remote_key(&self) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["remote-key"])?, &log)?, "request system remote key")?;
+        Ok(format!(
+            "{}\n\nAdd this key to {} as a deploy key, with write access (and protect its branches: no force-push).\n",
+            history::one_line(v["public_key"].as_str().unwrap_or("?"), 200),
+            history::one_line(v["url"].as_str().unwrap_or("the remote"), 120)
+        ))
+    }
+
+    fn propose(&self, diff: &str, base: &str, reason: &str) -> Result<u64> {
+        let scratch = scratch_dir()?;
+        let file = scratch.path().join("change.diff");
+        fs::write(&file, diff)?;
+        let log = run::start_log()?;
+        let file = file.to_string_lossy();
+        let args = propose_args(&file, base, reason);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let proposed = done(run::broker_json(broker(self.cli, &args)?, &log)?, "propose")?;
+        proposed["seq"].as_u64().context("the broker did not say which proposal it made")
+    }
+
+    fn proposals(&self, fit: Option<usize>) -> Result<String> {
+        let entries = crate::read_ledger(self.cli)?;
+        let waiting = waiting_proposals(&entries);
+        if waiting.is_empty() {
+            return Ok("No proposals are waiting.\n".into());
+        }
+        let width = fit.unwrap_or(usize::MAX);
+        let mut out = String::from("Waiting for a person (request system apply <n>):\n");
+        for e in waiting {
+            let by = e.data["caller"].as_str().map_or(e.actor.clone(), |c| format!("{} ({})", e.actor, c));
+            let line = format!(
+                "  #{:<4} {}  {:<6} {}{}  {}",
+                e.seq,
+                history::one_line(&e.ts, 25),
+                history::one_line(&e.tier, 8),
+                history::one_line(&by, 30),
+                if e.tainted { "  ⚠ read untrusted content" } else { "" },
+                history::one_line(&e.reason, 80)
+            );
+            out.push_str(&format!("{}\n", history::one_line(&line, width)));
+        }
+        Ok(out)
+    }
+
+    fn apply_proposal(&self, seq: u64, me: &str) -> Result<String> {
+        let entries = crate::read_ledger(self.cli)?;
+        if !waiting_proposals(&entries).iter().any(|e| e.seq == seq) {
+            bail!("#{seq} is not a proposal waiting to be applied (show system proposals lists them)");
+        }
+        let log = run::start_log()?;
+        let seq_s = seq.to_string();
+        let p = done(run::broker_json(broker(self.cli, &["show", &seq_s])?, &log)?, "apply")?;
+        // The entry as the ledger has it: its fields at the top (the broker flattens its body).
+        let body = &p;
+        let (tier, tainted) = (body["tier"].as_str().unwrap_or("system").to_string(), body["tainted"].as_bool().unwrap_or(false));
+        let files: Vec<String> = body["data"]["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).map(|f| history::one_line(f, 80)).collect();
+        let by = body["data"]["caller"].as_str().or(body["actor"].as_str()).unwrap_or("?");
+        // What the change does, as the broker had git write it when it was proposed — never the
+        // proposer's own text, which can say one thing while git does another (the audit of ADR-041).
+        let effect = match (body["data"]["effect"].as_str(), body["actor"].as_str()) {
+            (Some(e), _) => e,
+            (None, Some("agent")) => bail!("not applied: #{seq} was proposed before the broker recorded what a change does; the agent proposes it again"),
+            (None, _) => body["data"]["diff"].as_str().unwrap_or_default(),
+        };
+        let diff: String = effect.lines().map(|l| format!("  {}\n", history::clean(l))).collect();
+        let what = format!(
+            "Proposal #{seq} \"{}\" (by {}, {})\n  files: {}\n{diff}",
+            history::one_line(body["reason"].as_str().unwrap_or_default(), 60),
+            history::one_line(by, 30),
+            history::one_line(body["ts"].as_str().unwrap_or_default(), 25),
+            files.join(", "),
+        );
+        let why = match (tier.as_str(), tainted) {
+            (_, true) => "The session that proposed it read untrusted content (the web, mail, a download): check it closely. ",
+            ("system", false) => "This changes the system (all users). ",
+            _ => "",
+        };
+        if let Some(stop) = self.ask(&format!("{what}{why}Apply? ")).go_on("applied")? {
+            return Ok(stop);
+        }
+        let mut args = vec!["apply", &seq_s, "--approved-by", me];
+        if tainted {
+            args.push("--confirm-tainted"); // asked just now, in words
+        }
+        let v = {
+            let _p = if crate::asks_for_password(self.cli) { None } else { Some(run::Progress::start("Applying")) };
+            done(run::broker_json(broker(self.cli, &args)?, &log)?, "apply")?
+        };
+        Ok(format!("applied proposal #{seq} (change #{})\n", v["seq"].as_u64().unwrap_or(0)))
+    }
+
     fn commit(&self, diff: &str, base: &str, tier: &str, reason: &str, confirm: Option<u32>) -> Result<u64> {
         let scratch = scratch_dir()?;
         let file = scratch.path().join("change.diff");
@@ -600,6 +811,16 @@ fn writes_never_go_through_a_link() {
     assert!(no_link_on_the_way(d.path(), "system/host.json").is_ok());
 }
 
+
+/// The proposals no one has applied (or tried to): what `show system proposals` lists and
+/// `request system apply` takes.
+fn waiting_proposals(entries: &[history::Entry]) -> Vec<&history::Entry> {
+    entries
+        .iter()
+        .filter(|e| e.kind == "proposal")
+        .filter(|p| !entries.iter().any(|e| matches!(e.kind.as_str(), "applied" | "apply_failed") && e.data["proposal"].as_u64() == Some(p.seq)))
+        .collect()
+}
 /// `propose`'s arguments. Every value given as `--name=value`: a reason or comment that starts with
 /// `-` (any change of an existing value does: "-   host-name two; …") must not read as an option.
 fn propose_args(diff: &str, base: &str, reason: &str) -> Vec<String> {
@@ -804,6 +1025,13 @@ fn run_shell(args: &[String]) -> Result<i32> {
         return crate::setup::run().map(|()| 0);
     }
     // The ISO installer (its console, as root, ADR-031): its own program too.
+    if args.first().map(String::as_str) == Some("break-glass") {
+        return crate::agent::break_glass(&args[1..]);
+    }
+    // A program run as the agent's account (ADR-041): its own entry, not a command of the shell.
+    if args.first().map(String::as_str) == Some("agent") {
+        return crate::agent::run(&args[1..]);
+    }
     if args == ["install"] {
         return crate::install::run().map(|()| 0);
     }
@@ -1350,7 +1578,7 @@ fn ledgered_commit(entries: &[history::Entry]) -> Option<String> {
     entries
         .iter()
         .rev()
-        .filter(|e| matches!(e.kind.as_str(), "init" | "applied" | "reverted" | "interrupted" | "repaired" | "rolled_back"))
+        .filter(|e| matches!(e.kind.as_str(), "init" | "adopted" | "applied" | "reverted" | "interrupted" | "repaired" | "rolled_back"))
         .find_map(|e| e.data["commit"].as_str().map(String::from))
 }
 
@@ -1360,7 +1588,7 @@ fn configurations_of(entries: &[history::Entry], count: usize, clock: &history::
     entries
         .iter()
         .rev()
-        .filter(|e| matches!(e.kind.as_str(), "init" | "applied" | "reverted" | "rolled_back"))
+        .filter(|e| matches!(e.kind.as_str(), "init" | "adopted" | "applied" | "reverted" | "rolled_back"))
         .filter_map(|e| {
             let id = e.data["commit"].as_str()?;
             let who = e.approved_by.clone().filter(|w| !w.is_empty()).unwrap_or_else(|| e.actor.clone());
