@@ -151,6 +151,13 @@ pub fn set(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
     if let Some(k) = r.loc.iter().find(|k| k.starts_with('_')) {
         bail!("{}: a name starting with _ is a NixOS module directive, not a setting: the tree holds data only", k);
     }
+    // A backup's key or a repository's credentials (settings-fence.nix, rule 3), said as such.
+    if tree.password(&r.loc) && r.loc.first().is_some_and(|w| w != "users") {
+        if r.loc.iter().any(|w| w == "rcloneConfig") {
+            bail!("{}: a repository's credentials are never in the configuration (everyone can read it): put them in a file of root's and point rcloneConfigFile or environmentFile at it", r.loc.join(" "));
+        }
+        bail!("{}: a backup's key is never in the configuration, nor pointed at from it: it is kept root's alone, outside it (`request system backup key <name>` gives it)", r.loc.join(" "));
+    }
     if tree.password(&r.loc) {
         bail!("{}: a password is never in the configuration (everyone can read it, and its history keeps it): `request system password {}` sets one", r.loc.join(" "), r.loc.get(2).map_or("<user>", String::as_str));
     }

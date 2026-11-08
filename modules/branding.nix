@@ -84,7 +84,17 @@ in
   } (lib.mkIf config.torq.shell.sshGreeting (
     let
       # fastfetch without its optional libraries (13 MB, not 190): what the greeting shows needs none.
-      fastfetch = lib.getExe pkgs.fastfetch.minimal;
+      # Its program alone, copied from NixOS's build (nothing compiled here) and wrapped as NixOS's
+      # package wraps it: the package's shell completions run Python, which would bring all of it
+      # (ADR-032, amended), for a greeting that is never completed. The program's one reference to
+      # its own package (`etc/`, where it would look for a system-wide configuration) is cut: it is
+      # always given its configuration.
+      ff = pkgs.fastfetch.minimal;
+      fastfetch = "${pkgs.runCommand "fastfetch-greeting" { nativeBuildInputs = [ pkgs.makeWrapper pkgs.removeReferencesTo ]; } ''
+        install -Dm755 ${ff}/bin/.fastfetch-wrapped $out/libexec/fastfetch
+        remove-references-to -t ${ff} $out/libexec/fastfetch
+        makeWrapper $out/libexec/fastfetch $out/bin/fastfetch --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath (map (p: p.out or p) ff.buildInputs)}
+      ''}/bin/fastfetch";
       greet = ''
         if [ -n "$SSH_CONNECTION" ] && [ -t 0 ] && [ -t 1 ] && [ ! -e "$HOME/.hushlogin" ]; then
           ${fastfetch} --config /etc/xdg/fastfetch/config.jsonc 2>/dev/null

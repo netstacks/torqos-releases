@@ -84,6 +84,11 @@ tell a person from a program at a root shell — nothing can.
   password`, `hashedPassword`, `initialPassword`, `initialHashedPassword`, `hashedPasswordFile`,
   `passwordFile`), in torqcli and at evaluation (modules/settings-fence.nix, rule 3), saying to use
   `request system password <user>`.
+- **A backup's key is kept the same way** (ADR-038, amended 2026-11-07): `request system backup key
+  <name>` asks for it at the terminal, an administrator's with their password; the broker keeps it
+  root's alone in `/var/lib/torq/secrets/backup/<name>`, where the backup's `passwordFile` points, and
+  ledgers that it changed. The tree may not point `passwordFile` elsewhere, and `/var/lib/torq/secrets`
+  is never in a backup unless its `paths` name it.
 - **Nothing listens on the network unless asked for:** no SSH until turned on, and no link-local
   name answering (systemd-resolved's LLMNR and multicast DNS, off: they let anyone on the same
   network answer for a name). tests/image.nix checks the image.

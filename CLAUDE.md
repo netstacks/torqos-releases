@@ -51,7 +51,8 @@ modules/               the distribution, as NixOS modules (torq.* options)
   releases.nix         where a machine takes TorqOS from, signatures checked (ADR-028)
   settings-fence.nix   what the configuration tree may never change
   dev.nix              development mode (ADR-009) — and the assertion that guards a path: source
-  ai.nix               local model runtime + agent service (a stub: the agent is M5, docs/AI-LAYER.md)
+  ai.nix               doctor mode and the model it asks: torq.agent.doctor, torq.agent.model (ADR-042)
+  agent.nix            the agent's account torq-agent, what it may propose, `torq agent run` (ADR-041)
 hosts/
   image/               the release image's own system (`.#image`, `.#image-vmdk`)
   installer/           the ISO installer's system and the image it carries (`.#iso`)
@@ -60,6 +61,7 @@ templates/config/      the per-machine config repo the broker manages
                        (`nix flake new -t .#config /var/lib/torq/config`)
 broker/                Rust crate: torq-broker (ledger, policy, git, rebuild, rollback)
 cli/                   Rust crate: torqcli — the grammar, the candidate, the tree (ADR-025)
+agent/                 Rust crate: torq-doctor — the agent: doctor mode, propose mode, its session at the broker (ADR-042)
 tests/                 NixOS VM tests
 release/               allowed_signers: the keys a machine trusts a release from
 .github/workflows/     test (pull requests, by hand, each release), weekly nixpkgs bump, release on a v* tag
@@ -81,6 +83,7 @@ machine stays thin. `nix develop` for a shell, or `nix develop --command …` fo
 # The Rust crates
 nix develop --command bash -c 'cd broker && cargo test'   # incl. ledger tamper detection
 nix develop --command bash -c 'cd cli    && cargo test'   # the grammar, candidate, tree
+nix develop --command bash -c 'cd agent  && cargo test'   # doctor mode, against a scripted model
 
 # Nix — x86_64 only: aarch64 is neither built nor tested during development (ADR-030, amended)
 nix flake check                                   # eval + tree checks + VM tests

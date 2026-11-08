@@ -105,8 +105,11 @@ let
     config-bad-empty = c: c.networking.hostName;
   };
   # torqcli's tests read the fence from cli/src/nixos-fixture.json: it must be the modules' own.
-  fenceFixture = (builtins.fromJSON (builtins.readFile ../cli/src/nixos-fixture.json)).fence
-    == (import ../modules/settings-fence.nix { inherit lib; }).patterns;
+  # The same patterns, in whatever order: a fence is a set.
+  fenceFixture = let sorted = l: lib.sort (a: b: lib.concatStringsSep "." a < lib.concatStringsSep "." b) l; in
+    sorted (builtins.fromJSON (builtins.readFile ../cli/src/nixos-fixture.json)).fence
+    == sorted (import ../modules/settings-fence.nix { inherit lib; }).patterns;
+
   # A name that only looks like a fenced one is not fenced.
   fenceOk = tryValue (configOf "nixos-fence-ok").environment.etc."motd-torq/x".text;
   nixosGood = nixosValues "nixos-good";

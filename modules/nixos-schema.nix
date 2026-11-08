@@ -13,7 +13,8 @@
 { options, config, lib, pkgs, ... }:
 
 let
-  # A type as data: { name, elem?, left?, right?, values? }. Depth-limited: some types are
+  # A type as data: { name, elem?, left?, right?, values? }. Depth-limited (8: nix.settings's atom is
+  # six deep, and at 4 it lost its int, str and bool, so a number was refused as a package): some types are
   # recursive (JSON-like formats), and five levels say all torqcli uses.
   typeOf = depth: t:
     let
@@ -82,7 +83,7 @@ let
       subs = builtins.tryEval (opt.type.getSubOptions opt.loc);
       below = if visible == true && subs.success && subs.value != { } then walk subs.value else [ ];
       at' = lib.drop prefix opt.loc;
-      entry = { loc = at'; type = forms.${lib.concatStringsSep " " at'} or (typeOf 4 opt.type // lib.optionalAttrs (names ? ${lib.concatStringsSep " " at'}) { names = names.${lib.concatStringsSep " " at'}; }); help = help (opt.description or ""); };
+      entry = { loc = at'; type = forms.${lib.concatStringsSep " " at'} or (typeOf 8 opt.type // lib.optionalAttrs (names ? ${lib.concatStringsSep " " at'}) { names = names.${lib.concatStringsSep " " at'}; }); help = help (opt.description or ""); };
       # A section that takes any key (RFC 42's `settings`: a freeform type, attrsOf of what each key
       # takes): where, in the tree, and the type of each key's value. Where entries are named (an
       # attrsOf or listOf of submodules), at the entry.
@@ -90,7 +91,7 @@ let
       at = opt.loc ++ (if builtins.elem (opt.type.name or "") [ "attrsOf" "lazyAttrsOf" ] then [ "<name>" ] else if (opt.type.name or "") == "listOf" then [ "*" ] else [ ]);
       freeform =
         if visible == true && free.success && free.value != null && builtins.elem (free.value.name or "") [ "attrsOf" "lazyAttrsOf" ] && free.value.nestedTypes ? elemType
-        then [ { loc = lib.drop prefix at; free = typeOf 4 free.value.nestedTypes.elemType; } ]
+        then [ { loc = lib.drop prefix at; free = typeOf 8 free.value.nestedTypes.elemType; } ]
         else [ ];
     in
     (if shown then [ entry ] ++ freeform else [ ]) ++ below
@@ -110,8 +111,8 @@ in
         settings = walk options;
         # What the tree may never change (settings-fence.nix), for torqcli to refuse early.
         fence = (import ./settings-fence.nix { inherit lib; }).patterns;
-        # A person's password: never in the tree (settings-fence.nix, rule 3).
-        passwords = (import ./settings-fence.nix { inherit lib; }).passwords;
+        # A person's password, and a backup's key: never in the tree (settings-fence.nix, rule 3).
+        passwords = let f = import ./settings-fence.nix { inherit lib; }; in f.passwords ++ f.backupKeys ++ f.backupSecrets;
         # The packages of this machine's nixpkgs, by name (only the names: nothing is evaluated), for
         # torqcli to check and complete them as they are set.
         packages = builtins.attrNames pkgs;

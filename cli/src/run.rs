@@ -129,6 +129,8 @@ struct Request {
     hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
 }
 
 /// What comes back (torq_broker::socket::Frame).
@@ -141,7 +143,7 @@ enum Frame {
 }
 
 /// The arguments torqcli builds for any broker, as a socket request: `--actor` and `--approved-by`
-/// left out (the broker decides them), `--diff` and `--hash-file` sent as what they hold.
+/// left out (the broker decides them), `--diff`, `--hash-file` and `--key-file` sent as what they hold.
 fn request(args: &[String]) -> Result<Request> {
     let mut r = Request::default();
     let mut it = args.iter();
@@ -157,6 +159,7 @@ fn request(args: &[String]) -> Result<Request> {
             }
             "--diff" => r.diff = Some(fs::read_to_string(value()?).context("reading the change")?),
             "--hash-file" => r.hash = Some(fs::read_to_string(value()?).context("reading the hash")?),
+            "--key-file" => r.key = Some(fs::read_to_string(value()?).context("reading the key")?),
             _ => r.args.push(a.clone()),
         }
     }
@@ -329,6 +332,10 @@ mod tests {
         let r = request(&args(&["password", "--user", "sam", "--hash-file", &hash.to_string_lossy(), "--approved-by=viper"])).unwrap();
         assert_eq!(r.args, args(&["password", "--user", "sam"]));
         assert_eq!(r.hash.as_deref(), Some("$6$salt$abc\n"));
+        let key = d.path().join("key");
+        fs::write(&key, "correct horse").unwrap();
+        let r = request(&args(&["backup-key", "--name", "home", "--key-file", &key.to_string_lossy(), "--approved-by=viper"])).unwrap();
+        assert_eq!((r.args, r.key.as_deref()), (args(&["backup-key", "--name", "home"]), Some("correct horse")));
         assert!(request(&args(&["revert", "3", "--approved-by"])).is_err(), "a flag without its value");
         let line = serde_json::to_string(&request(&args(&["status"])).unwrap()).unwrap();
         assert_eq!(line, r#"{"args":["status"]}"#, "no password, diff or hash unless there is one");

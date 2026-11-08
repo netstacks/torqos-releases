@@ -700,6 +700,14 @@ fn a_password_is_never_in_the_configuration() {
     for p in ["password", "hashedPassword", "initialPassword", "initialHashedPassword", "hashedPasswordFile", "passwordFile"] {
         assert!(fence.contains(&format!("\"{p}\"")) && tree.password(&w(&format!("users users anyone {p}"))), "{p}");
     }
+    // A backup's key, kept as a password is (ADR-038): its file is not the tree's to point elsewhere.
+    assert!(fence.contains(r#"[ "services" "restic" "backups" "*" "passwordFile" ]"#) && tree.password(&w("services restic backups nas passwordFile")));
+    assert!(!tree.password(&w("services restic backups nas repository")), "where it goes is the tree's");
+    // Nor its key by another way, or a repository's credentials (the review of the backup, L4).
+    for p in ["systemd services restic-backups-nas environment RESTIC_PASSWORD", "systemd services restic-backups-nas environment RESTIC_PASSWORD_COMMAND", "services restic backups nas rcloneConfig"] {
+        assert!(tree.password(&w(p)), "{p}");
+    }
+    assert!(fence.contains(r#"[ "systemd" "services" "restic-backups-*" "environment" "RESTIC_PASSWORD*" ]"#) && fence.contains(r#"[ "services" "restic" "backups" "*" "rcloneConfig" ]"#));
 }
 
 #[cfg(test)]

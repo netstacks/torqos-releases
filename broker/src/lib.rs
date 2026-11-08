@@ -11,12 +11,16 @@
 #![forbid(dead_code)]
 
 pub mod agent;
+pub mod backup;
+pub mod at;
 pub mod config;
 pub mod remote;
 pub mod snapshot;
+pub mod inputs;
 pub mod ledger;
 pub mod policy;
 pub mod repo;
+pub mod session;
 pub mod socket;
 
 use anyhow::{bail, Context, Result};
@@ -68,6 +72,8 @@ pub struct Broker {
     people: Vec<String>,
     /// What the agent may propose (ADR-041).
     agent_limits: agent::Limits,
+    /// The backups the configuration declares, and where their keys are (ADR-038, backup.rs).
+    backup: backup::Backups,
     /// The config repo's remote, if the owner named one (ADR-036).
     remote: Option<String>,
 }
@@ -113,6 +119,14 @@ struct DropFile(PathBuf);
 impl Drop for DropFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// A folder of the broker's own, gone when it is dropped.
+struct DropDir(PathBuf);
+impl Drop for DropDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -600,6 +614,7 @@ impl Broker {
             password_cmd: "chpasswd -e".into(),
             people: Vec::new(),
             agent_limits: agent::Limits::default(),
+            backup: backup::Backups::default(),
             remote: None,
         }
     }
@@ -865,6 +880,14 @@ impl Broker {
         // root (the review of 0.2.1, H1).
         for e in &list {
             shapes_ok(&e.body.data).with_context(|| format!("the repository's ledger, entry #{}", e.body.seq))?;
+        }
+        // Nothing standing that a new machine would carry out for someone else: a trust grant not
+        // settled, or a commit at still waiting (the audit of 0.3.0). The old machine's are its own.
+        if !session::unsettled(&list).is_empty() {
+            bail!("the repository's ledger has a trust grant still standing: refused");
+        }
+        if !at::pending(&list).is_empty() {
+            bail!("the repository's ledger has a commit at still waiting: refused");
         }
         if pending_confirm(&list).is_some() {
             bail!("the repository's ledger has a commit confirmed still waiting: refused");
@@ -1133,7 +1156,6 @@ impl Broker {
     /// was there is set aside, not overwritten. The broker's lock is for the checks alone: an owner can
     /// stop their half of the copy, and that must stop no one else. Ledgered, whether it worked or not.
     pub fn restore_data(&self, seq: u64, path: &str, by: &str) -> Result<Entry> {
-        use std::os::unix::fs::MetadataExt;
         let lock = Lock::acquire(&self.state_dir)?;
         // Not on top of a change still in doubt: a machine going back while its data does would leave a
         // person guessing. A check at the start, no more: nothing holds one off during the copy.
@@ -1143,40 +1165,13 @@ impl Broker {
         let entry = self.ledger.get(seq)?;
         let label = entry.body.data["snapshot"]["label"].as_str().filter(|l| snapshot::label_ok(l)).map(String::from).with_context(|| format!("change #{seq} has no snapshot"))?;
         let (tree, parts) = snapshot::data_path(path)?;
-        let path = snapshot::written_out(tree, &parts);
-        let from = self.snapshot_dir.join(&label).join(tree);
-        let (top, last) = snapshot::no_links(&from, &parts).with_context(|| format!("{path} as it was before #{seq}"))?;
-        // A snapshot does not change, so what is read here stays so. A pipe would hang whoever opens it.
-        if !last.is_dir() && !last.is_file() {
-            bail!("{path} was neither a file nor a folder: not restored");
-        }
-        let uid = top.uid();
-        if uid == 0 {
-            bail!("{path} lies in a folder of root's: restoring it needs a root shell (torq break-glass)");
-        }
-        let gid = snapshot::primary_group(&fs::read_to_string("/etc/passwd").context("reading the accounts")?, uid).with_context(|| format!("no account has uid {uid} now, whose {path} this was"))?;
-        let whole = parts.len() == 1;
-        let live_top = snapshot::written_out(tree, &parts[..1]);
-        let live = match fs::symlink_metadata(&live_top) {
-            Ok(m) => Some(m),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && whole => None,
-            Err(e) => return Err(e).with_context(|| format!("{live_top} is not there: restore that first")),
-        };
-        if live.as_ref().is_some_and(|m| m.is_symlink() || m.uid() != uid) {
-            bail!("{live_top} has changed hands since the snapshot: not restored");
-        }
-        let set_aside = format!("{path}.before-{label}");
-        if whole && live.is_some() && fs::symlink_metadata(&set_aside).is_ok() {
-            bail!("{set_aside} is already there: move it first");
-        }
-        // Its own, for each run: nothing else makes two restores of one path keep apart.
-        let stage = format!("{path}.restoring-{label}-{}", std::process::id());
-        let copy = snapshot::Copy { source: from.join(parts.iter().collect::<PathBuf>()), to: &path, set_aside: &set_aside, stage: &stage, folder: last.is_dir(), mode: last.mode(), uid, gid, whole };
+        let copy = snapshot::plan(&self.snapshot_dir.join(&label).join(tree), tree, &parts, &label, &format!("as it was before #{seq}"))?;
+        let (path, set_aside) = (&copy.to, &copy.set_aside);
         drop(lock);
         let done = copy.run();
         let error = done.as_ref().err().map(|e| format!("{e:#}").chars().filter(|c| !c.is_control()).take(300).collect::<String>());
         // What happened, not what was expected: the swap decides, on what is there by then.
-        let kept = done.is_ok() && fs::symlink_metadata(&set_aside).is_ok();
+        let kept = done.is_ok() && fs::symlink_metadata(set_aside).is_ok();
         let e = self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: Some(by.into()),
@@ -1184,7 +1179,7 @@ impl Broker {
             tier: Tier::System.to_string(),
             tainted: false,
             reason: format!("{path} put back as it was before #{seq}{}", if error.is_some() { ": it failed" } else { "" }),
-            data: json!({ "change": seq, "path": path, "label": label, "set_aside": kept.then_some(&set_aside), "error": error }),
+            data: json!({ "change": seq, "path": path, "label": label, "set_aside": kept.then_some(set_aside), "error": error }),
         })?;
         done.with_context(|| format!("{path} was not restored"))?;
         Ok(e)
@@ -1772,15 +1767,16 @@ impl Broker {
         Ok(())
     }
 
-    /// Why the agent may not propose the change in `diff_path` (touching `files`), or None: each file
-    /// as HEAD has it and as the change leaves it, read as JSON; a file that is not JSON is no
-    /// setting, and never the agent's.
-    fn agent_refusal(&self, diff_path: &Path, files: &[String]) -> Result<Option<String>> {
+    /// The agent's change in `diff_path` (touching `files`) judged (ADR-041) — each file as HEAD has
+    /// it and as the change leaves it, read as JSON; a file that is not JSON is no setting, and never
+    /// the agent's: why it may not be proposed (Err), or the settings it changes that could lose the
+    /// network or the screen (Ok; empty: none), which a person applies as a commit confirmed (ADR-042, 6).
+    fn agent_check(&self, diff_path: &Path, files: &[String]) -> Result<std::result::Result<Vec<String>, String>> {
         const MAX: u64 = 1 << 20;
         let json = |bytes: &[u8]| serde_json::from_slice::<serde_json::Value>(bytes).ok();
         let mut touched = Vec::new();
         for (path, after) in self.repo.proposed_files(diff_path, files, MAX)? {
-            let not_a_setting = || Ok(Some(format!("{path}: not a setting (a regular JSON file of the tree) — never the agent's")));
+            let not_a_setting = || Ok(Err(format!("{path}: not a setting (a regular JSON file of the tree) — never the agent's")));
             let before = match self.repo.file_at_head(&path, MAX) {
                 Ok(None) => None,
                 Ok(Some(b)) => match json(&b) {
@@ -1799,7 +1795,10 @@ impl Broker {
             };
             touched.push(agent::Touched { path, before, after });
         }
-        Ok(agent::refusal(&self.agent_limits, &touched))
+        Ok(match agent::refusal(&self.agent_limits, &touched) {
+            Some(why) => Err(why),
+            None => Ok(agent::cuts_off(&touched)),
+        })
     }
 
     pub fn propose(&self, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
@@ -1811,8 +1810,23 @@ impl Broker {
     /// on top of a newer configuration, a change prepared against an older one can silently undo or
     /// mix with the commit in between. Without a base, the diff is applied wherever it applies.
     pub fn propose_on(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
+        self.propose_in(base, diff_path, reason, actor, tainted, None)
+    }
+
+    /// `propose_on`, naming the agent's `session` (session.rs): an agent's proposal is tainted as
+    /// the broker's record of its session says — `tainted` (the caller's word) only adds to it — and
+    /// one that names no session is tainted.
+    pub fn propose_in(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool, session: Option<&str>) -> Result<Entry> {
         let _l = Lock::acquire(&self.state_dir)?;
-        let proposed = self.propose_locked(base, diff_path, reason, actor, tainted);
+        session::settle_trust(self)?;
+        let judged = session::judge(self, actor, tainted, session);
+        let tainted = judged.as_ref().map_or(true, |j| j.0);
+        let proposed = judged.and_then(|(t, cited)| self.propose_locked(base, diff_path, reason, actor, t, cited));
+        // Its session's record notes it, for what the agent is told it did (session.rs).
+        if let (Ok(e), Some(id)) = (&proposed, session) {
+            // (Only for telling: the proposal and what its session read are in the ledger already.)
+            let _ = session::cite(self, id, e.body.seq, None);
+        }
         // Every refusal of the agent's is on the record, whatever refused it — the forbidden paths,
         // bad data, a diff that does not apply, the list (the audit of ADR-041): an agent that tries
         // is seen trying. (Busy is not a refusal: nothing was looked at.)
@@ -1858,6 +1872,84 @@ impl Broker {
             reason: if reason.trim().is_empty() { "(no reason)".into() } else { reason },
             data: json!({ "diff_sha256": hex::encode(Sha256::digest(&diff)), "why": one_line(why, 1000) }),
         })?;
+        Ok(())
+    }
+
+    /// What a commit's flake.lock builds, checked against what names it, before anything builds it
+    /// (`inputs`; the audit of 2026-11-04, A2). Each input it changes is fetched again by its `rev` and
+    /// its hash compared; TorqOS's own releases are checked to be signed by the release key.
+    fn check_inputs(&self, before: &str, commit: &str) -> Result<()> {
+        // A lock that cannot be read whole is not one with nothing to check: refused (the audit of 0.3.0;
+        // padded past the limit, it was taken for no lock at all).
+        let lock_at = |rev: &str| -> Result<String> {
+            match self.repo.size_at(rev, "flake.lock") {
+                None => Ok(String::new()),
+                Some(n) if n > 1 << 20 => bail!("refused: flake.lock is {n} bytes, larger than a lock is"),
+                Some(_) => self.repo.text_at_most(rev, "flake.lock", 1 << 20).context("reading flake.lock"),
+            }
+        };
+        let old = lock_at(before)?;
+        let new = lock_at(commit)?;
+        let changes = inputs::changed(&old, &new)?;
+        let fetch = inputs::to_fetch(&changes);
+        if !fetch.is_empty() {
+            let file = self.state_dir.join("inputs.json");
+            fs::write(&file, serde_json::to_vec(&fetch)?)?;
+            let out = config::command("timeout")
+                .args(["600", "nix", "eval", "--impure", "--json", "--expr", &inputs::expr(&file)])
+                .stdin(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .context("fetching the changed inputs again")?;
+            let _ = fs::remove_file(&file);
+            if !out.status.success() {
+                bail!("the changed inputs could not be fetched again, to check them: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("?"));
+            }
+            let fetched: serde_json::Value = serde_json::from_slice(&out.stdout).context("reading what was fetched")?;
+            let bad = inputs::mismatched(&changes, &fetched);
+            if !bad.is_empty() {
+                bail!("refused: flake.lock names {} by a hash that is not what its rev fetches: it would build other source than it says", bad.join(", "));
+            }
+        }
+        let releases = fs::read_to_string(inputs::RELEASES).ok().and_then(|s| inputs::releases_repo(&s));
+        for (name, locked) in changes.iter().filter(|(_, l)| inputs::is_release(l, releases.as_deref())) {
+            let rev = locked["rev"].as_str().filter(|r| inputs::rev_ok(r)).with_context(|| format!("refused: {name} names no release"))?;
+            self.release_signed(releases.as_deref().unwrap_or_default(), rev).with_context(|| format!("refused: {name}'s release {}", &rev[..12]))?;
+        }
+        Ok(())
+    }
+
+    /// Release `rev` of `repo` is signed by the release key: that commit alone fetched into a folder of
+    /// its own and checked by git, with nothing of anyone's configuration.
+    fn release_signed(&self, repo: &str, rev: &str) -> Result<()> {
+        let dir = DropDir(self.state_dir.join(format!("release-check-{}", std::process::id())));
+        let _ = fs::remove_dir_all(&dir.0);
+        fs::create_dir(&dir.0).context("a folder to check the release in")?;
+        let git = |args: &[&str]| -> Result<String> {
+            let out = config::command("git")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("HOME", &dir.0)
+                .env("GNUPGHOME", &dir.0)
+                .arg("-C")
+                .arg(&dir.0)
+                .args(inputs::git_config(Path::new(inputs::SIGNERS)))
+                .args(args)
+                .stdin(Stdio::null())
+                .output()
+                .context("running git")?;
+            if !out.status.success() {
+                bail!("{}", String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or("git failed"));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        git(&["init", "-q"])?;
+        git(&["fetch", "-q", "--depth=1", "--no-tags", repo, rev]).context("fetching it")?;
+        if !inputs::ssh_signed(&git(&["cat-file", "commit", rev])?) {
+            bail!("it is not signed by the TorqOS release key ({}): no SSH signature", inputs::SIGNERS);
+        }
+        git(&["verify-commit", rev]).with_context(|| format!("it is not signed by the TorqOS release key ({})", inputs::SIGNERS))?;
         Ok(())
     }
 
@@ -1918,7 +2010,7 @@ impl Broker {
         out.into_iter().collect()
     }
 
-    fn propose_locked(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
+    fn propose_locked(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool, session: Option<serde_json::Value>) -> Result<Entry> {
         self.refuse_if_interrupted()?;
         // An agent always says what it prepared its change against: without a base, a diff applies on
         // top of whatever the configuration has become (second audit, M2; KNOWN-GAPS 6g).
@@ -1990,13 +2082,13 @@ impl Broker {
         let checked = self.repo.diff_files(&copy).and_then(|files| {
             self.check_user_data(&copy, &files)?;
             // The agent's proposals: only what its list allows (ADR-041), judged by what changes.
-            let refused = if actor == Actor::Agent { self.agent_refusal(&copy, &files)? } else { None };
+            let judged = if actor == Actor::Agent { self.agent_check(&copy, &files)? } else { Ok(vec![]) };
             // What it does, as git writes it: what a person is shown before applying it.
             let effect = self.repo.proposal_effect(&copy)?;
-            Ok((files, refused, effect))
+            Ok((files, judged, effect))
         });
         let _ = fs::remove_file(&copy);
-        let (files, refused, effect) = checked?;
+        let (files, judged, effect) = checked?;
         if files.is_empty() {
             bail!("diff changes no files");
         }
@@ -2004,23 +2096,25 @@ impl Broker {
         // agent's list comes after.
         let tier = policy::tier_for_paths(&files);
         policy::check_allowed(tier)?;
-        if let Some(why) = refused {
-            bail!("refused: {why}");
+        let cuts_off = match judged {
+            Err(why) => bail!("refused: {why}"),
+            Ok(c) => c,
+        };
+        let mut data = json!({
+            "files": files,
+            "diff_sha256": self.keep_proposal_text(&diff)?,
+            "effect_sha256": self.keep_proposal_text(&effect)?,
+            "base": base,
+        });
+        // The agent's session, the broker's record of what it read (session.rs), and what of the
+        // change could cut the machine off.
+        if let Some(s) = session {
+            data["session"] = s;
         }
-        self.ledger.append(NewEntry {
-            actor: actor.to_string(),
-            approved_by: None,
-            kind: "proposal".into(),
-            tier: tier.to_string(),
-            tainted,
-            reason: reason.into(),
-            data: json!({
-                "files": files,
-                "diff_sha256": self.keep_proposal_text(&diff)?,
-                "effect_sha256": self.keep_proposal_text(&effect)?,
-                "base": base,
-            }),
-        })
+        if !cuts_off.is_empty() {
+            data["cuts_off"] = cuts_off.into();
+        }
+        self.ledger.append(NewEntry { actor: actor.to_string(), approved_by: None, kind: "proposal".into(), tier: tier.to_string(), tainted, reason: reason.into(), data })
     }
 
     /// The config repo must be at the last ledgered commit before anything builds on it: a commit made
@@ -2440,7 +2534,13 @@ impl Broker {
             bail!("{approved_by:?} is not a person's name");
         }
         let lock = Lock::acquire(&self.state_dir)?;
-        self.reconcile_locked(&lock, approved_by)?;
+        self.apply_locked(&lock, proposal_seq, approved_by, confirm_tainted, confirm, None)
+    }
+
+    /// Apply under a lock already held; `scheduled`: what applies it with no person there — the `commit
+    /// at` schedule this is the run of (at.rs), or the trust it is applied under (session.rs).
+    fn apply_locked(&self, lock: &Lock, proposal_seq: u64, approved_by: &str, confirm_tainted: bool, confirm: Option<u32>, scheduled: Option<(&str, u64)>) -> Result<Entry> {
+        self.reconcile_locked(lock, approved_by)?;
         self.refuse_unledgered_head()?;
         // An outside `nixos-rebuild` switching now would interleave with this one, and the system
         // recorded after it might be that one's (as repair and reconcile check; audit of 2026-10-31).
@@ -2510,8 +2610,9 @@ impl Broker {
         if said != does || p.body.tier != tier.to_string() {
             let _ = fs::remove_file(&tmp);
             let why = format!("proposal {proposal_seq} no longer does what it was judged on: it said {} ({}), and would now change {} ({tier}); propose it again", said.into_iter().collect::<Vec<_>>().join(" "), p.body.tier, does.into_iter().collect::<Vec<_>>().join(" "));
-            // Once each: a person repeating this adds nothing to the record.
-            if self.find_child("apply_refused", "proposal", proposal_seq)?.is_none() {
+            // Once each: a person repeating this adds nothing to the record. (A scheduled run's own refusal
+            // of the same proposal, at.rs, is not this one.)
+            if !self.ledger.read_all()?.iter().any(|e| e.body.kind == "apply_refused" && e.body.data["proposal"] == json!(proposal_seq) && e.body.data.get("scheduled").is_none()) {
                 self.ledger.append(NewEntry {
                     actor: "broker".into(),
                     approved_by: Some(approved_by.into()),
@@ -2527,9 +2628,15 @@ impl Broker {
         // The agent's list as it is now, not as it was when it proposed: the limits may have been
         // narrowed since (the audit of ADR-041).
         if actor == Actor::Agent {
-            if let Some(why) = self.agent_refusal(&tmp, &files)? {
-                let _ = fs::remove_file(&tmp);
-                bail!("refused: the agent's limits no longer allow this — {why}");
+            match self.agent_check(&tmp, &files)? {
+                Err(why) => bail!("refused: the agent's limits no longer allow this — {why}"),
+                // What could lose the network or the screen rolls itself back unless a person, still
+                // reaching the machine, confirms it (ADR-042, 6).
+                Ok(cuts) if !cuts.is_empty() && confirm.is_none() => bail!(
+                    "refused: proposal {proposal_seq} could lose the network or the screen ({}): it is applied as a commit confirmed (apply --confirm <minutes>), which rolls itself back unless you confirm it",
+                    cuts.join(", ")
+                ),
+                Ok(_) => {}
             }
         }
 
@@ -2568,7 +2675,10 @@ impl Broker {
         // This attempt's own, in milliseconds: never a ledger number, which `torq break-glass` could take
         // while the build runs, and never an earlier attempt's, whose timer may still be waiting.
         let timer = chrono::Utc::now().timestamp_millis().unsigned_abs();
+        // What the lock builds, checked before anything builds it (A2): refused, as a failed build is.
+        let checked = if files.iter().any(|f| f == "flake.lock") { self.check_inputs(&before, &commit) } else { Ok(()) };
         let activated = match (confirm, &anchor_system) {
+            _ if checked.is_err() => Err((checked.unwrap_err(), None)),
             (Some(minutes), Some(anchor)) => self
                 .build_system(&lock, &commit)
                 .and_then(|system| {
@@ -2604,7 +2714,7 @@ impl Broker {
                     tier: tier.to_string(),
                     tainted: p.body.tainted,
                     reason: Self::failure_reason(if anchor.is_some() { "Commit confirmed" } else { "Rebuild" }, &before, restored),
-                    data: self.with_system(with_snapshot(json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored }), &snapshot)),
+                    data: self.with_system(at::note(with_snapshot(json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored }), &snapshot), scheduled)),
                 })?;
                 self.clear_pending()?;
                 self.drop_build_link();
@@ -2613,7 +2723,7 @@ impl Broker {
             }
         };
 
-        let mut data = with_snapshot(json!({ "proposal": proposal_seq, "commit": commit, "files": files }), &snapshot);
+        let mut data = at::note(with_snapshot(json!({ "proposal": proposal_seq, "commit": commit, "files": files }), &snapshot), scheduled);
         if let Some(c) = confirm_record {
             data["confirm"] = c;
         }

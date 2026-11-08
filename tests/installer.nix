@@ -34,7 +34,8 @@ let
   # The image's file systems, as the hardware file must name them (hosts/image/hardware-configuration.nix).
   want = builtins.toJSON {
     mounts = builtins.mapAttrs (_: f: { inherit (f) device fsType options autoResize neededForBoot; }) image.config.fileSystems;
-    grow = image.config.boot.growPartition;
+    # Grown by systemd-repart in the initrd (not growpart, which needs Python: ADR-032, amended).
+    grow = { inherit (image.config.boot.initrd.systemd.repart) enable; partitions = image.config.systemd.repart.partitions; growpart = image.config.boot.growPartition; layout = image.config.boot.initrd.systemd.services.systemd-repart.serviceConfig.ExecCondition; };
   };
 
   qemu = "${pkgs.qemu_test}/bin/qemu-system-${pkgs.stdenv.hostPlatform.qemuArch}";
@@ -86,7 +87,7 @@ pkgs.testers.runNixOSTest {
             # each on its own, so one that fails or hangs hides none of the others.
             for c in ["fgconsole; tr -s ' \\0' ' ' < /dev/vcs1",
                       "systemctl status --no-pager torq-install torq-setup",
-                      "journalctl -b --no-pager -o short-monotonic -u torq-install -u torq-setup -u growpart",
+                      "journalctl -b --no-pager -o short-monotonic -u torq-install -u torq-setup -u systemd-repart",
                       "journalctl -b --no-pager -o short-monotonic -k --grep 'usb|sd[a-z]|vd[a-z]|I/O|squashfs|Console|drm' | tail -40",
                       "lsblk"]:
                 print(m.execute(c, timeout=60)[1])
@@ -182,6 +183,11 @@ pkgs.testers.runNixOSTest {
         installer.succeed("mkdir -p /tmp/esp && mount -o ro /dev/vda1 /tmp/esp")
         installer.succeed("grep -qx 'editor 0' /tmp/esp/loader/loader.conf")
         installer.succeed("umount /tmp/esp")
+        # The ESP's and the record's partitions as the image left them: where each starts, its size, type
+        # and name; the record's of TorqOS's own type (hosts/image/disk.nix), which repart has no
+        # definition for.
+        before = installer.succeed("sfdisk --dump /dev/vda | grep -E '^/dev/vda[12] '").strip()
+        assert "type=79312C32-17CC-4864-8A4C-5A6D06522000" in before.splitlines()[1], before
         installer.shutdown()
 
     installed = machine("installed", target(0))
@@ -189,8 +195,16 @@ pkgs.testers.runNixOSTest {
     with subtest("the machine starts from the disk: grown to it, with first-boot setup on its console"):
         installed.start()
         on_console(installed, "Welcome to TorqOS. This machine has no configuration yet")
-        # Grown at boot (boot.growPartition, the file system's autoResize), from the image's 6 GB.
+        # Grown at boot (systemd-repart in the initrd, then the file system's autoResize), from the
+        # image's 6 GB: the root's partition, the last, and only it.
         installed.wait_until_succeeds("test $(df --output=size -B1 / | tail -1) -gt 10000000000", timeout=120)
+        # repart numbers partitions from 0: vda3 is its 2. It ran (the layout check let it), grew the
+        # root, and neither of the others.
+        installed.succeed("journalctl -b --no-pager --identifier systemd-repart --grep 'Growing existing partition 2\\.'")
+        installed.fail("journalctl -b --no-pager --identifier systemd-repart --grep 'existing partition [01]\\.'")
+        assert installed.succeed("sfdisk --dump /dev/vda | grep -E '^/dev/vda[12] '").strip() == before, "the ESP's and the record's partitions are untouched"
+        assert installed.succeed("test $(( $(cat /sys/class/block/vda3/start) + $(cat /sys/class/block/vda3/size) )) -gt $(( 11 << 21 )) && echo ok").strip() == "ok"
+        installed.fail("systemctl cat growpart.service")
         # One btrfs file system, each subvolume where it belongs, and the record not under /var/lib's.
         for mount, subvol in [("/", "@"), ("/home", "@home"), ("/var/lib", "@var-lib"), ("/.snapshots", "@snapshots")]:
             got = installed.succeed(f"findmnt -no FSTYPE,OPTIONS --mountpoint {mount}").strip()
@@ -215,7 +229,7 @@ pkgs.testers.runNixOSTest {
                 'let c = (import ${self.inputs.nixpkgs}/nixos/lib/eval-config.nix { system = "${system}"; '
                 'modules = [ /var/lib/torq/install/hardware-configuration.nix { boot.loader.grub.enable = false; system.stateVersion = "26.05"; } ]; }).config; in '
                 '{ mounts = builtins.mapAttrs (_: f: { inherit (f) device fsType options autoResize neededForBoot; }) c.fileSystems; '
-                'grow = c.boot.growPartition; virtio = builtins.elem "virtio_pci" c.boot.initrd.availableKernelModules; }'
+                'grow = { inherit (c.boot.initrd.systemd.repart) enable; partitions = c.systemd.repart.partitions; growpart = c.boot.growPartition; layout = c.boot.initrd.systemd.services.systemd-repart.serviceConfig.ExecCondition; }; virtio = builtins.elem "virtio_pci" c.boot.initrd.availableKernelModules; }'
             )
         )
         got = json.loads(got)

@@ -285,7 +285,7 @@ The audit of 2026-11-04 (end of M2, `docs/AUDIT-2026-11-04.md`), kept as written
 |---|---|---|
 | A1 | The release check accepted an OpenPGP- or X.509-signed commit (git handed it to gpg and the caller's keyring) | fixed: only an SSH signature, checked before git verifies; gpg's and X.509's programs `false`, no caller's home (cli/src/release.rs, a test with a PGP-signed commit) |
 | A2 | A lock's content hash, not its signed `rev`, decides what is built: a lock someone else wrote can pair the newest signed rev with older source in the store | open — the broker re-fetching each changed input as root and checking its hash and signature (M3, with the socket broker); SECURITY-MODEL says what is not covered |
-| A3 | `stable` could move to an older release; `show \| compare` shows dates, not versions | partly: CI refuses a release not newer than `stable`'s version (release.yml). Open: torqcli showing and comparing versions |
+| A3 | `stable` could move to an older release; `show \| compare` shows dates, not versions | mostly fixed: CI refuses a release not newer than `stable`'s version (release.yml); torqcli names TorqOS by version in `show \| compare` and at `commit` (`torq 0.2.1 (2026-11-05) -> 0.2.2 (2026-11-07)`: the running one from /etc/os-release, the release's from the commit fetched to check its signature, no second fetch: its number from `cli/Cargo.toml`, its tag, a pre-release included, from the signed message) and says an older number is a downgrade, whatever the dates (a pre-release and its release: by date, as the running side never says a pre-release) (cli/src/release.rs, session.rs `software_is_shown_as_versions`); a source other than the releases, or one without a version, still by date. Open: refusing an older version or a pre-release on `stable` unless the person confirms |
 | A4 | First-boot setup ledgered change #1 when the switch failed before the new system took, leaving the image with no account | fixed: ledgered only if the new system runs or is the boot default; otherwise nothing set up, setup asks again (broker/src/lib.rs `set_up`, its test) |
 | A5 | Release authority wider than the key: the releases token in the bump job's environment, any `v*` tag published | open — a protected environment for release, the token in the step that needs it (GitHub settings) |
 | A6 | The release check says nothing for a source other than the releases repo; `github:` accepted for it | open |
@@ -568,7 +568,7 @@ Its §5 lists claims without a test.
 6zk. **Snapshots of the data (ADR-038).** Open:
    - **Root can delete them, and so can an administrator,** with a password and on the record. They keep
      what a person or a program deletes; a root shell can remove
-     them too, as it can anything on the machine. The backup (not built) is what lives elsewhere.
+     them too, as it can anything on the machine. The backup (6zm) is what lives elsewhere.
    - **What is deleted stays on the disk** until its snapshot goes, ten system changes later (`torq snapshots
      keep`), or an administrator deletes it (`request system snapshot delete`): a person
      who deletes a secret on purpose has not removed it from the machine, and it counts against the disk.
@@ -602,7 +602,7 @@ Its §5 lists claims without a test.
      build after this will say whether the runner has the space.
    - **A deleted snapshot is not wiped:** its blocks are free, not overwritten, so a secret in one is out of
      reach of the file system, not of someone reading the raw disk.
-   - **Not built:** the declared backup, `request system restore`, and offering data at `rollback`.
+   - **Not built:** offering data at `rollback`. The declared backup and `request system restore`: 6zm.
 
 6zl. **The audit of M3 (2026-11-06).** Fixed from it:
    - **H1:** a proposal's gate read the tier it was proposed with, while `apply` used what the diff did
@@ -626,3 +626,167 @@ Its §5 lists claims without a test.
    - **What root leaves outside the configuration** survives a rebuild; only a reinstall clears it.
    - **unix_chkpwd**, setuid, checks a person's own password with no count: a program running as them can
      guess it there, slowly. The audit did not raise it; found while fixing M3.
+
+6zm. **The declared backup (ADR-038, amended 2026-11-07).** Open:
+   - **A repository's credentials have no protected place yet.** Only the passphrase is kept (`request system
+     backup key`); the tree refuses rclone's keys and the key by another way, but an SFTP key or S3's keys in an
+     `environmentFile` are placed by hand, root's, outside what TorqOS keeps, ledgers or backs up.
+   - **Tested against a repository on the machine's own disk only** (`tests/backup.nix`).
+   - **The key here is not the repository's.** Giving a new one changes what the machine reads, not the
+     repository's own key (`restic key passwd`, by hand). A wrong one shows at the next run, and in
+     `show system backups`.
+   - **A backup that runs as another account is refused** (`user`): its key is root's alone.
+   - **The room shares its disk with everything** (`/var/cache` is on the root file system): restic's own list
+     of the path is summed first, and a restore that would not fit with a twentieth of the disk (4 GiB at
+     most) to spare is refused. The sum is restic's word: a repository that lies about sizes can still fill
+     the disk, as far as the restore's writes go, until it fails and the room is removed.
+   - **A restore takes the room twice over while it runs:** restic writes the path whole into
+     `/var/cache/torq/restoring`, and the owner's copy writes it again beside the target. A disk too full
+     fails it, what is live untouched. A machine stopped mid-restore leaves that copy, root's, until the
+     next restore clears it, and nothing ledgered.
+   - **Everything 6zk says of a snapshot's restore holds** (it is the same copy): set-id bits dropped,
+     extended attributes and ACLs not carried, root's folders not restored, a device node fails it, an
+     owner can stall their half, nothing holds a change off during the copy.
+   - **A path with `*`, `?`, `[`, `]` or `\` in it is not restored by itself:** restic would read it as a
+     pattern. Restore the folder it is in.
+   - **`latest` is the repository's newest,** from whichever machine: where several share one, name the
+     snapshot.
+   - **`show system backups` is anyone's,** and runs restic as root against the repository, a minute at
+     most each: any account can make the machine reach a remote target. Its last run is systemd's, since
+     boot; why it failed, the journal's, shown only to whoever may read the journal.
+   - **Not built:** the restore step in setup's from-a-repository path (ADR-036), and a VM test against a
+     remote target.
+   - **Root's restic still writes as the repository says** (owners, modes, set-id bits) inside the room,
+     confined to it (no device, no new privilege, the rest of the machine read only). The owner check
+     before the copy and the copy as the owner are what keep that out of a person's folder.
+   - **`extraOptions` reach root's shell as NixOS writes them,** unquoted (the review's L3, not taken):
+     NixOS's own unit and wrapper write them so, and its example (`sftp.command='ssh …'`) relies on it;
+     quoted in TorqOS's wrapper only, an option would mean one thing in the backup and another in the
+     restore. Setting one is a system change, an administrator's.
+
+6zn. **Doctor mode (ADR-042, built on `work/w3` 2026-11-07).** Fixed from its review (2026-11-07): the
+   session's record is written before the first model call and after every tool result (a failed
+   call left none); its id is random and made new (inside the launcher every pid is 2); the journal is
+   off by default with any model; a tainted answer is headed so on standard output; plain http's host
+   and port are compared whole and no endpoint has a user, query, fragment or backslash; llama-server
+   has no network, its fixed flags last and the dangerous ones refused, a memory bound; each tool's
+   program is bounded in bytes and time, at most 8 calls a round, curl's answer at most 4 MiB; the
+   configuration taints too; invisible characters are cleaned. Open:
+   - ~~**The taint record is the agent's own.**~~ Fixed on `work/w5` (2026-11-07, ADR-042 amended): the
+     broker holds each session's taint in its own state directory (root's, 0600), sticky, ledgered; the
+     doctor reports each tainting read there before the model sees it, and a proposal is judged by the
+     broker's record. The record in the agent's home stays, as its account of itself only. What is
+     left of it is 6zq's first item.
+   - **The journal, once on, is the whole account's**: every program run as the agent reads every log,
+     Claude Code included (which sends what it reads to its own service). A reader only the doctor has
+     is later.
+   - **With a remote endpoint the configuration leaves the machine**, a wifi network's key in it
+     included, as well as anything else a tool returns.
+   - **`tests/doctor.nix` has not been run** yet (amended on `work/w5` for the broker's sessions), and no real model has been tried: the unit tests and
+     the VM test use a scripted endpoint. Whether a given local model calls tools well is untested.
+   - **Anyone on the machine can use the local model** (its socket is 0666); restricting it to the
+     agent's group needs the service off DynamicUser.
+   - **llama-server runs from boot** once the local model is on, holding the model in memory; it does
+     not start on demand.
+   - **Only an administrator** can run `torq doctor` (it goes through `torq agent run`).
+6zo. **`commit at` (broker/src/at.rs, ADR-043, 2026-11-07).** Fixed from its review: a run more than 15
+   minutes late is refused (a machine asleep at its time, a clock stepped after boot, a broker busy
+   all along), and the boot unit waits for `time-sync.target`; the approver is read again at the run (an
+   account still, a person's, an administrator unless it is wholly their own folder); one bad schedule at
+   boot no longer stops the others; one long past its time is settled by the next `commit at`; its
+   approver may cancel their own; apply's own refusal of a proposal is not hidden by a schedule's.
+   Open:
+   - **`tests/commit-at.nix` is written and registered, not yet run** (the branch's worker may not build
+     VM tests); the broker's unit tests stub the timer.
+   - **A scheduled proposal is still listed** by `show system proposals`, and `request system apply` of
+     it before its time applies it; the schedule is then refused at its time (already applied).
+   - **Local times are read by `date`** when the commit is made (`HH:MM`, `"YYYY-MM-DD HH:MM"`): the
+     broker holds UTC from then on, so a later change of the machine's time zone does not move it.
+   - **Daylight saving.** A local time the clock skips (02:30 on the night it springs forward) is
+     refused as no such time, if `date` refuses it — GNU `date` does. One the clock passes twice (01:30
+     on the night it falls back) is whichever of the two `date` picks, and the person is shown the
+     resolved time with the question only as a local stamp, not which of the two it is. `HH:MM` is
+     today's or tomorrow's date at that wall time, so across a change it is still that wall time (not 24
+     hours on). The time shown in `show system commit` uses the offset at that moment, read by `date`.
+   - **The grace is fixed** at 15 minutes (broker/src/at.rs `LATE_MINUTES`), not a setting.
+   - **A timer armed and never recorded** (the broker killed between the two) waits for its time, finds
+     no schedule by its id and does nothing; it is not removed before then.
+   - **A run that fails before it can record anything** (the ledger or accounts unreadable) retries for
+     25 minutes and then stops; the schedule is settled on the record by the next `commit at`, or seen
+     waiting, marked past its time, in `show system commit`.
+   - **Adopted with one waiting:** a machine adopting a repository whose ledger holds a schedule arms it
+     at its first boot; adopt's own commit moves HEAD, so it is refused at its time, not applied.
+6zp. **The socket's and the ledger's words are written twice (code review, 2026-11-07; ADR-044, after
+   0.3.0).** `cli/src/run.rs` re-declares `Request`, `Frame`, `SOCKET`, `NEED_PASSWORD` from
+   `broker/src/socket.rs`, and reads exit codes 1, 2, 75 as bare numbers; `cli/src/shell.rs`'s
+   `ledgered_commit` and `waiting_proposals` repeat the broker's kind lists (`broker/src/lib.rs`); entry
+   kinds, tiers and actors are strings matched across broker/, cli/ and agent/; a commit id, a store path and
+   a snapshot label are checked ad hoc (`repo::revision`, `lib.rs` `shapes_ok`, `snapshot::label_ok`).
+   No drift today: the two kind lists match, and `tests/socket.nix` exercises both ends of the protocol. A
+   kind added on one side only would go unnoticed by the compiler. ADR-044's crate `torq-wire` closes it,
+   fixtures first so the ledger's bytes are proven unchanged; not in 0.3.0 (it changes all three Nix
+   packages' sources and touches `lib.rs` while the release's branches do).
+
+6zr. **Python out of a new machine (ADR-032/033, amended 2026-11-07, `work/w6`).** The root is grown by
+   systemd-repart in the initrd, not growpart; the SSH greeting runs fastfetch's program without its
+   Python completions. Open:
+   - **Python stays for the boot writer** (systemd-boot's installer, ~135 MB): ADR-032's amendment says
+     what replacing it would take. The size budget stays 1280 MB until then (1252 MB now).
+   - **Not yet run in a VM:** `tests/installer.nix` (repart's definitions compared instead of
+     `boot.growPartition`, and the layout check; repart's "Growing existing partition 2." in the journal,
+     its numbering from 0, and nothing of partitions 0 or 1; the ESP's and the record's entries as the
+     image left them, the record's of TorqOS's type; no growpart unit) and `tests/image.nix` (which boots the
+     image, grown, and was not changed). What only they show: that repart in the initrd finds the
+     disk behind a btrfs root, and that btrfs then grows on `subvol=@`.
+   - **Machines installed before this** keep `boot.growPartition` in their own hardware file, and with
+     it cloud-utils and Python. Their disks are not the image's layout now (no partition names, the
+     record of Linux's generic type), so the new hardware file's repart would not run on them: its
+     layout check skips it. Theirs stay grown by growpart, which does nothing once grown.
+   - **Only the image's layout grows.** Any other (an install by hand, a partition added) is left as it
+     is, and its root is not grown: by design, never repartitioned rather than guessed at.
+6zq. **Proposals and session trust (ADR-042 6 and 7, amended; built on `work/w5` 2026-11-07).** Open:
+   - **A session's taint is what was reported.** The broker cannot see what a program of the agent's
+     reads; it holds what it is told, where the agent cannot undo it. TorqOS's doctor reports every
+     tainting read before the model sees it, and stops if a report fails. But any program run as
+     `torq-agent` (Claude Code under `torq agent run`) can start a session over the socket and never
+     report, so its proposals look untainted — and under a person's trust, a user-tier change in that
+     person's folder (their packages) would then apply without asking. Same-uid programs cannot be
+     told apart: checking the caller's executable (ADR-042, 7 as first designed) is defeated by a
+     parent that traces TorqOS's own doctor. What bounds it: trust is the person's own folder, at
+     most 60 minutes, given with their password, each change ledgered and revertible; never system
+     tier. A real fix would run TorqOS's own agent as an account other tools cannot run as.
+   - **Expiry is ledgered late.** A grant is over at its time whatever the ledger says; its
+     `trust_expired` is written by the next operation that may apply under trust (a proposal, a grant,
+     a revoke), not at the time itself.
+   - **What counts as cutting the machine off** is a fixed list (broker/src/agent.rs `CUTS_OFF`, widened
+     by the review of w5): the network and the ways in over it (networking, systemd.network, ssh and
+     its alias `services.sshd`, sshguard, resolved, tailscale, a person's `openssh` keys under
+     `users.users` and `users.extraUsers`), what runs (`systemd.services`, `environment.etc`),
+     hardware and boot, the screen and the console (console, getty, kmscon, the display's services,
+     niri). Not a setting, and only for the agent's proposals: a person's own commit is theirs to
+     confirm or not. A setting not on it that a network or a login still depends on (another VPN's,
+     a `systemd.sockets` or `systemd.user` unit, `security.pam`) is not caught; NixOS's other aliases
+     of a listed option are caught only where listed.
+   - **`tests/agent-proposals.nix` is written and registered, not yet run.** No VM test runs the
+     doctor's own propose step (torqcli's commit as the agent evaluates the configuration, which the
+     test VM cannot): it is covered by the agent crate's tests, with torqcli stubbed.
+   - **Sessions share one budget.** At most 600 are started an hour and 2000 records kept (the oldest
+     go; a proposal naming a gone one is refused). The doctor's and any other agent program's are one
+     account's, so no separate budget by uid: a program run as the agent can keep the doctor from
+     starting a session for the rest of an hour — it is refused then, never less careful. The ledger
+     holds a session only in the proposals that cite it.
+   - **A trusted apply already started finishes** after a revoke: the revoke is on the record at once
+     (the sessions' own lock), and every later trusted apply reads it, but one in its build goes on.
+   - **The doctor's values are words**: `propose_change` sets one word, number or boolean per setting;
+     a value with spaces or quotes (a description, a list at once) cannot be proposed.
+
+6zs. **The audit of 0.3.0 (2026-11-08).** Its report was cut short; its tests were kept
+   (broker/tests/audit_030.rs), and each failed against the candidate. Fixed from it:
+   - **A2 went around twice:** a flake.lock padded past 1 MiB was read as no lock, so nothing in it was
+     checked; and an input given the type `path` was skipped, whatever store path it named. A lock too
+     large is refused, and a folder is hashed again like any input.
+   - **One session's record could stop every session:** a thousand sources reported grew it past what
+     the broker reads. A session names at most 32; past them it is tainted all the same.
+   - **A grant lasted as long as its `until` said:** it lasts its minutes from its own entry, at most 60.
+   - **Adopt took a ledger with a trust grant standing or a commit at waiting:** refused.
+   - **The doctor's limits** are tested as numbers.

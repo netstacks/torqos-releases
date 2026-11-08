@@ -44,11 +44,11 @@ const SAID: u64 = 4096;
 
 /// One restore: what is read as root, and who writes it where. What is live is touched only once
 /// all of it has been read and written, by a rename: a failure leaves it as it was.
-pub struct Copy<'a> {
+pub struct Copy {
     pub source: PathBuf,
-    pub to: &'a str,
-    pub set_aside: &'a str,
-    pub stage: &'a str,
+    pub to: String,
+    pub set_aside: String,
+    pub stage: String,
     pub folder: bool,
     pub mode: u32,
     pub uid: u32,
@@ -57,19 +57,55 @@ pub struct Copy<'a> {
     pub whole: bool,
 }
 
-impl Copy<'_> {
+/// The restore of `parts` of `tree` (`data_path`'s) from `root`, a copy of that tree only root can
+/// reach and no one changes — a snapshot's, or a backup's restored into the broker's own room —
+/// checked: no link on the way, whose it is, and that what is live is still theirs. `tag` names what
+/// is set aside and what is staged; `from` says, in an error, where it came from.
+pub fn plan(root: &Path, tree: &str, parts: &[String], tag: &str, from: &str) -> Result<Copy> {
+    use std::os::unix::fs::MetadataExt;
+    let path = written_out(tree, parts);
+    let (top, last) = no_links(root, parts).with_context(|| format!("{path} {from}"))?;
+    // What is read here stays so. A pipe would hang whoever opens it.
+    if !last.is_dir() && !last.is_file() {
+        bail!("{path} was neither a file nor a folder: not restored");
+    }
+    let uid = top.uid();
+    if uid == 0 {
+        bail!("{path} lies in a folder of root's: restoring it needs a root shell (torq break-glass)");
+    }
+    let gid = primary_group(&fs::read_to_string("/etc/passwd").context("reading the accounts")?, uid).with_context(|| format!("no account has uid {uid} now, whose {path} this was"))?;
+    let whole = parts.len() == 1;
+    let live_top = written_out(tree, &parts[..1]);
+    let live = match fs::symlink_metadata(&live_top) {
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && whole => None,
+        Err(e) => return Err(e).with_context(|| format!("{live_top} is not there: restore that first")),
+    };
+    if live.as_ref().is_some_and(|m| m.is_symlink() || m.uid() != uid) {
+        bail!("{live_top} has changed hands since: not restored");
+    }
+    let set_aside = format!("{path}.before-{tag}");
+    if whole && live.is_some() && fs::symlink_metadata(&set_aside).is_ok() {
+        bail!("{set_aside} is already there: move it first");
+    }
+    // Its own, for each run: nothing else makes two restores of one path keep apart.
+    let stage = format!("{path}.restoring-{tag}-{}", std::process::id());
+    Ok(Copy { source: root.join(parts.iter().collect::<PathBuf>()), to: path, set_aside, stage, folder: last.is_dir(), mode: last.mode(), uid, gid, whole })
+}
+
+impl Copy {
     pub fn run(&self) -> Result<()> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-        if fs::symlink_metadata(self.stage).is_ok() {
+        if fs::symlink_metadata(&self.stage).is_ok() {
             bail!("{} is already there: move it first", self.stage);
         }
         if self.whole {
             if self.folder {
-                fs::DirBuilder::new().mode(0o700).create(self.stage)?;
+                fs::DirBuilder::new().mode(0o700).create(&self.stage)?;
             } else {
-                fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(self.stage)?;
+                fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&self.stage)?;
             }
-            std::os::unix::fs::chown(self.stage, Some(self.uid), Some(self.gid))?;
+            std::os::unix::fs::chown(&self.stage, Some(self.uid), Some(self.gid))?;
         }
         if let Err(e) = self.stream().and_then(|()| self.swap()) {
             self.clean();
@@ -93,7 +129,7 @@ impl Copy<'_> {
         let pipe = reader.stdout.take().context("the snapshot's pipe")?;
         // Never set-id: what a person once could run as a group they have left, or as someone else.
         let mode = format!("{:o}", self.mode & 0o777);
-        let wrote = self.as_owner(STAGE, &[self.stage, if self.folder { "folder" } else { "file" }, &mode, if self.whole { "" } else { "new" }], Stdio::from(pipe));
+        let wrote = self.as_owner(STAGE, &[&self.stage, if self.folder { "folder" } else { "file" }, &mode, if self.whole { "" } else { "new" }], Stdio::from(pipe));
         let read_ok = reader.wait().context("reading the snapshot")?.success();
         wrote?;
         if !read_ok {
@@ -106,11 +142,11 @@ impl Copy<'_> {
         use rustix::fs::{renameat_with, RenameFlags, CWD};
         use std::os::unix::fs::MetadataExt;
         if !self.whole {
-            return self.as_owner(SWAP, &[self.to, self.set_aside, self.stage], Stdio::null());
+            return self.as_owner(SWAP, &[&self.to, &self.set_aside, &self.stage], Stdio::null());
         }
         // As it stands now: a copy can take hours, and the checks before it are that old. Neither
         // rename replaces anything: what has appeared meanwhile is someone's.
-        let there = match fs::symlink_metadata(self.to) {
+        let there = match fs::symlink_metadata(&self.to) {
             Ok(m) if m.is_symlink() || m.uid() != self.uid => bail!("{} has changed hands during the copy: not restored", self.to),
             Ok(_) => true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
@@ -118,11 +154,11 @@ impl Copy<'_> {
         };
         let keep = |from: &str, to: &str| renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE);
         if there {
-            keep(self.to, self.set_aside).with_context(|| format!("setting {} aside", self.to))?;
+            keep(&self.to, &self.set_aside).with_context(|| format!("setting {} aside", self.to))?;
         }
-        keep(self.stage, self.to).map_err(anyhow::Error::from).with_context(|| format!("{} has appeared during the copy: not restored", self.to)).inspect_err(|_| {
+        keep(&self.stage, &self.to).map_err(anyhow::Error::from).with_context(|| format!("{} has appeared during the copy: not restored", self.to)).inspect_err(|_| {
             if there {
-                let _ = keep(self.set_aside, self.to);
+                let _ = keep(&self.set_aside, &self.to);
             }
         })
     }
@@ -130,11 +166,11 @@ impl Copy<'_> {
     /// What was staged goes. In a folder of root's root removes it: `remove_dir_all` follows no link.
     fn clean(&self) {
         if !self.whole {
-            let _ = self.as_owner(CLEAN, &[self.stage], Stdio::null());
+            let _ = self.as_owner(CLEAN, &[&self.stage], Stdio::null());
         } else if self.folder {
-            let _ = fs::remove_dir_all(self.stage);
+            let _ = fs::remove_dir_all(&self.stage);
         } else {
-            let _ = fs::remove_file(self.stage);
+            let _ = fs::remove_file(&self.stage);
         }
     }
 

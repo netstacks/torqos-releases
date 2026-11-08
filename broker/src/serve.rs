@@ -25,6 +25,8 @@ use torq_broker::socket::{self, Caller, Change, Frame, Gate, Request};
 const QUEUE: usize = 4096;
 /// How much of the broker's standard output (its answer) is kept for a caller that has fallen behind.
 const KEEP_BYTES: usize = 16 << 20;
+/// Where a request's files are kept while it is answered: a tmpfs, root's (modules/broker.nix).
+const SCRATCH: &str = "/run/torq";
 
 /// The connection's output: a frame per line, written by a thread of its own from a bounded queue.
 /// Sending never waits on the caller: when the caller falls behind, lines are left out and the
@@ -178,13 +180,15 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
     let settings = Settings::read(Path::new(config::FIXED), false).map_err(&refused)?.context("no /etc/torq/broker.json").map_err(&refused)?;
 
     // The request's files, private to root, gone when this is.
-    let scratch = Scratch::new(&settings.state_dir).map_err(&refused)?;
+    let scratch = Scratch::new(Path::new(SCRATCH)).map_err(&refused)?;
     let diff = req.diff.as_deref().map(|d| scratch.write("change.diff", d)).transpose().map_err(&refused)?;
     let hash = req.hash.as_deref().map(|h| scratch.write("hash", h)).transpose().map_err(&refused)?;
+    let key = req.key.as_deref().map(|k| scratch.write("key", k)).transpose().map_err(&refused)?;
     let cmd = req.args.iter().find(|a| !a.starts_with('-')).cloned().unwrap_or_default();
     let diff_s = diff.as_ref().map(|p| p.to_string_lossy().into_owned());
     let hash_s = hash.as_ref().map(|p| p.to_string_lossy().into_owned());
-    let args = socket::with_identity(&req.args, &cmd, &who, diff_s.as_deref(), hash_s.as_deref()).map_err(&refused)?;
+    let key_s = key.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let args = socket::with_identity(&req.args, &cmd, &who, diff_s.as_deref(), hash_s.as_deref(), key_s.as_deref()).map_err(&refused)?;
 
     // The arguments as the broker will read them: what they name, for the gate.
     let m = crate::command_line()
@@ -195,9 +199,13 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
         return Err(refused(anyhow::anyhow!("the command is {name}, not {cmd}")));
     }
     let seq = sub.try_get_one::<u64>("seq").ok().flatten().copied();
-    let user = sub.try_get_one::<String>("user").ok().flatten().cloned();
+    // Whose a scheduled commit is: its approver may cancel it (the ledger's word, not the caller's).
+    let user = match (name, seq) {
+        ("cancel-scheduled", Some(seq)) => scheduled_by(&settings.state_dir, seq),
+        _ => sub.try_get_one::<String>("user").ok().flatten().cloned(),
+    };
     let change = match (name, seq) {
-        ("apply" | "revert", Some(seq)) => change(&settings.state_dir, seq, if name == "apply" { "proposal" } else { "applied" }),
+        ("apply" | "schedule" | "revert", Some(seq)) => change(&settings.state_dir, seq, if name == "revert" { "applied" } else { "proposal" }),
         _ => None,
     };
     // A commit confirmed holds everyone else's changes back while it waits: its own case.
@@ -237,6 +245,12 @@ fn one_at_a_time(uid: u32) -> Result<std::fs::File> {
         .with_context(|| format!("opening {}", p.display()))?;
     f.lock().context("waiting for the turn to check the password")?;
     Ok(f)
+}
+
+/// Who approved the commit scheduled as entry `seq`, if it is one.
+fn scheduled_by(state_dir: &Path, seq: u64) -> Option<String> {
+    let e = Ledger::open(state_dir.join("ledger.jsonl")).get(seq).ok()?;
+    (e.body.kind == "apply_scheduled").then_some(e.body.approved_by).flatten()
 }
 
 /// The change `seq` is, if it is a `kind` entry: its tier and the files it touches.
@@ -346,14 +360,15 @@ fn run(reply: &Reply, who: &Caller, args: &[String]) -> i32 {
     code
 }
 
-/// A directory for one request's files: in the broker's state directory (root's, 0700), its own
+/// A directory for one request's files (a diff, a hash, a backup's key): in `/run/torq`, memory only,
+/// never on a disk or in a backup (the review of the backup, L2); 0700, root's; its own
 /// name, removed when dropped.
 struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new(state_dir: &Path) -> Result<Self> {
+    fn new(under: &Path) -> Result<Self> {
         use std::os::unix::fs::DirBuilderExt;
-        let dir = state_dir.join(format!("request-{}", std::process::id()));
+        let dir = under.join(format!("request-{}", std::process::id()));
         // A leftover of a server that died, with this pid: not ours to trust.
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::DirBuilder::new().mode(0o700).create(&dir).with_context(|| format!("creating {}", dir.display()))?;

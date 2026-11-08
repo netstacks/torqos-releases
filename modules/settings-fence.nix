@@ -21,6 +21,7 @@
 #  3. A person's password is never in the configuration: everyone on the machine can read it, and
 #     its history keeps every value forever (a hash there can be cracked offline). Passwords live
 #     in /var/lib/torq/secrets (modules/accounts.nix); `request system password` changes one.
+#     A backup's key is kept the same way (modules/backup.nix): `request system backup key` gives it.
 #
 # A pattern is a path; a segment ending in `*` matches any entry name starting with what precedes it.
 { lib }:
@@ -36,6 +37,7 @@ rec {
     [ "torq" "broker" ]
     [ "torq" "packages" ]
     [ "torq" "cli" "package" ]
+    [ "torq" "agent" "doctor" "package" ]
     [ "torq" "schema" ]
     [ "torq" "nixosSchema" ]
     [ "torq" "releases" ]
@@ -75,6 +77,14 @@ rec {
 
   # Rule 3: an account's password, in any of NixOS's forms.
   passwords = map (p: [ "users" "users" "*" p ]) [ "password" "hashedPassword" "initialPassword" "initialHashedPassword" "hashedPasswordFile" "passwordFile" ];
+  # And a backup's key, which is kept as a password is (modules/backup.nix): never pointed elsewhere.
+  backupKeys = [ [ "services" "restic" "backups" "*" "passwordFile" ] [ "systemd" "services" "restic-backups-*" "environment" "RESTIC_PASSWORD*" ] ];
+  # And what would be a repository's credentials written into it (rclone's keys): they have no protected
+  # place yet (KNOWN-GAPS 6zm), and the configuration is not one.
+  backupSecrets = [ [ "services" "restic" "backups" "*" "rcloneConfig" ] ];
+  # A backup's own arguments that would carry its key, or do without one.
+  passwordArgs = path: v: matchesAny [ [ "services" "restic" "backups" "*" "extraBackupArgs" ] ] path
+    && builtins.isList v && lib.any (a: builtins.isString a && lib.hasInfix "password" (lib.toLower a)) v;
 
   segmentMatches = pat: seg:
     if lib.hasSuffix "*" pat then lib.hasPrefix (lib.removeSuffix "*" pat) seg else pat == seg;
@@ -113,6 +123,9 @@ rec {
     if underscore != null then "${here}.${underscore}: a key starting with _ is a NixOS module directive (mkForce, mkMerge, …), not a setting: the tree holds data only"
     else if matchesAny aliases path then "${here}: NixOS's old name for ${if lib.elemAt path 1 == "extraUsers" then "users.users" else "users.groups"}: set it there (one place, every rule)"
     else if keptElsewhere path then "${here}: kept in its own file by TorqOS (as torqcli writes it), not in nixos/"
+    else if matchesAny backupKeys path then "${here}: a backup's key is never in the configuration, nor pointed at from it: it is kept root's alone, outside it (`request system backup key <name>` gives it)"
+    else if matchesAny backupSecrets path then "${here}: a repository's credentials are never in the configuration (everyone can read it): put them in a file of root's and point rcloneConfigFile or environmentFile at it"
+    else if passwordArgs path v then "${here}: a backup's key is not passed in its arguments: it is kept root's alone (`request system backup key <name>` gives it)"
     else if matchesAny passwords path then "${here}: a password is never in the configuration (everyone can read it, and its history keeps it): `request system password <user>` sets one"
     else if path == [ "specialisation" ] then "specialisation: a second system, out of every rule here, is not the tree's: put it in an attached .nix file (config-files.json), reviewed as code"
     else if fenced path then "${here}: not settable in the configuration tree (it reaches the broker or TorqOS itself)"

@@ -253,6 +253,114 @@ impl Machine for Real<'_> {
         ))
     }
 
+    fn backups(&self) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["backups"])?, &log)?, "show system backups")?;
+        let list = v.as_array().map(Vec::as_slice).unwrap_or_default();
+        if list.is_empty() {
+            return Ok("No backups are declared (set services restic backups <name> repository <where>: ADR-038).\n".into());
+        }
+        let text = |b: &serde_json::Value, k: &str, n: usize| history::one_line(b[k].as_str().unwrap_or(""), n);
+        let mut out = String::from("Backups (request system restore <backup> [<snapshot>] <path>):\n");
+        for b in list {
+            let name = text(b, "name", 64);
+            out.push_str(&format!("  {name}\n"));
+            let run = &b["last_run"];
+            if run["running"].as_bool() == Some(true) {
+                out.push_str("    running now\n");
+            } else if run.is_object() {
+                let failed = run["result"].as_str() != Some("success");
+                out.push_str(&format!("    last run {}: {}\n", text(run, "at", 40), if failed { format!("failed ({}, status {})", text(run, "result", 30), text(run, "status", 10)) } else { "done".into() }));
+                if failed {
+                    // What it said, as the journal has it: read as the person asking, as they may.
+                    let unit = text(run, "unit", 100);
+                    let said = std::process::Command::new("journalctl").args(["-u", &unit, "-n", "3", "-o", "cat", "-q", "--no-pager"]).stderr(std::process::Stdio::null()).output().ok().filter(|o| o.status.success() && !o.stdout.is_empty());
+                    match said {
+                        Some(o) => String::from_utf8_lossy(&o.stdout).lines().for_each(|l| out.push_str(&format!("      {}\n", history::one_line(l, 160)))),
+                        None => out.push_str(&format!("      (journalctl -u {unit} says why)\n")),
+                    }
+                }
+            } else {
+                // systemd forgets a unit nothing refers to (a backup with no timer, run by hand): the newest
+                // snapshot, restic's own record, says when it last succeeded.
+                match b["snapshots"].as_array().and_then(|s| s.iter().filter_map(|x| x["time"].as_str()).max()) {
+                    Some(t) => out.push_str(&format!("    last snapshot {} (systemd keeps no record of the run itself)\n", history::one_line(t, 40))),
+                    None => out.push_str("    not run since the machine started\n"),
+                }
+            }
+            if let Some(e) = b["error"].as_str() {
+                out.push_str(&format!("    {}\n", history::one_line(e, 200)));
+            }
+            let snaps = b["snapshots"].as_array().map(Vec::as_slice).unwrap_or_default();
+            if b["error"].is_null() && snaps.is_empty() {
+                out.push_str("    no snapshots yet\n");
+            }
+            const SHOWN: usize = 10;
+            for s in snaps.iter().rev().take(SHOWN) {
+                let paths: Vec<String> = s["paths"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).map(|p| history::one_line(p, 60)).collect();
+                out.push_str(&format!("    {}  {}  {}  {}\n", text(s, "id", 8), text(s, "time", 25), text(s, "host", 30), paths.join(" ")));
+            }
+            if snaps.len() > SHOWN {
+                out.push_str(&format!("    … and {} older\n", snaps.len() - SHOWN));
+            }
+        }
+        Ok(out)
+    }
+
+    fn backup_key(&self, name: &str, me: &str) -> Result<String> {
+        if !std::io::stdin().is_terminal() {
+            bail!("a key is typed at a terminal: `request system backup key {name}` there");
+        }
+        let typed = |q: &str| -> Result<String> {
+            print!("{q}: ");
+            std::io::stdout().flush()?;
+            let _hidden = Echo::set(false);
+            let mut s = String::new();
+            std::io::stdin().lock().read_line(&mut s)?;
+            println!();
+            Ok(s.trim_end_matches(['\n', '\r']).to_string())
+        };
+        // Non-dumpable while it is held, as a password is (ADR-040).
+        rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).context("protecting the key")?;
+        let key = typed(&format!("Key of backup {name} (its repository's passphrase)"))?;
+        if key.is_empty() {
+            bail!("not changed: no key");
+        }
+        if typed("Again")? != key {
+            bail!("not changed: the two differ");
+        }
+        // To the broker as a password's hash goes: a private file, gone as soon as it is read.
+        let scratch = crate::scratch_dir()?;
+        let file = scratch.path().join("key");
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?.write_all(key.as_bytes())?;
+        }
+        let log = run::start_log()?;
+        let file = file.to_string_lossy().into_owned();
+        let v = done(run::broker_json(broker(self.cli, &["backup-key", "--name", name, "--key-file", &file, "--approved-by", me])?, &log)?, "request system backup key")?;
+        Ok(format!(
+            "The key of backup {name} is kept (ledger #{}): root's alone, outside the configuration. Keep it somewhere else too: without it, nothing in the backup can be read.\n",
+            v["seq"].as_u64().unwrap_or(0)
+        ))
+    }
+
+    fn restore_backup(&self, name: &str, snapshot: Option<&str>, path: &str, me: &str) -> Result<String> {
+        let log = run::start_log()?;
+        let mut args = vec!["backup-restore", "--name", name, "--path", path, "--approved-by", me];
+        if let Some(s) = snapshot {
+            args.extend(["--snapshot", s]);
+        }
+        let v = done(run::broker_json(broker(self.cli, &args)?, &log)?, "request system restore")?;
+        let kept = v["data"]["set_aside"].as_str().map_or(String::new(), |a| format!(" What was there is at {}.", history::one_line(a, 120)));
+        Ok(format!(
+            "{} is back from backup {name}, snapshot {} (ledger #{}).{kept} A service using it should be restarted.\n",
+            history::one_line(path, 120),
+            history::one_line(&v["data"]["backup_snapshot"].as_str().unwrap_or("?").chars().take(8).collect::<String>(), 8),
+            v["seq"].as_u64().unwrap_or(0)
+        ))
+    }
+
     fn remote_key(&self) -> Result<String> {
         let log = run::start_log()?;
         let v = done(run::broker_json(broker(self.cli, &["remote-key"])?, &log)?, "request system remote key")?;
@@ -263,16 +371,21 @@ impl Machine for Real<'_> {
         ))
     }
 
-    fn propose(&self, diff: &str, base: &str, reason: &str) -> Result<u64> {
+    fn propose(&self, diff: &str, base: &str, reason: &str) -> Result<(u64, Option<u64>)> {
         let scratch = scratch_dir()?;
         let file = scratch.path().join("change.diff");
         fs::write(&file, diff)?;
         let log = run::start_log()?;
         let file = file.to_string_lossy();
-        let args = propose_args(&file, base, reason);
+        let mut args = propose_args(&file, base, reason);
+        if let Some(s) = agent_session(std::env::var("TORQ_AGENT_SESSION").ok()) {
+            args.push(format!("--session={s}"));
+        }
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let proposed = done(run::broker_json(broker(self.cli, &args)?, &log)?, "propose")?;
-        proposed["seq"].as_u64().context("the broker did not say which proposal it made")
+        let seq = proposed["seq"].as_u64().context("the broker did not say which proposal it made")?;
+        // Applied at once under a person's trust (ADR-042, 7), if the broker says so.
+        Ok((seq, proposed["trust_applied"]["seq"].as_u64()))
     }
 
     fn proposals(&self, fit: Option<usize>) -> Result<String> {
@@ -309,7 +422,7 @@ impl Machine for Real<'_> {
         let p = done(run::broker_json(broker(self.cli, &["show", &seq_s])?, &log)?, "apply")?;
         // The entry as the ledger has it: its fields at the top (the broker flattens its body).
         let body = &p;
-        let (tier, tainted) = (body["tier"].as_str().unwrap_or("system").to_string(), body["tainted"].as_bool().unwrap_or(false));
+        let tainted = body["tainted"].as_bool().unwrap_or(false);
         let files: Vec<String> = body["data"]["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).map(|f| history::one_line(f, 80)).collect();
         let by = body["data"]["caller"].as_str().or(body["actor"].as_str()).unwrap_or("?");
         // What the change does, as the broker had git write it when it was proposed — never the
@@ -327,23 +440,43 @@ impl Machine for Real<'_> {
             history::one_line(body["ts"].as_str().unwrap_or_default(), 25),
             files.join(", "),
         );
-        let why = match (tier.as_str(), tainted) {
-            (_, true) => "The session that proposed it read untrusted content (the web, mail, a download): check it closely. ",
-            ("system", false) => "This changes the system (all users). ",
-            _ => "",
-        };
+        let (why, confirm) = apply_warning(body);
         if let Some(stop) = self.ask(&format!("{what}{why}Apply? ")).go_on("applied")? {
             return Ok(stop);
         }
+        let minutes = confirm.map(|m| m.to_string());
         let mut args = vec!["apply", &seq_s, "--approved-by", me];
         if tainted {
             args.push("--confirm-tainted"); // asked just now, in words
+        }
+        if let Some(m) = &minutes {
+            args.extend(["--confirm", m]);
         }
         let v = {
             let _p = if crate::asks_for_password(self.cli) { None } else { Some(run::Progress::start("Applying")) };
             done(run::broker_json(broker(self.cli, &args)?, &log)?, "apply")?
         };
-        Ok(format!("applied proposal #{seq} (change #{})\n", v["seq"].as_u64().unwrap_or(0)))
+        Ok(match confirm {
+            Some(m) => format!("applied proposal #{seq} (change #{}) as a commit confirmed: it rolls back in {m} minutes unless you confirm it (configure; commit)\n", v["seq"].as_u64().unwrap_or(0)),
+            None => format!("applied proposal #{seq} (change #{})\n", v["seq"].as_u64().unwrap_or(0)),
+        })
+    }
+
+    fn trust(&self, minutes: Option<u32>) -> Result<String> {
+        let log = run::start_log()?;
+        let me = me()?;
+        let Some(m) = minutes else {
+            let v = done(run::broker_json(broker(self.cli, &["trust-revoke", "--approved-by", &me])?, &log)?, "request system agent trust revoke")?;
+            return Ok(if v["revoked"].is_null() { "You had given the agent no trust to revoke.\n".into() } else { "Your trust in the agent is ended: its proposals wait for you again.\n".into() });
+        };
+        let m_s = m.to_string();
+        let v = done(run::broker_json(broker(self.cli, &["trust-grant", "--minutes", &m_s, "--approved-by", &me])?, &log)?, "request system agent trust")?;
+        Ok(format!(
+            "Until {} ({m} minute{}), the agent's proposals in your own folder apply without asking (change #{}): never a system change, never one from a session that read untrusted text. Each is its own change in the ledger (request system revert <n> undoes it); request system agent trust revoke ends it now.\n",
+            history::one_line(v["data"]["until"].as_str().unwrap_or("?"), 40),
+            if m == 1 { "" } else { "s" },
+            v["seq"].as_u64().unwrap_or(0)
+        ))
     }
 
     fn commit(&self, diff: &str, base: &str, tier: &str, reason: &str, confirm: Option<u32>) -> Result<u64> {
@@ -387,6 +520,66 @@ impl Machine for Real<'_> {
         }
     }
 
+    fn commit_time(&self, text: &str) -> Result<(String, String)> {
+        let clock = history::Clock::system();
+        let t = crate::at::when(text, clock.now, &crate::at::system_today()?, &crate::at::system_local)?;
+        let utc = crate::at::rfc3339(t);
+        let local = history::local_stamp(&utc, &history::Clock { now: clock.now, offset: crate::at::system_local_offset(t).unwrap_or(clock.offset) });
+        Ok((utc, local))
+    }
+
+    fn commit_at(&self, diff: &str, base: &str, tier: &str, reason: &str, at: &str) -> Result<u64> {
+        let scratch = scratch_dir()?;
+        let file = scratch.path().join("change.diff");
+        fs::write(&file, diff)?;
+        let log = run::start_log()?;
+        let file = file.to_string_lossy();
+        let args = propose_args(&file, base, reason);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let proposed = done(run::broker_json(broker(self.cli, &args)?, &log)?, "commit at")?;
+        let seq = proposed["seq"].as_u64().context("the broker did not say which proposal it made")?;
+        // What was shown (and, for the system, asked) must be what the broker schedules.
+        if proposed["tier"].as_str() != Some(tier) {
+            bail!(
+                "not scheduled: the broker treats this as a {} change, not a {tier} one (recorded as proposal {seq}, not applied)",
+                history::one_line(proposed["tier"].as_str().unwrap_or("?"), 20)
+            );
+        }
+        let (seq_s, at_arg, who) = (seq.to_string(), format!("--at={at}"), me()?);
+        let v = done(run::broker_json(broker(self.cli, &["schedule", &seq_s, &at_arg, "--approved-by", &who])?, &log)?, "commit at")?;
+        v["seq"].as_u64().context("the broker did not say what it recorded")
+    }
+
+    fn scheduled(&self) -> Result<Vec<crate::session::Scheduled>> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["scheduled"])?, &log)?, "the commits scheduled")?;
+        let clock = history::Clock::system();
+        Ok(v["scheduled"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| {
+                let at = s["at"].as_str()?;
+                let offset = history::parse_ts(at).and_then(crate::at::system_local_offset).unwrap_or(clock.offset);
+                Some(crate::session::Scheduled {
+                    seq: s["seq"].as_u64()?,
+                    proposal: s["proposal"].as_u64()?,
+                    when: history::local_stamp(at, &history::Clock { now: clock.now, offset }),
+                    by: s["approved_by"].as_str().map(|b| history::one_line(b, 40)),
+                    reason: history::one_line(s["reason"].as_str().unwrap_or_default(), 200),
+                    late: history::parse_ts(at).is_some_and(|t| clock.now > t + crate::at::LATE_SECONDS),
+                })
+            })
+            .collect())
+    }
+
+    fn cancel_scheduled(&self, seq: u64, me: &str) -> Result<u64> {
+        let log = run::start_log()?;
+        let seq_s = seq.to_string();
+        let v = done(run::broker_json(broker(self.cli, &["cancel-scheduled", &seq_s, "--approved-by", me])?, &log)?, "clear system commit")?;
+        v["seq"].as_u64().context("the broker did not say what it recorded")
+    }
+
     fn pending_confirm(&self) -> Result<Option<Waiting>> {
         let log = run::start_log()?;
         let v = match run::broker_status(broker(self.cli, &["status"])?, &log)? {
@@ -416,6 +609,7 @@ impl Machine for Real<'_> {
                 history::one_line(v["pending_confirm"]["deadline"].as_str().unwrap_or("?"), 40)
             ));
         }
+        out.push_str(&trust_lines(&v["trust"]));
         if detail {
             // The facts behind the report, as the broker gives them (`torq-broker status`).
             let fact = |k: &str| match &v[k] {
@@ -714,9 +908,12 @@ impl Machine for Real<'_> {
         let v: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("{file} is not JSON"))?;
         v["url"].as_str().map(String::from).with_context(|| format!("{file} names no releases (url)"))
     }
-    fn check_release(&self, repo: &str, rev: &str) -> Result<String> {
+    fn check_release(&self, repo: &str, rev: &str) -> Result<crate::release::Signed> {
         let _p = run::Progress::start("Checking the release's signature");
         crate::release::check(repo, rev, Path::new(crate::release::SIGNERS))
+    }
+    fn running_version(&self) -> Option<String> {
+        fs::read_to_string("/etc/os-release").ok().and_then(|t| crate::release::os_release_version(&t))
     }
     fn ask(&self, question: &str) -> crate::session::Answer {
         ask_person(question)
@@ -825,6 +1022,92 @@ fn waiting_proposals(entries: &[history::Entry]) -> Vec<&history::Entry> {
 /// `-` (any change of an existing value does: "-   host-name two; …") must not read as an option.
 fn propose_args(diff: &str, base: &str, reason: &str) -> Vec<String> {
     vec!["propose".into(), format!("--diff={diff}"), format!("--base={base}"), format!("--reason={reason}"), "--actor=user".into()]
+}
+
+/// The agent's session at the broker, as the program that started it (`torq-doctor`) hands it to
+/// torqcli: `TORQ_AGENT_SESSION`, an id and nothing else. The broker decides what it means; without
+/// one, the agent's proposal is tainted (ADR-042, amended).
+fn agent_session(var: Option<String>) -> Option<String> {
+    var.filter(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+}
+
+/// What a person is told before applying a proposal, and the minutes of the commit confirmed it is
+/// applied as, if it could cut the machine off (ADR-042, 6).
+fn apply_warning(body: &serde_json::Value) -> (String, Option<u32>) {
+    // What its session read, as the broker recorded it in the proposal's own entry.
+    let read: Option<Vec<String>> = body["data"]["session"]["tainted_by"].as_array().map(|a| a.iter().filter_map(|s| s.as_str()).map(|s| history::one_line(s, 40)).collect());
+    let mut why = String::new();
+    if body["tainted"].as_bool().unwrap_or(false) {
+        let from = match read.as_deref() {
+            Some(r) if !r.is_empty() => format!("Before proposing this, the agent read text that anyone could have written ({}): a log line, a device's name, a web page can carry instructions meant for it. ", r.join(", ")),
+            _ if body["actor"] == "agent" => "The broker cannot vouch for what the program that proposed this read (it named no session TorqOS's agent keeps): treat it as if it read the web. ".into(),
+            _ => "The one who proposed it said it came from untrusted text (the web, mail, a download). ".into(),
+        };
+        why.push_str(&from);
+        why.push_str("Judge the change itself, shown above, not the reason given for it. ");
+    }
+    let cuts: Vec<String> = body["data"]["cuts_off"].as_array().into_iter().flatten().filter_map(|s| s.as_str()).map(|s| history::one_line(s, 80)).collect();
+    let confirm = (!cuts.is_empty()).then_some(CUTS_OFF_MINUTES);
+    if body["tier"] != "user" {
+        why.push_str("This changes the system (all users). ");
+    }
+    if !cuts.is_empty() {
+        why.push_str(&format!(
+            "It changes {}, which could cut this machine off the network or the screen: it is applied as a commit confirmed, and rolls itself back in {CUTS_OFF_MINUTES} minutes unless you confirm it (configure; commit). ",
+            cuts.join(", ")
+        ));
+    }
+    (why, confirm)
+}
+
+/// `show system alarms`: each person's trust in the agent while it holds (the broker's `status`,
+/// `trust`) — not a problem, but what a person must see: changes may land without anyone asked.
+fn trust_lines(trust: &serde_json::Value) -> String {
+    trust
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|g| {
+            format!(
+                "  the agent's proposals in {}'s folder apply without asking until {} (trust #{}; request system agent trust revoke ends it)\n",
+                history::one_line(g["person"].as_str().unwrap_or("?"), 40),
+                history::one_line(g["until"].as_str().unwrap_or("?"), 40),
+                g["seq"].as_u64().unwrap_or(0)
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn trust_is_shown_while_it_holds() {
+    let t = serde_json::json!([{"seq": 12, "person": "viper", "minutes": 30, "until": "2026-11-07T10:30:00Z"}]);
+    assert_eq!(trust_lines(&t), "  the agent's proposals in viper's folder apply without asking until 2026-11-07T10:30:00Z (trust #12; request system agent trust revoke ends it)\n");
+    assert_eq!(trust_lines(&serde_json::Value::Null), "");
+    // Text from the ledger never drives the terminal.
+    assert!(!trust_lines(&serde_json::json!([{"seq": 1, "person": "v\u{1b}[2J", "until": "x"}])).contains('\u{1b}'));
+}
+
+/// How long an agent's change that could cut the machine off waits for a person's confirmation.
+const CUTS_OFF_MINUTES: u32 = 10;
+
+#[test]
+fn a_person_is_told_why_before_applying() {
+    use serde_json::json;
+    let (w, c) = apply_warning(&json!({"tier": "user", "tainted": false, "actor": "agent", "data": {}}));
+    assert_eq!((w.as_str(), c), ("", None));
+    let (w, c) = apply_warning(&json!({"tier": "user", "tainted": true, "actor": "agent", "data": {"session": {"id": "s", "tainted_by": ["read_journal", "show_ledger"]}}}));
+    assert!(w.contains("(read_journal, show_ledger)") && w.contains("not the reason") && c.is_none(), "{w}");
+    let (w, _) = apply_warning(&json!({"tier": "user", "tainted": true, "actor": "agent", "data": {}}));
+    assert!(w.contains("named no session"), "{w}");
+    let (w, c) = apply_warning(&json!({"tier": "system", "tainted": false, "actor": "agent", "data": {"cuts_off": ["networking.wireless.enable"]}}));
+    assert!(w.contains("networking.wireless.enable") && w.contains("commit confirmed"), "{w}");
+    assert_eq!(c, Some(CUTS_OFF_MINUTES));
+    let (w, _) = apply_warning(&json!({"tier": "system", "tainted": false, "actor": "user", "data": {}}));
+    assert!(w.contains("all users"));
+    assert_eq!(agent_session(Some("a".repeat(32))), Some("a".repeat(32)));
+    for bad in ["A".repeat(32), "a".repeat(31), format!("{}; x", "a".repeat(29)), String::new()] {
+        assert_eq!(agent_session(Some(bad.clone())), None, "{bad}");
+    }
 }
 
 /// A `-c` script's commands: split at `;` and newlines, but not inside "double" or 'single' quotes
@@ -1019,6 +1302,35 @@ fn a_command_on_the_command_line() {
         assert!(e.starts_with(why), "{bad:?}: {e}");
     }
 }
+/// `torq agent session start` (its id on standard output) and `torq agent session taint <id>
+/// <source>`: the agent's session at the broker, which keeps its record (ADR-042, amended). The
+/// agent's alone: the broker refuses anyone else's.
+fn agent_session_command(args: &[String]) -> Result<i32> {
+    let usage = "usage: torq agent session start | torq agent session taint <id> <source> | torq agent session show <id> (the agent's, run by torq-doctor)";
+    let cli = Cli { repo: PathBuf::from(REPO), broker: if cfg!(debug_assertions) { std::env::var("TORQ_BROKER").unwrap_or_else(|_| BROKER.into()) } else { BROKER.into() } };
+    let log = run::start_log()?;
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    match a.as_slice() {
+        ["start"] => {
+            let v = done(run::broker_json(broker(&cli, &["session-start"])?, &log)?, "starting the agent's session")?;
+            let id = agent_session(v["session"].as_str().map(String::from)).context("the broker named no session")?;
+            println!("{id}");
+        }
+        ["taint", id, source] => {
+            let id = agent_session(Some(id.to_string())).with_context(|| format!("{usage}: not a session's id"))?;
+            let source = format!("--source={source}");
+            done(run::broker_json(broker(&cli, &["session-taint", &id, &source])?, &log)?, "reporting what the session read")?;
+        }
+        ["show", id] => {
+            let id = agent_session(Some(id.to_string())).with_context(|| format!("{usage}: not a session's id"))?;
+            let v = done(run::broker_json(broker(&cli, &["session", &id])?, &log)?, "reading the session")?;
+            println!("{v}");
+        }
+        _ => bail!("{usage}"),
+    }
+    Ok(0)
+}
+
 fn run_shell(args: &[String]) -> Result<i32> {
     // First-boot setup (the image's console, as root): its own program, not a shell.
     if args == ["setup"] {
@@ -1028,9 +1340,21 @@ fn run_shell(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str) == Some("break-glass") {
         return crate::agent::break_glass(&args[1..]);
     }
+    // The agent's session at the broker (ADR-042, amended): torq-doctor's way to it, as the agent.
+    if args.first().map(String::as_str) == Some("agent") && args.get(1).map(String::as_str) == Some("session") {
+        return agent_session_command(&args[2..]);
+    }
+    // The agent asked to propose (ADR-042, 6): the doctor, with one more tool.
+    if args.first().map(String::as_str) == Some("agent") && args.get(1).map(String::as_str) == Some("propose") {
+        return crate::agent::doctor_mode(&args[2..], true);
+    }
     // A program run as the agent's account (ADR-041): its own entry, not a command of the shell.
     if args.first().map(String::as_str) == Some("agent") {
         return crate::agent::run(&args[1..]);
+    }
+    // Doctor mode (ADR-042): the agent asked one question, as the agent's account.
+    if args.first().map(String::as_str) == Some("doctor") {
+        return crate::agent::doctor_mode(&args[1..], false);
     }
     if args == ["install"] {
         return crate::install::run().map(|()| 0);

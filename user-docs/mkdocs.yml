@@ -85,6 +85,7 @@ nav:
       - Users, passwords and SSH: guide/users-ssh.md
       - Updates: guide/updates.md
       - History and health: guide/history.md
+      - The agent: guide/agent.md
   - Reference:
       - Commands: reference/commands.md
       - Security defaults: reference/security.md

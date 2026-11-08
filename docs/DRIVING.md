@@ -149,7 +149,8 @@ Can run in its own worktree beside M3; it is a configuration, not broker work.
 - [ ] Rung 3, a person's own builds in the tree — its design first (one session, an ADR
       amendment), then code. *Test:* a package from a repo in `/home` installs at user tier and
       `rollback` removes it. **⏹ adversarial:** can a user-tier build run anything as root?
-- [ ] Data: `services syncthing`, `services restic backups`, `request system restore`. *Test:* a
+- [ ] Data: `services syncthing`, `services restic backups`, `request system restore` (the backup and
+      restore built 2026-11-07, `tests/backup.nix`; syncthing not). *Test:* a
       backed-up file returns on a rebuilt VM. **⏹ review:** the backup key is nowhere in the repo.
 - [ ] Approval as a dialog. *Test:* the dialog's text is torqcli's prompt text (one source).
 - [ ] **⏹ audit** — light: the desktop's attack surface (what listens, what the portal grants).

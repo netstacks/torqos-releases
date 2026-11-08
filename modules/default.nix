@@ -12,6 +12,7 @@
     ./unfree.nix
     ./setup.nix
     ./accounts.nix
+    ./backup.nix
     ./host.nix
     ./shell.nix
     ./schema.nix

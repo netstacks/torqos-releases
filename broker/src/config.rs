@@ -54,6 +54,25 @@ pub struct Settings {
     /// Take a snapshot of the data before a change (ADR-038): `{label}`. Empty: this machine does not.
     #[serde(default)]
     pub snapshot: String,
+    /// `commit at`: arm the timer that runs `{broker} run-scheduled {id}` at `{at}` (UTC,
+    /// `YYYY-MM-DD HH:MM:SS UTC`). Empty (an older file): this machine schedules no commits.
+    #[serde(default)]
+    pub commit_at: String,
+    /// `commit at`: stop schedule `{id}`'s timer (the cancel itself is the ledger's; this tidies up).
+    #[serde(default)]
+    pub commit_at_cancel: String,
+    /// The backups the configuration declares (ADR-038, `services.restic.backups`): each one's name, and
+    /// the restic command with its repository and key already set (modules/backup.nix). None: none.
+    #[serde(default)]
+    pub backups: std::collections::BTreeMap<String, String>,
+    /// What restores a path from a backup into the broker's room, confined (backup.rs `RESTORE`):
+    /// `{restic}`, `{snapshot}`, `{room}`, `{path}`.
+    #[serde(default = "restore_default")]
+    pub restore: String,
+}
+
+fn restore_default() -> String {
+    crate::backup::RESTORE.into()
 }
 
 /// What the caller asked for, by flag or `TORQ_*` variable; None where nothing was given.
@@ -66,6 +85,8 @@ pub struct Requested {
     pub activate: Option<String>,
     pub boot: Option<String>,
     pub schedule: Option<String>,
+    pub commit_at: Option<String>,
+    pub commit_at_cancel: Option<String>,
     pub current_system: Option<PathBuf>,
     pub system_profile: Option<PathBuf>,
 }
@@ -124,6 +145,10 @@ impl Settings {
             agent: crate::agent::Limits::default(),
             remote: None,
             snapshot: String::new(),
+            backups: Default::default(),
+            restore: crate::backup::RESTORE.into(),
+            commit_at: crate::at::SCHEDULE.into(),
+            commit_at_cancel: crate::at::CANCEL.into(),
         }
     }
 
@@ -177,6 +202,8 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
             check("--activate-cmd / TORQ_ACTIVATE_CMD", asked.activate.clone(), f.activate.clone());
             check("--boot-cmd / TORQ_BOOT_CMD", asked.boot.clone(), f.boot.clone());
             check("--schedule-cmd / TORQ_SCHEDULE_CMD", asked.schedule.clone(), f.schedule.clone());
+            check("--commit-at-cmd / TORQ_COMMIT_AT_CMD", asked.commit_at.clone(), f.commit_at.clone());
+            check("--commit-at-cancel-cmd / TORQ_COMMIT_AT_CANCEL_CMD", asked.commit_at_cancel.clone(), f.commit_at_cancel.clone());
             check("--current-system / TORQ_CURRENT_SYSTEM", asked.current_system.as_deref().map(s), s(&f.current_system));
             check("--system-profile / TORQ_SYSTEM_PROFILE", asked.system_profile.as_deref().map(s), s(&f.system_profile));
             if !differs.is_empty() {
@@ -203,6 +230,10 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
             agent: defaults.agent,
             remote: defaults.remote,
             snapshot: defaults.snapshot,
+            backups: defaults.backups,
+            restore: defaults.restore,
+            commit_at: asked.commit_at.unwrap_or(defaults.commit_at),
+            commit_at_cancel: asked.commit_at_cancel.unwrap_or(defaults.commit_at_cancel),
         }),
     }
 }
@@ -274,6 +305,10 @@ mod tests {
             agent: crate::agent::Limits::default(),
             remote: None,
             snapshot: String::new(),
+            backups: Default::default(),
+            restore: crate::backup::RESTORE.into(),
+            commit_at: crate::at::SCHEDULE.into(),
+            commit_at_cancel: crate::at::CANCEL.into(),
         }
     }
     fn defaults() -> Settings {
@@ -296,6 +331,8 @@ mod tests {
             Requested { activate: Some("true".into()), ..Default::default() },
             Requested { boot: Some("true".into()), ..Default::default() },
             Requested { schedule: Some("true".into()), ..Default::default() },
+            Requested { commit_at: Some("true".into()), ..Default::default() },
+            Requested { commit_at_cancel: Some("true".into()), ..Default::default() },
             Requested { current_system: Some("/tmp/x".into()), ..Default::default() },
             Requested { system_profile: Some("/tmp/x".into()), ..Default::default() },
         ] {

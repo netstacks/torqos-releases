@@ -7,23 +7,31 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | Command | Does |
 |---|---|
 | `configure` / `config` | enter configuration mode |
+| `configure exclusive` | enter configuration mode with your candidate held by this session alone until you leave it: your other sessions can read it but not change or commit it, and are told which session holds it |
 | `show configuration` | the active configuration (<code>&#124; display set</code> prints it as `set` lines) |
 | `show system alarms` | whether the machine is exactly as its history says, and any pending confirmed commit |
 | `show system ledger [<count>]` | every recorded change, newest first, with its number (`#85`) |
-| `show system commit` | the configurations, numbered for `rollback` |
+| `show system commit` | the configurations, numbered for `rollback`; a commit scheduled with `commit at` first |
 | `show system rollback <n> [compare <m>]` | configuration `<n>`, or what going from `<n>` to `<m>` changes |
 | `show version` | TorqOS, NixOS, the kernel and `torqcli` versions |
 | `show system uptime` | uptime, load and the last change |
 | `show interfaces [<interface>]` | network interfaces' state and addresses |
 | `show system storage` | disks' size and use, and the system versions kept |
+| `show system backups` | the declared backups: their snapshots and how each last ran |
 | `show packages <words>` | search this machine's packages (`*` marks installed ones) |
 | `show services` | the services the configuration turns on, and how SSH is protected |
 | `show users` | people with an account, who is logged in, and their groups |
 | `request system password [<user>]` | change a password (kept outside the configuration) |
-| `request system update [all]` | load the newest signed TorqOS release (`all`: and nixpkgs) into the candidate |
+| `request system update [all]` | load the newest signed TorqOS release (`all`: and nixpkgs) into the candidate; <code>show &#124; compare</code> names its version beside the running one, and says when it is older (a downgrade) |
+| `request system backup key <backup>` | give a backup's key, its passphrase (kept outside the configuration) |
+| `request system restore <backup> [<snapshot>] <path>` | put a path back from a backup, what is there set aside |
 | `request system software rollback <n>` | load configuration `<n>`'s software into the candidate (a downgrade) |
 | `request system revert <change>` | undo one recorded change (`#85` or `85`) |
+| `request system apply <n>` | apply a proposal of the agent's, after showing what it does (says why, if its session read untrusted text; one that could cut you off is applied as a commit confirmed) |
+| `request system agent trust <minutes>` | for up to 60 minutes, the agent's untainted proposals in your own folder apply without asking (asks your password) |
+| `request system agent trust revoke` | end that trust now |
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
+| `clear system commit` | cancel the commit scheduled with `commit at` (asks first; yours, or an administrator's with their password) |
 | <code>help [&lt;command&gt; &#124; &lt;words&gt;]</code> | the commands, one command, or a search of commands and settings |
 
 ## Configuration mode
@@ -38,6 +46,7 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `commit` | apply the candidate (asks first) |
 | `commit check` | build without switching |
 | `commit confirmed [<minutes>]` | apply, and roll back by itself unless confirmed (1–1440, default 10) |
+| `commit at <time>` | approve now, apply then: `HH:MM` (today, or tomorrow if it has passed), `"YYYY-MM-DD HH:MM"`, or RFC 3339; within 30 days, one at a time |
 | `commit comment "<text>"` | commit with a note |
 | `commit and-quit` | commit, then leave configuration mode |
 | `rollback <n> [<place>]` | load configuration `<n>` (or one part of it) into the candidate |

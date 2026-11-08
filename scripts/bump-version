@@ -7,7 +7,7 @@
 #   scripts/bump-version 0.3.0-rc1 --release   # a pre-release of 0.3.0: tagged, `stable` does not move
 #
 # The version a machine reports (/etc/os-release, the console and SSH greetings) is torqcli's, from
-# cli/Cargo.toml; the broker carries the same. Each crate's Cargo.lock names it too, and
+# cli/Cargo.toml; the broker and the agent carry the same. Each crate's Cargo.lock names it too, and
 # package.nix reads it from Cargo.toml. The release workflow refuses a tag that is not
 # `v<this version>` (or `v<this version>-<pre-release>`, e.g. v0.3.0-rc1, which needs no bump).
 #
@@ -47,7 +47,7 @@ pre=${BASH_REMATCH[2]}
 tag=v$new$pre
 
 cd "$(git rev-parse --show-toplevel)"
-crates=(cli broker)
+crates=(cli broker agent)
 cargo_files=("${crates[@]/%//Cargo.toml}" "${crates[@]/%//Cargo.lock}")
 
 # The version in a Cargo.toml's [package] section.
@@ -91,7 +91,7 @@ if [ "$old" = "$new" ]; then
   echo "TorqOS is already $new."
 else
   [ -z "$commit" ] || git diff --quiet HEAD -- "${cargo_files[@]}" \
-    || die "cli/ or broker/'s Cargo files have changes not committed: commit or drop them first."
+    || die "cli/, broker/ or agent/'s Cargo files have changes not committed: commit or drop them first."
   for c in "${crates[@]}"; do
     name=$(toml_name "$c/Cargo.toml")
     # [package]'s version line only, never a dependency's.

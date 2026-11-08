@@ -114,6 +114,56 @@ pub fn refusal(limits: &Limits, touched: &[Touched]) -> Option<String> {
     None
 }
 
+/// The settings whose change could lose the network (and with it a person reaching the machine) or
+/// the screen (ADR-042, 6): an agent's change in one of them is applied as a commit confirmed, which
+/// rolls itself back unless the person, still able to reach the machine, confirms it. `boot` and
+/// `hardware` act at the next start too: the boot default is not moved until the commit is confirmed.
+pub const CUTS_OFF: &[&str] = &[
+    // The network, and the ways in over it.
+    "networking",
+    "systemd.network",
+    "services.openssh",
+    "services.sshd",
+    "services.sshguard",
+    "services.resolved",
+    "services.tailscale",
+    "users.users.*.openssh",
+    "users.extraUsers.*.openssh",
+    // What runs, and what a unit or a file in /etc can change of all of it.
+    "systemd.services",
+    "environment.etc",
+    // The machine itself, and how it starts.
+    "hardware",
+    "boot",
+    // The screen, and the console.
+    "console",
+    "services.getty",
+    "services.kmscon",
+    "services.xserver",
+    "services.displayManager",
+    "services.desktopManager",
+    "services.greetd",
+    "programs.niri",
+];
+
+/// Whether `setting` lies inside `pattern` (dotted, segment by segment; `*` is any one segment).
+fn under(setting: &[String], pattern: &str) -> bool {
+    let p: Vec<&str> = pattern.split('.').collect();
+    setting.len() >= p.len() && p.iter().zip(setting).all(|(a, s)| *a == "*" || a == s)
+}
+
+/// The settings of `touched` that lie inside `CUTS_OFF`, as dotted paths (none: an empty list).
+pub fn cuts_off(touched: &[Touched]) -> Vec<String> {
+    let mut out = Vec::new();
+    for t in touched {
+        let Some(prefix) = settings_prefix(&t.path) else { continue };
+        let mut settings = Vec::new();
+        changed(&prefix, t.before.as_ref(), t.after.as_ref(), &mut settings);
+        out.extend(settings.iter().filter(|s| CUTS_OFF.iter().any(|p| under(s, p))).map(|s| s.join(".")));
+    }
+    out
+}
+
 fn list(items: &[String]) -> String {
     if items.is_empty() {
         "nothing, until the owner lists some (torq.agent.mayPropose)".into()
@@ -176,6 +226,37 @@ mod tests {
         // torq's own tree (system/*.json) by its own prefix.
         assert_eq!(refusal(&limits(&[], &["system.host"]), &[t("system/host.json", Some(json!({"host-name": "a"})), Some(json!({"host-name": "b"})))]), None);
         assert!(refusal(&limits(&[], &["system.host"]), &[t("system/packages.json", Some(json!([])), Some(json!(["jq"])))]).is_some());
+    }
+
+    /// ADR-042, 6: what could lose the network or the screen is named, and nothing else is.
+    #[test]
+    fn what_could_cut_the_machine_off() {
+        let wifi = t("nixos/networking.json", Some(json!({"wireless": {"enable": false}})), Some(json!({"wireless": {"enable": true}})));
+        assert_eq!(cuts_off(&[wifi]), ["networking.wireless.enable"]);
+        let ssh = t("nixos/services.json", Some(json!({})), Some(json!({"openssh": {"settings": {"PasswordAuthentication": false}}, "nginx": {"enable": true}})));
+        assert_eq!(cuts_off(&[ssh]), ["services.openssh.settings.PasswordAuthentication"]);
+        assert!(cuts_off(&[t("nixos/services.json", Some(json!({})), Some(json!({"openssh2": {"enable": true}})))]).is_empty());
+        assert!(cuts_off(&[t("users/viper/packages.json", None, Some(json!(["htop"])))]).is_empty());
+        assert!(cuts_off(&[t("nixos/time.json", Some(json!({})), Some(json!({"timeZone": "UTC"})))]).is_empty());
+        assert_eq!(cuts_off(&[t("nixos/boot.json", Some(json!({})), Some(json!({"kernelParams": ["quiet"]})))]), ["boot.kernelParams"]);
+        // The review of w5: the aliases, a person's SSH keys, units, the console, a VPN, /etc.
+        for (file, after, setting) in [
+            ("nixos/services.json", json!({"sshd": {"enable": false}}), "services.sshd.enable"),
+            ("nixos/services.json", json!({"sshguard": {"enable": true}}), "services.sshguard.enable"),
+            ("nixos/services.json", json!({"tailscale": {"enable": false}}), "services.tailscale.enable"),
+            ("nixos/services.json", json!({"getty": {"autologinUser": "x"}}), "services.getty.autologinUser"),
+            ("nixos/services.json", json!({"kmscon": {"enable": true}}), "services.kmscon.enable"),
+            ("nixos/users.json", json!({"users": {"dev": {"openssh": {"authorizedKeys": {"keys": []}}}}}), "users.users.dev.openssh.authorizedKeys.keys"),
+            ("nixos/users.json", json!({"extraUsers": {"dev": {"openssh": {"authorizedKeys": {"keys": []}}}}}), "users.extraUsers.dev.openssh.authorizedKeys.keys"),
+            ("nixos/systemd.json", json!({"services": {"sshd": {"enable": false}}}), "systemd.services.sshd.enable"),
+            ("nixos/console.json", json!({"keyMap": "fr"}), "console.keyMap"),
+            ("nixos/environment.json", json!({"etc": {"resolv.conf": {"text": ""}}}), "environment.etc.resolv.conf.text"),
+        ] {
+            assert_eq!(cuts_off(&[t(file, Some(json!({})), Some(after))]), [setting], "{setting}");
+        }
+        // `*` is one segment, and only where it is written: a person's other settings are not on it.
+        assert!(cuts_off(&[t("nixos/users.json", Some(json!({})), Some(json!({"users": {"dev": {"shell": "zsh"}}})))]).is_empty());
+        assert!(cuts_off(&[t("nixos/environment.json", Some(json!({})), Some(json!({"systemPackages": ["htop"]})))]).is_empty());
     }
 
     #[test]

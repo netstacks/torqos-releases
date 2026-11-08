@@ -55,6 +55,30 @@ mode. `request system snapshot take` takes one now, before work you may think be
 `request system snapshot delete <n>` removes one, for the room or for what is in it: that goes in the ledger
 first, and there is no undoing it.
 
+## Your data, somewhere else
+
+Snapshots live on the same disk. A backup is NixOS's own restic, set in configuration mode like
+any setting, to a disk, a NAS, SFTP or S3:
+
+```
+set services restic backups nas repository sftp:backup@nas:/torq5
+commit
+```
+
+It holds `/home` and `/var/lib` unless you set `paths`, and never `/var/lib/torq/secrets` (your
+password hashes, and the backup's own key) unless `paths` names it. It runs daily, encrypted.
+
+Its key, the repository's passphrase, is never in the configuration: `request system backup key nas`
+asks for it here, twice, then your password, and keeps it where only the system can read it. The
+ledger says it was given, never what it is. Keep it somewhere else too: without it, nothing in the
+backup can be read. A remote target's own login, an SSH key or S3's keys, you place yourself.
+
+`show system backups` lists each backup's snapshots and how it last ran. `request system restore nas
+/home/you/docs` puts a path back from the newest snapshot, or from one you name:
+`request system restore nas 4bd1d0c5 /home/you/docs`. As with a snapshot, it is written as the owner
+of the folder, what is there now is set aside beside it, it asks an administrator's password, and it
+goes in the ledger.
+
 ## Checking a release yourself
 
 See [Install → Check the download](../start/install.md#2-check-the-download). You need only OpenSSH

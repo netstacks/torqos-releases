@@ -32,7 +32,7 @@ grep -o -m1 vmx /proc/cpuinfo  # must print vmx
 ```
 
 The disk needs no partitioning work: the image's `hardware-configuration.nix` sets
-`autoResize` and `boot.growPartition`, so the root filesystem grows to fill whatever disk the VM
+`autoResize` and grows its last partition, the root, with systemd-repart in the initrd (ADR-032), so the root filesystem grows to fill whatever disk the VM
 is given on first boot.
 
 ### 2. Install TorqOS from a release image
@@ -114,6 +114,7 @@ a `switch` restarts sshd, and a dropped connection would otherwise kill the run.
 cd ~/torq
 nix develop --command bash -c 'cd broker && cargo test'   # the broker's unit tests
 nix develop --command bash -c 'cd cli    && cargo test'   # torqcli's
+nix develop --command bash -c 'cd agent  && cargo test'   # the agent's doctor mode (a scripted model)
 nix flake check                                           # evaluation, tree checks, VM tests
 nix build .#checks.x86_64-linux.trust-loop                # one VM test
 nix build .#checks.x86_64-linux.image                     # the image test: boot, setup, update
@@ -203,7 +204,23 @@ nix build .#nixosConfigurations.dev-vm-x86_64.config.system.build.vm
 
 Fast here, now that KVM is available.
 
-## Later: a local model (the AI layers, M2+)
+## A local model (doctor mode, ADR-042)
 
-Not built yet. When it is, this host can run `llama-server` itself — 64 GB of memory is enough for
-the models in question — and `torq.ai.modelEndpoint` points at it.
+Off by default. On a machine, the owner turns it on in the tree, naming a model file (GGUF) by its
+URL and hash — Nix fetches it when the change is built; nothing is downloaded otherwise:
+
+```
+configure
+set torq agent doctor enable true
+set torq agent model url https://…/model.gguf
+set torq agent model hash sha256-…
+commit
+torq doctor "why is my wifi flaky?"
+```
+
+llama-server then runs on `/run/llama-cpp/llama.sock`; 64 GB here is enough for the models in
+question. The journal is off unless `set torq agent doctor journal true` (then every program run as
+the agent reads it). A remote endpoint instead: `set torq agent doctor endpoint https://…/v1` —
+what the tools return, the configuration included, then leaves the machine — its key in a
+file outside the repo (`torq.agent.doctor.apiKeyFile`). The doctor's unit tests need no model:
+`nix develop --command bash -c 'cd agent && cargo test'`.

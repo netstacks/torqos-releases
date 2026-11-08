@@ -152,6 +152,39 @@ in
       ];
       description = "Schedule the rollback of an unconfirmed commit (a transient timer).";
     };
+    # The declared backup's restore (ADR-038; broker/src/backup.rs RESTORE): restic in a unit of its
+    # own that may write the broker's room and nothing else, make no device, and gain nothing.
+    backupRestoreCommand = lib.mkOption {
+      type = lib.types.str;
+      default = lib.concatStrings [
+        "systemd-run --pipe --wait --collect --quiet --service-type=exec"
+        " -p ProtectSystem=strict -p ReadWritePaths={room} -p PrivateDevices=yes -p PrivateTmp=yes -p NoNewPrivileges=yes"
+        " -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes"
+        " -p 'CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH'"
+        " {restic} --no-cache --no-lock restore {snapshot} --target {room} --include {path} --sparse"
+      ];
+      description = "Restore a path from a backup into the broker's room: `{restic}`, `{snapshot}`, `{room}`, `{path}`. Fixed settings; tests set restic itself.";
+    };
+    # `commit at` (broker/src/at.rs). Fixed settings too; overridden only by tests.
+    commitAtCommand = lib.mkOption {
+      type = lib.types.str;
+      # A wall-clock timer of its own per schedule, retried a bounded number of times while the broker is busy.
+      default = lib.concatStringsSep " " [
+        "systemd-run --quiet --collect --unit=torq-commit-at-{id} --on-calendar={at}"
+        "--timer-property=AccuracySec=1s --property=Restart=on-failure --property=RestartSec=15"
+        "--property=StartLimitIntervalSec=1800 --property=StartLimitBurst=100"
+        "{broker} run-scheduled {id}"
+      ];
+      description = ''
+        Arm the timer of a `commit at`: run `{broker} run-scheduled {id}` at `{at}` (UTC). What is
+        scheduled is the ledger's word: a run finds its schedule there, or does nothing.
+      '';
+    };
+    commitAtCancelCommand = lib.mkOption {
+      type = lib.types.str;
+      default = "systemctl stop torq-commit-at-{id}.timer";
+      description = "Stop a cancelled `commit at`'s timer (the cancel itself is in the ledger, which its run reads).";
+    };
     guardEtcNixos = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -274,6 +307,8 @@ in
         activate = cfg.activateCommand;
         boot = cfg.bootCommand;
         schedule = cfg.scheduleCommand;
+        commitAt = cfg.commitAtCommand;
+        commitAtCancel = cfg.commitAtCancelCommand;
         snapshot = lib.optionalString config.torq.snapshots.enable "${snapshot}/bin/torq-snapshot {action} {label}";
         currentSystem = "/run/current-system";
         systemProfile = "/nix/var/nix/profiles/system";
@@ -298,6 +333,9 @@ in
         agent = { inherit (config.torq.agent.mayPropose) users settings; };
         # The config repo's remote (ADR-036): none, or an SSH URL.
         remote = config.torq.remote.url;
+        # The backups the configuration declares, each with its restic (ADR-038, modules/backup.nix).
+        backups = cfg.backups;
+        restore = cfg.backupRestoreCommand;
       };
      }
 
@@ -439,6 +477,26 @@ in
       account  required       ${pkgs.pam}/lib/security/pam_faillock.so dir=/run/torq/faillock
       account  required       ${pkgs.pam}/lib/security/pam_unix.so
     '';
+
+    # A `commit at` waiting at boot lost its timer (transient): armed again if its time is still to come,
+    # refused on the record if it passed while the machine was down — never applied late. Only for
+    # schedules from an earlier boot (the boot ID they were made in), so a switch that starts this does nothing.
+    systemd.services.torq-commit-at-boot = {
+      description = "Arm again the TorqOS commits scheduled before a restart";
+      # After the clock is set: whether a time has passed is read from it.
+      after = [ "torq-broker-init.service" "torq-confirm-boot.service" "time-sync.target" ];
+      wantedBy = [ "multi-user.target" ];
+      restartIfChanged = false;
+      startLimitIntervalSec = 600;
+      startLimitBurst = 30;
+      serviceConfig = {
+        Type = "exec";
+        RemainAfterExit = true;
+        ExecStart = "${lib.getExe cfg.package} resume-scheduled";
+        Restart = "on-failure"; # busy: try again
+        RestartSec = 5;
+      };
+    };
 
     # A commit confirmed still waiting at boot was not confirmed before the machine restarted: its
     # timer was transient and is gone, and the boot default was never changed, so this boot already

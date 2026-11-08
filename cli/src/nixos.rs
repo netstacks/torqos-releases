@@ -477,6 +477,15 @@ fn did_you_mean(n: &Node, w: &str) -> String {
 /// (no words: true), numbers, text, one of an enum's values, `[ a b ]` for a list, package names,
 /// and for a set of plain values, `<name> <value>` (`environment variables EDITOR vim`). What only
 /// Nix can say (functions, free-form sets) is refused: it belongs in a config file.
+/// A value of a type torqcli cannot see all of: a number, true or false, or the text as written.
+fn free(words: &[String]) -> Value {
+    match words {
+        [w] if w == "true" || w == "false" => Value::Bool(w == "true"),
+        [w] => w.parse::<i64>().map(Value::from).unwrap_or_else(|_| Value::String(w.clone())),
+        _ => Value::Array(words.iter().map(|w| Value::String(w.clone())).collect()),
+    }
+}
+
 pub fn value(ty: &Type, words: &[String]) -> Result<Value> {
     let one = |what: &str| -> Result<&String> {
         match words {
@@ -517,7 +526,8 @@ pub fn value(ty: &Type, words: &[String]) -> Result<Value> {
             }
         }
         "either" => {
-            let (l, r) = (ty.left.as_deref().context("either")?, ty.right.as_deref().context("either")?);
+            // A type the schema cut short (its depth limit) is any value here: NixOS checks it at commit.
+            let (Some(l), Some(r)) = (ty.left.as_deref(), ty.right.as_deref()) else { return Ok(free(words)) };
             match value(l, words) {
                 Ok(v) => v,
                 Err(_) => value(r, words)?,
@@ -623,6 +633,15 @@ mod tests {
     /// A setting's rules come from NixOS's own description of it: closed sets list their values (so
     /// Tab completes them), and `set` refuses what NixOS would — a pattern, a range, a path — saying
     /// the form the setting takes.
+
+    /// A type cut short by the schema's depth (nix.settings's atom): any value, NixOS checks it at
+    /// commit. A number was refused as "not a package name".
+    #[test]
+    fn a_type_cut_short_takes_any_value() {
+        let cut: Type = serde_json::from_str(r#"{"name":"either","left":{"name":"either"},"right":{"name":"package"}}"#).unwrap();
+        assert_eq!(value(&cut, &["21474836480".to_string()]).unwrap(), Value::from(21474836480_i64));
+        assert_eq!(value(&cut, &["true".to_string()]).unwrap(), Value::Bool(true));
+    }
     #[test]
     fn a_value_is_checked_as_nixos_checks_it() {
         let t = tree();

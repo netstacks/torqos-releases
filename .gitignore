@@ -2,5 +2,6 @@ result
 result-*
 broker/target/
 cli/target/
+agent/target/
 *.qcow2
 .direnv/

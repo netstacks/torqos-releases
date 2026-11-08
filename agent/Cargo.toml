@@ -1,0 +1,18 @@
+[package]
+name = "torq-agent"
+version = "0.3.0"
+edition = "2021"
+description = "TorqOS agent (unprivileged, run as torq-agent): doctor mode, read-only tools, proposes nothing"
+license = "Apache-2.0"
+
+[[bin]]
+name = "torq-doctor"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+# The API key's header, handed to curl as a private (0600) file: never on a command line.
+tempfile = "3"
+# A tool program's whole process group stopped at its bounds; a record never written through a link.
+rustix = { version = "1.1.6", features = ["fs", "process"] }

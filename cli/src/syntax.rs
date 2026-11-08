@@ -38,6 +38,8 @@ pub struct CommitOptions {
     pub check: bool,
     pub confirm: Option<u32>,
     pub comment: Option<String>,
+    /// `at <time>`: applied then, approved now (as typed: resolved when committing).
+    pub at: Option<String>,
     /// `and-quit`: leave configuration mode once committed.
     pub and_quit: bool,
 }
@@ -47,10 +49,13 @@ pub struct CommitOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     // Operational mode.
-    Configure,
+    /// `configure [exclusive]`: with `exclusive`, the shared candidate held by this session alone.
+    Configure { exclusive: bool },
     /// `show configuration [path] [| display set|detail]`.
     ShowActive { path: Vec<String>, display: Option<Display> },
     ShowCommits { display: Option<Display> },
+    /// `clear system commit`: cancel the commit scheduled (`commit at`).
+    ClearCommit,
     ShowRollback { n: usize, compare: Option<usize>, display: Option<Display> },
     ShowAlarms { display: Option<Display> },
     /// The proposals waiting for a person (the agent's, ADR-041).
@@ -58,6 +63,8 @@ pub enum Op {
     /// The configuration's remote (ADR-036).
     ShowRemote,
     ShowSnapshots,
+    /// The declared backups: their keys, snapshots and last runs (ADR-038).
+    ShowBackups,
     ShowServices,
     /// `show system ledger [<count>]`: the ledger itself — every change, refused and failed ones too.
     ShowLedger { count: Option<usize> },
@@ -129,6 +136,10 @@ pub enum Request {
     SnapshotDelete { change: u64 },
     /// Put a path back as it was before a change (ADR-038).
     RestoreData { change: u64, path: String },
+    /// A declared backup's key, typed at the terminal and kept outside the configuration (ADR-038).
+    BackupKey { name: String },
+    /// Put a path back from a declared backup (`None`: its newest snapshot).
+    Restore { name: String, snapshot: Option<String>, path: String },
     /// This machine's key for the remote (ADR-036), made the first time.
     RemoteKey,
     /// Clear the remote's alarm (ADR-036), ledgered.
@@ -137,6 +148,10 @@ pub enum Request {
     Pull,
     /// The newest TorqOS (`all`: every input) into the candidate.
     Update { all: bool },
+    /// Session trust (ADR-042): the agent's untainted proposals in one's own folder apply without asking, for `minutes`.
+    Trust { minutes: u32 },
+    /// End one's trust in the agent.
+    TrustRevoke,
     /// An earlier configuration's software into the candidate.
     SoftwareRollback { n: usize },
 }
@@ -213,6 +228,9 @@ pub fn render(op: &Op) -> String {
         if let Some(m) = o.confirm {
             s.push_str(&format!(" confirmed {m}"));
         }
+        if let Some(t) = &o.at {
+            s.push_str(&format!(" at {}", quote(t)));
+        }
         if let Some(c) = &o.comment {
             s.push_str(&format!(" comment {}", quote(c)));
         }
@@ -222,15 +240,18 @@ pub fn render(op: &Op) -> String {
         s
     };
     match op {
-        Op::Configure => "configure".into(),
+        Op::Configure { exclusive: false } => "configure".into(),
+        Op::Configure { exclusive: true } => "configure exclusive".into(),
         Op::ShowActive { path, display } => format!("{}{}", sep("show configuration", path), display_text(display)),
         Op::ShowCommits { display } => format!("show system commit{}", display_text(display)),
+        Op::ClearCommit => "clear system commit".into(),
         Op::ShowRollback { n, compare: None, display } => format!("show system rollback {n}{}", display_text(display)),
         Op::ShowRollback { n, compare: Some(m), display } => format!("show system rollback {n} compare {m}{}", display_text(display)),
         Op::ShowAlarms { display } => format!("show system alarms{}", display_text(display)),
         Op::ShowProposals => "show system proposals".into(),
         Op::ShowRemote => "show system remote".into(),
         Op::ShowSnapshots => "show system snapshots".into(),
+        Op::ShowBackups => "show system backups".into(),
         Op::ShowServices => "show services".into(),
         Op::ShowLedger { count: None } => "show system ledger".into(),
         Op::ShowLedger { count: Some(n) } => format!("show system ledger {n}"),
@@ -247,8 +268,13 @@ pub fn render(op: &Op) -> String {
             Request::Password { user: Some(u) } => format!("request system password {}", quote(u)),
             Request::Revert { change } => format!("request system revert {change}"),
             Request::Apply { proposal } => format!("request system apply {proposal}"),
+            Request::Trust { minutes } => format!("request system agent trust {minutes}"),
+            Request::TrustRevoke => "request system agent trust revoke".into(),
             Request::RestoreData { change, path } => format!("request system snapshot restore {change} {path}"),
             Request::SnapshotTake => "request system snapshot take".into(),
+            Request::BackupKey { name } => format!("request system backup key {}", quote(name)),
+            Request::Restore { name, snapshot: None, path } => format!("request system restore {} {path}", quote(name)),
+            Request::Restore { name, snapshot: Some(s), path } => format!("request system restore {} {s} {path}", quote(name)),
             Request::SnapshotDelete { change } => format!("request system snapshot delete {change}"),
             Request::LedgerAcknowledge => "request system ledger acknowledge".into(),
             Request::RemoteKey => "request system remote key".into(),
@@ -314,7 +340,8 @@ mod tests {
         let v = |s: &str| w(s);
         let (set, detail, diff) = (Some(Display::Set), Some(Display::Detail), Some(Display::Diff));
         vec![
-            (Mode::Operational, Op::Configure),
+            (Mode::Operational, Op::Configure { exclusive: false }),
+            (Mode::Operational, Op::Configure { exclusive: true }),
             (Mode::Operational, Op::ShowActive { path: vec![], display: None }),
             (Mode::Operational, Op::ShowActive { path: v("users dev"), display: set }),
             (Mode::Operational, Op::ShowActive { path: v("system"), display: detail }),
@@ -328,6 +355,7 @@ mod tests {
             (Mode::Operational, Op::ShowProposals),
             (Mode::Operational, Op::ShowRemote),
             (Mode::Operational, Op::ShowSnapshots),
+            (Mode::Operational, Op::ShowBackups),
             (Mode::Operational, Op::ShowAlarms { display: detail }),
             (Mode::Operational, Op::ShowServices),
             (Mode::Operational, Op::ShowVersion),
@@ -344,8 +372,13 @@ mod tests {
             (Mode::Operational, Op::Request(Request::Password { user: Some("dana".into()) })),
             (Mode::Operational, Op::Request(Request::Revert { change: 12 })),
             (Mode::Operational, Op::Request(Request::Apply { proposal: 12 })),
+            (Mode::Operational, Op::Request(Request::Trust { minutes: 30 })),
+            (Mode::Operational, Op::Request(Request::TrustRevoke)),
             (Mode::Operational, Op::Request(Request::RestoreData { change: 12, path: "/home/alice/a".into() })),
             (Mode::Operational, Op::Request(Request::SnapshotTake)),
+            (Mode::Operational, Op::Request(Request::BackupKey { name: "nas".into() })),
+            (Mode::Operational, Op::Request(Request::Restore { name: "nas".into(), snapshot: None, path: "/home/alice/a".into() })),
+            (Mode::Operational, Op::Request(Request::Restore { name: "nas".into(), snapshot: Some("4bd1d0c5".into()), path: "/var/lib/pg".into() })),
             (Mode::Operational, Op::Request(Request::SnapshotDelete { change: 12 })),
             (Mode::Operational, Op::Request(Request::LedgerAcknowledge)),
             (Mode::Operational, Op::Request(Request::RemoteKey)),
@@ -387,9 +420,12 @@ mod tests {
             (Mode::Configuration, Op::Top { then: Some(Box::new(Op::Run(Box::new(Op::ShowServices)))) }),
             (Mode::Configuration, Op::Commit(CommitOptions::default())),
             (Mode::Configuration, Op::Commit(CommitOptions { check: true, ..Default::default() })),
-            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: Some(5), comment: Some("ssh; keys | only \"x\"".into()), and_quit: false })),
+            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: Some(5), comment: Some("ssh; keys | only \"x\"".into()), at: None, and_quit: false })),
             (Mode::Configuration, Op::Commit(CommitOptions { and_quit: true, ..Default::default() })),
-            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: None, comment: Some("why".into()), and_quit: true })),
+            (Mode::Configuration, Op::Commit(CommitOptions { at: Some("10:00".into()), ..Default::default() })),
+            (Mode::Configuration, Op::Commit(CommitOptions { at: Some("2026-11-08 10:00".into()), comment: Some("night".into()), and_quit: true, ..Default::default() })),
+            (Mode::Operational, Op::ClearCommit),
+            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: None, comment: Some("why".into()), at: None, and_quit: true })),
             (Mode::Configuration, Op::Run(Box::new(Op::ShowAlarms { display: None }))),
             (Mode::Configuration, Op::Run(Box::new(Op::ShowActive { path: v("system"), display: None }))),
             (Mode::Configuration, Op::Run(Box::new(Op::ShowRollback { n: 1, compare: Some(0), display: diff }))),
@@ -426,7 +462,7 @@ mod tests {
             (Mode::Configuration, "top top show", "'top' is not a word here (after `top`) (one of: commit, delete, edit"),
             (Mode::Operational, "exit now", "'now' is not a word here: nothing may follow `exit`"),
             (Mode::Operational, "show packages", "needs <word> (words to search for, in names and descriptions)"),
-            (Mode::Operational, "show system", "not a whole command: one of these may follow: alarms, commit, ledger, proposals, remote, rollback, snapshots, storage, uptime"),
+            (Mode::Operational, "show system", "not a whole command: one of these may follow: alarms, backups, commit, ledger, proposals, remote, rollback, snapshots, storage, uptime"),
             (Mode::Operational, "request system revert x", "'x' is not a number (change numbers: 1, 2, …)"),
             (Mode::Configuration, "up 0", "'0' is out of range: levels go from 1 to 10000"),
             (Mode::Configuration, "commit check comment x", "'comment' is not a word here: nothing may follow `commit check`"),

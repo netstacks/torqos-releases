@@ -43,7 +43,7 @@ $ torqcli -c "configure; set users users viper packages htop; commit"
 | | |
 |---|---|
 | operational prompt | `viper@torq-utm>` |
-| enter configuration | `configure` (or `config`) |
+| enter configuration | `configure` (or `config`); `configure exclusive`: the shared candidate yours alone until you leave |
 | configuration prompt | `[edit networking]` line, then `viper@torq-utm#` |
 | add / change | `set environment systemPackages jq` |
 | remove | `delete environment systemPackages jq` (one value); `delete environment systemPackages`, `delete networking` (everything below); not set: a warning |
@@ -66,7 +66,7 @@ refused (nobody could log in), saying to add a key or allow passwords — whethe
 or was on already. `request system revert` checks the same, with the same function
 (`session::ssh_review`).
 
-And: `commit`, `commit check`, `commit confirmed <minutes>`, `commit comment "<text>"`, `commit
+And: `commit`, `commit check`, `commit confirmed <minutes>`, `commit at <time>`, `commit comment "<text>"`, `commit
 and-quit`, `rollback <n> [<place>]`, `up [<n>]`, `top [<command>]` (a command from the top, then
 back where you were — unless it moves), `show system commit`, `?` help, Tab completion, history (↑).
 `?` lists what may come next, `|` after any whole `show`, and `<[Enter]>` when the line would run as
@@ -168,6 +168,34 @@ the same way (`torqcli show system alarms`, `torqcli show configuration '|' grep
 your shell split them, or one argument read as a whole line (`torqcli "show configuration | grep
 host"`); its exit code says whether it worked. Configuration needs `-c`. Interactive sessions of the same user share one
 candidate (as `configure` on a network device); `configure private` is for later.
+
+**`configure exclusive`** (built, cli/src/exclusive.rs): configuration mode with the shared candidate
+held by this session alone, until it leaves configuration mode (`exit`, `exit configuration-mode`,
+Ctrl-D, `commit and-quit`) or torqcli ends. It says so on entering, and on leaving that it let go.
+The person's other interactive sessions can enter configuration mode and read the candidate — as the
+holder saved it, re-read at each command — but every command that would change it (`set`, `delete`,
+`rollback`, `load`, `file edit|delete`, `request system update`, `software rollback`, `pull`) or
+commit it is refused, naming the holder (`torqcli process 4242 on pts/3, since 2026-11-07 14:02:51`);
+`configure` there says the same, and `configure exclusive` is refused. `commit check`, and a `commit`
+of nothing (confirming a commit confirmed: the machine's, not the candidate's), are not refused. The
+lock is the kernel's (`flock` on `candidate.lock` beside the candidate, in the same private folder),
+so it goes with the process that took it: a session killed holding it leaves only what it wrote,
+which the next `configure exclusive` finds free and takes over, saying whose it was ("A lock left by
+a session that ended without leaving configuration mode (…, gone) was taken over"). A reused
+process number cannot keep a lock. A script's private candidate (`-c`) is never locked, nor stopped
+by a lock (`configure exclusive` there says it is private already). Unlike some network devices,
+leaving keeps uncommitted changes, as `configure` does.
+
+The lock is checked again at every write, not only when a command starts, since a command may wait
+(at a question, in the editor, for a paste, for a fetch): the candidate is saved, or removed, while
+holding the lock shared (so a `configure exclusive` meanwhile waits for the write, or the write is
+refused naming the holder), and a commit checks again after its question, before the broker is
+asked. And every interactive session reads the shared candidate afresh at each command, and writes
+it only if it is still as it read it (its bytes' hash, checked and written one session at a time):
+a session idle since another saved it never writes back its old copy ("another session changed the
+candidate since this one read it": the next command reads it as it is now) — with or without a
+lock. A commit made while another session changed or took the candidate keeps that session's
+candidate, and says so.
 
 ## The configuration tree
 
@@ -388,6 +416,41 @@ viper@torq-utm# commit confirmed 5 comment "ssh, keys only"
 viper@torq-utm# commit
 ```
 
+- **`commit at <time>`** (with `comment "…"` and `and-quit`; not with `confirmed` or `check`):
+  approved now, applied then. The time is `HH:MM` (today, or tomorrow if it has passed),
+  `"YYYY-MM-DD HH:MM"` (local, as `date` reads it), or RFC 3339 with its offset; in the future and
+  at most 30 days away (cli/src/at.rs; the broker checks both again). torqcli resolves it before
+  evaluating or asking, then shows and asks as `commit` does (`… Commit at 2026-11-08 22:00:00?`),
+  proposes the candidate with its base, and has the broker `schedule` it; the candidate is the
+  proposal then, and is discarded. The broker (broker/src/at.rs):
+  - is asked over the socket exactly as `apply` is (`schedule` is gated as `apply`: a person's own
+    folder theirs, anything else an administrator's with their password), and refuses a tainted
+    proposal, one without a base, one whose base is not HEAD, or one already applied;
+  - arms a transient timer of its own (`commitAt` in broker.json: `systemd-run … --unit=torq-commit-at-<id>
+    --on-calendar=<at> {broker} run-scheduled <id>`), then ledgers `apply_scheduled`: the proposal,
+    the time, who, the timer's id, the base, and the hash of the diff approved;
+  - at the time applies that proposal as that person: `applied` / `apply_failed` with `scheduled: <n>`.
+    It is refused, `apply_refused` with `scheduled: <n>`, if the configuration has moved on from the
+    base, a commit confirmed is waiting, the proposal was applied meanwhile, or the diff kept beside
+    the ledger is not the one whose hash was approved; or if it is more than 15 minutes past its time
+    (asleep then, a clock stepped since, a broker busy all along), or its approver may no longer (no
+    account by that name, not a person's, or not an administrator, unless the change is wholly their
+    own folder; read from /etc/passwd and /etc/group as the socket reads a caller). Under the broker
+    lock, from the ledger: the
+    timer's id names the schedule, never the proposal;
+  - **one at a time**: a second is refused while one waits. Both would be prepared on the same
+    configuration and the first changes it, so the second could only ever be refused at its time;
+    refusing it now says so while the person is there (torqcli says so before asking anything). One
+    more than 15 minutes past its time without a run is settled, refused on the record, by the next;
+  - after a restart (the timer was transient) arms it again if its time is still to come, or refuses
+    it if the time passed while the machine was down (`torq-commit-at-boot`, after `time-sync.target`:
+    never applied late); each on its own, one that cannot be read or armed again refused on the record.
+- **`clear system commit`** (operational) asks, then cancels it (`cancel-scheduled`: its approver's own,
+  or an administrator's
+  with their password): `apply_cancelled` in the ledger first, then the timer stopped. A run reads
+  the ledger, so nothing outlives a cancel even if the timer could not be stopped.
+  `show system commit` lists it above the configurations: `Scheduled: #57 at … by viper: …`.
+
 The first `commit` shows the comparison and the keys that will be able to log in as viper (it
 refuses if there are none), asks, and says when the change rolls back unless confirmed; the second
 confirms it.
@@ -417,7 +480,7 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | Command | Does |
 |---|---|
 | `show configuration` | the active configuration |
-| `show system commit` | the commit history, numbered for `rollback`, in local time (as the ledger) |
+| `show system commit` | the commit history, numbered for `rollback`, in local time (as the ledger); a commit scheduled with `commit at` first |
 | `show system rollback <n> [compare <m>]` | commit <n>'s configuration, or what going from <n> to <m> changes (<n> is the base, as on a network device) |
 | `show system alarms` | is this machine exactly as its history says? (and any pending confirmed commit) |
 | `show system ledger [<count>]` | every change as the ledger has it (`#85`, who made it), refused and failed ones too |
@@ -435,17 +498,32 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | `save <file>` | (configuration mode) the whole candidate and its config files' content to a file, private |
 | `load override\|merge\|set <file>\|terminal` | (configuration mode) a saved configuration into the candidate, all or nothing; `terminal`: what you paste next, ended by Ctrl-D (brace format, or `set` lines; `#` and `/* … */` comments are left out) |
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
+| `clear system commit` | cancel the commit scheduled with `commit at` (asks first; yours, or an administrator's with their password) |
 | `request system revert <change>` | undo one change, `#85` or `85` (a new change that reverses it; asks unless it only touches your own settings) |
 | `configure` / `config` | enter configuration mode |
+| `configure exclusive` | enter it with the shared candidate held by this session alone, until it leaves: your other sessions read it, cannot change or commit it, and are told which session holds it |
 | `help [<command> \| <words>]` | (both modes) the commands; one command; or a search of commands and settings |
 
-Later: `commit at <time>`, `configure exclusive`. (`save` / `load`: built, S5.)
+(`save` / `load`: built, S5; `configure exclusive` and `commit at`: built, above.)
 
 As built (3e, 4a, 4e): all of the above. The candidate holds the software too (4e): `request system
 update [all]` runs `nix flake update` on the commit the candidate is based on and loads the new
 `flake.lock`; `request system software rollback <n>` loads commit <n>'s; `show | compare` shows it as
 `[edit system software]` (each input's date, a downgrade said so), `| display diff` as the raw
-`flake.lock` diff, and `commit` (system tier: it asks) installs it. `rollback <n>` loads a configuration and keeps the
+`flake.lock` diff, and `commit` (system tier: it asks) installs it. TorqOS itself is named by its
+version where one is known (audit A3): `-   torq 0.2.1 (2026-11-05);` `+   torq 0.2.2 (2026-11-07);`.
+The version before is the running one (`/etc/os-release`, only where it is TorqOS's, and only
+against the configuration in effect); the one after is the release's, read from the very commit
+fetched to check its signature (no second fetch): its number from `cli/Cargo.toml`, and the whole
+tag from the signed commit's message (`TorqOS v0.3.0-rc1`, as release.yml writes it), where it names
+that number — else the number alone, shown as `0.3.0, a release or a pre-release`. It is kept with
+the candidate beside that commit (another commit in the lock: dates), and named when the release is
+checked (`TorqOS release 0123456789ab (TorqOS 0.2.2): signed by …`). Two numbers that differ
+decide, not the dates: an older one says `## TorqOS 0.1.9 is older than 0.2.1, which runs now: a
+downgrade`. Only the numbers: the running version is its source's, which never says a pre-release
+(a machine on 0.3.0-rc1 says 0.3.0), so a pre-release and its release, or the same number rebuilt,
+go by date (`## older software than now: a downgrade`). A source that is not the releases, `request
+system software rollback`, or a release without a version: dates, as before. `rollback <n>` loads a configuration and keeps the
 software loaded into the candidate (and says so); `rollback 0` starts over without it. Loading onto a
 candidate whose base is no longer the active configuration warns that `commit` will be refused.
 

@@ -24,6 +24,12 @@
     ],
     [
       "torq",
+      "agent",
+      "doctor",
+      "package"
+    ],
+    [
+      "torq",
       "schema"
     ],
     [
@@ -817,6 +823,27 @@
       "users",
       "*",
       "passwordFile"
+    ],
+    [
+      "services",
+      "restic",
+      "backups",
+      "*",
+      "passwordFile"
+    ],
+    [
+      "systemd",
+      "services",
+      "restic-backups-*",
+      "environment",
+      "RESTIC_PASSWORD*"
+    ],
+    [
+      "services",
+      "restic",
+      "backups",
+      "*",
+      "rcloneConfig"
     ]
   ],
   "packages": [

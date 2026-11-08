@@ -68,7 +68,9 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`. torqcli is the agent's int
       services at NixOS's paths, the catalog folded in); `show version`, `show system uptime`,
       `show interfaces`, `show system storage` (CLI-DESIGN.md).
 - [ ] Human polish, below M3–M5: the walk of every `?`; a usability check by someone new to TorqOS
-      (installs, removes, undoes and reads the log unaided); `commit at <time>`, `configure exclusive`.
+      (installs, removes, undoes and reads the log unaided). Done: `configure exclusive` (2026-11-07, cli/src/exclusive.rs).
+- [x] `commit at <time>` (approved now, applied then as that person; one at a time; refused if stale;
+      `clear system commit`; `tests/commit-at.nix`, CLI-DESIGN.md).
 
 **First round** (done with the earlier command names; carried over):
 - [x] Broker `--json` for every command (shapes and exit codes in `CLI-DESIGN.md`).
@@ -146,6 +148,11 @@ first.
 - [ ] **Python out** (ADR-032/033): the root grown by systemd-repart instead of growpart; then the
       boot writer is the last thing needing Python. Lanzaboote is deferred to Secure Boot (ADR-033,
       amended 2026-11-03); the branch is deleted, its lessons in the ADR.
+      *(2026-11-07, `work/w6`: the root grown by systemd-repart in the initrd, the record's partition
+      matched first and never grown; the SSH greeting's fastfetch without its Python completions. Left:
+      the boot writer, ~135 MB — a smaller Python under NixOS's script or TorqOS's own writer, each
+      needing tests/boot.nix and a second reviewer (ADR-032, amended 2026-11-07). The installer and
+      image VM tests are still to be run on it.)*
 - [x] **Upstreams** (ADR-039): a source statement on each release; CI fails an image or ISO that
       holds anything nixpkgs marks unfree (redistributable firmware, which it counts as free, is on
       the ISO). *(checks.<system>.free, 2026-11-03: nothing lets an unfree package into either, on
@@ -178,7 +185,7 @@ the sysadmin's audit trail; a laptop's is what makes the agent's access safe.
 - [x] **Strict mode and `torq break-glass`** (ADR-035): sudoers limited to TorqOS's commands; a root
       shell only after a ledger entry, anchored. A VM test that a shell leaves its entry.
 - [x] **Data snapshots before each system change** (ADR-038) on btrfs, in new images; restored by a person, with `request system snapshot restore`. The
-      backup and offering data at `rollback` are not built.
+      backup is built too (2026-11-07, under M4's data item); offering data at `rollback` is not.
 - [x] Ledger hardening carried over: N3 (a torn append), M3 (password change in one transaction),
       the `Ledger-Entry` trailer cross-check.
 
@@ -192,7 +199,8 @@ Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. Can run 
       for a person's own builds in the tree (`users <name> projects`), user tier; what TorqOS refuses
       (`curl | sh`, self-updaters) said where it can see it.
 - [ ] **Data declared** (ADR-038): `services syncthing` and a sync mount as tree settings; the
-      backup (`services restic backups`) with its key outside the repo; `request system restore`;
+      backup (`services restic backups`) with its key outside the repo and `request system restore`
+      (built 2026-11-07: `request system backup key`, `show system backups`, `tests/backup.nix`; KNOWN-GAPS 6zm);
       the restore step in setup's from-a-repository path.
 - [ ] **Approval as a dialog**: a system-tier commit on a desktop asks in a window, with the
       owner's password; the same prompt text torqcli prints.
@@ -202,18 +210,34 @@ Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. Can run 
 On the account M3 made, over the configuration M4 made. The three scenarios of ADR-034 are the
 acceptance tests, each a VM test.
 
-- [ ] **Doctor mode**: `torq-agent` with read-only tools (logs, hardware, config.read, the ledger);
-      "why is my wifi flaky?" — diagnose and explain, propose nothing. Local model by default
-      (ADR-005, llama.cpp); a remote one as a setting.
-- [ ] **Proposals**: `config.propose` → the broker, as `torq-agent`; the allow-list enforced; shown
-      and approved in torqcli or the desktop dialog; `commit confirmed` by default for anything that
-      could lose the screen or the network. Taint tracking (AI-LAYER.md).
-- [ ] **Session trust**: "for the next hour, user-tier changes without asking" — ledgered, revertible,
-      never for system tier.
+- [x] **Doctor mode** (built 2026-11-07 on `work/w3`, ADR-042; `agent/`, `tests/doctor.nix` written,
+      not yet run): `torq doctor "why is my wifi flaky?"` — `torq-doctor` as `torq-agent`, read-only
+      tools only (the journal, hardware, `show configuration`, the ledger, alarms, NixOS option docs);
+      explains, proposes nothing; the session tainted once it reads untrusted text. Local model by
+      default (ADR-005, llama-server on a unix socket); a remote one as a setting.
+- [x] **Proposals**, non-GUI (built 2026-11-07 on `work/w5`, ADR-042 6 as amended; `tests/agent-proposals.nix`
+      written, not yet run): `torq agent propose "<ask>"` — the doctor with `propose_change`, structured
+      words of the tree, through torqcli as the agent, which proposes and stops; the allow-list enforced
+      at the broker; the taint held by the broker (sessions, `broker/src/session.rs`), sessionless
+      proposals tainted; `request system apply` says why one is tainted; an agent's change to the
+      network, SSH, units, /etc, boot, hardware, the console or the display applied only as a `commit confirmed`. Left: the
+      desktop dialog (M4); a VM test of the doctor's own commit (KNOWN-GAPS 6zq).
+- [x] **Session trust**, non-GUI (built 2026-11-07 on `work/w5`, ADR-042 7 as amended): `request system
+      agent trust <minutes>` (at most 60, the person's password, their own folder) and `… revoke`;
+      ledgered (grant, each apply under it, revoke, expiry), shown in `show system alarms`, never system
+      tier, never tainted.
 - [ ] **Build me an application**: the agent writes and builds in the person's home, installs via
       rung 3 (ADR-037), tests, undoes.
 - [ ] **Watch the desktop**: screenshot and input through the compositor's protocols, in the
       person's session; the agent's tooling, not the broker's.
+
+## After 0.3.0: first in the next cycle
+
+- [ ] **One vocabulary for the socket and the ledger** (ADR-044, KNOWN-GAPS 6zp): the crate `torq-wire`
+      (`Request`, `Frame`, the exit codes; `Entry`, `Kind`, `Tier`, `Actor` with an `Unknown` case;
+      `CommitId`, `StorePath`, `SnapshotLabel`) used by broker, torqcli and the agent. Fixture ledgers
+      from today's broker first, each round-tripping byte for byte; then the socket's types, then the
+      kinds, then the newtypes. Typed `data` per kind and splitting `broker/src/lib.rs` after that.
 
 ## Later (not planned now): boot security, and limits on root
 

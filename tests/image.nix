@@ -28,7 +28,8 @@ let
     git="git -c user.name=release -c user.email=release@torqos.invalid -c gpg.format=ssh"
     git init -q -b stable
     git add -A
-    $git -c user.signingkey=../release commit -q -S -m "TorqOS test release"
+    # As the release workflow writes it: the tag in the signed commit's message (torqcli shows it).
+    $git -c user.signingkey=../release commit -q -S -m "TorqOS v${(builtins.fromTOML (builtins.readFile ../cli/Cargo.toml)).package.version}"
     git checkout -q -b forged
     echo "forged" > FORGED
     git add FORGED
@@ -217,7 +218,8 @@ pkgs.testers.runNixOSTest {
         out = as_alice("torqcli -c 'request system update; configure; show | compare'")
         assert "the update moves it to TorqOS's releases (git+https://releases/torqos-releases?ref=stable)" in out, out
         rev = releases.succeed("git -c safe.directory='*' -C /srv/git/torqos-releases.git rev-parse stable").strip()
-        assert f"TorqOS release {rev[:12]}: signed by the TorqOS release key." in out, out
+        version = "${(builtins.fromTOML (builtins.readFile ../cli/Cargo.toml)).package.version}"
+        assert f"TorqOS release {rev[:12]} (TorqOS {version}): signed by the TorqOS release key." in out, out
         assert "+   source git+https://releases/torqos-releases?ref=stable;" in out, out
 
     with subtest("a release the key did not sign is refused, and nothing is loaded"):

@@ -37,6 +37,8 @@
       packages = lib.recursiveUpdate (forSystems allSystems (pkgs: {
         torq-broker = pkgs.callPackage ./broker/package.nix { };
         torq = pkgs.callPackage ./cli/package.nix { };
+        # The agent (ADR-042): doctor mode, run as torq-agent.
+        torq-agent = pkgs.callPackage ./agent/package.nix { };
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
       })) (forSystems linuxSystems (pkgs: {
         # The TorqOS image (docs/INSTALL.md): a disk to download and boot; first-boot setup on its
@@ -58,6 +60,7 @@
         torq.broker.package =
           lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
         torq.cli.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq;
+        torq.agent.doctor.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-agent;
       };
 
       # Helper used by per-machine config repos (see templates/config).
@@ -110,12 +113,17 @@
         broker = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
         trust-loop = import ./tests/trust-loop.nix { inherit pkgs self; };
         socket = import ./tests/socket.nix { inherit pkgs self; };
+        commit-at = import ./tests/commit-at.nix { inherit pkgs self; };
         agent = import ./tests/agent.nix { inherit pkgs self; };
         agent-run = import ./tests/agent-run.nix { inherit pkgs self; };
+        doctor = import ./tests/doctor.nix { inherit pkgs self; };
+        agent-proposals = import ./tests/agent-proposals.nix { inherit pkgs self; };
         remote = import ./tests/remote.nix { inherit pkgs self; };
         adopt = import ./tests/adopt.nix { inherit pkgs self; };
         strict = import ./tests/strict.nix { inherit pkgs self; };
         snapshots = import ./tests/snapshots.nix { inherit pkgs self; };
+        release-path = import ./tests/release-path.nix { inherit pkgs self; };
+        backup = import ./tests/backup.nix { inherit pkgs self; };
         # How a machine starts: a real EFI partition and its boot menu (ADR-033).
         boot = import ./tests/boot.nix { inherit pkgs self; };
         tree = import ./tests/tree.nix { inherit pkgs self; };
@@ -164,11 +172,11 @@
           assert lib.assertMsg (found == [ ]) "Unfree software could reach what TorqOS distributes (ADR-039): ${lib.concatStringsSep "; " found}";
           assert lib.assertMsg (missed == [ ]) "The unfree check misses ${toString (lib.length missed)} of the ways planted in the image";
           pkgs.runCommand "torq-free" { } ''
-            # No second nixpkgs in TorqOS's own Nix (modules, hosts, its two packages): one imported
+            # No second nixpkgs in TorqOS's own Nix (modules, hosts, its three packages): one imported
             # has settings of its own, out of the check above. So nixpkgs' tree is not reached at all
             # (`pkgs.path`, `<nixpkgs>`, NixOS's modules' parent), however it is spelled. And no
             # licence set but TorqOS's own packages': a package relabelled free passes nixpkgs' check.
-            src="${./modules} ${./hosts} ${./broker/package.nix} ${./cli/package.nix}"
+            src="${./modules} ${./hosts} ${./broker/package.nix} ${./cli/package.nix} ${./agent/package.nix}"
             if grep -rnE 'pkgs\.path|<nixpkgs>|import[[:space:]]*\(?[[:space:]]*(inputs\.)?nixpkgs([[:space:]]|\))|modulesPath[[:space:]]*\+[[:space:]]*"/\.\.|NIXPKGS_ALLOW' $src; then
               echo "nixpkgs' tree is reached above: a nixpkgs of its own would be out of the check (ADR-039)."
               exit 1
@@ -208,7 +216,8 @@
           packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer git nixfmt-rfc-style ];
           # The broker links PAM (ADR-040: a system change's password, checked as root).
           buildInputs = [ pkgs.pam ];
-        } // self.packages.${pkgs.stdenv.hostPlatform.system}.torq.filterEnv);
+        } // self.packages.${pkgs.stdenv.hostPlatform.system}.torq.filterEnv
+          // self.packages.${pkgs.stdenv.hostPlatform.system}.torq-agent.doctorEnv);
       });
     };
 }

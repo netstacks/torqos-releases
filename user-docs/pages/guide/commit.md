@@ -44,6 +44,28 @@ alice@torq# commit
 - While a confirmed commit is waiting, no other change can be made, so nobody can confirm your risky
   change by committing their own. Only the person who made it can confirm it.
 
+## Commit at a time
+
+```
+alice@torq# set services openssh enable true
+alice@torq# commit at 22:00 comment "ssh, tonight"
+commit at 2026-11-07 22:00:00 scheduled (#57): it lands then unless the configuration changes first; `clear system commit` cancels it
+```
+
+- `commit at <time>` asks and approves **now** (your password, for a system change) and applies the
+  change **then**, as you. The time is `HH:MM` (today, or tomorrow if that time has passed),
+  `"YYYY-MM-DD HH:MM"` in local time, or RFC 3339 (`2026-11-08T22:00:00+01:00`); no more than 30
+  days ahead.
+- It applies exactly the change you approved. If the configuration has changed by then, or a
+  confirmed commit is waiting, it is **refused**, never applied on top of something else; the
+  history says so either way.
+- One at a time. `show system commit` shows it above the configurations; `clear system commit`
+  cancels it (yours, or an administrator's with their password).
+- If the machine is off or asleep at that time, or it would land more than 15 minutes late, it is
+  refused: it never lands late. It is refused too if you are no longer an administrator by then
+  (unless it only changes your own settings).
+- It does not go with `commit confirmed`: nobody would be there to confirm it.
+
 ## Roll back
 
 **Configuration numbers count backwards**: `0` is the active configuration, `1` the one before it,

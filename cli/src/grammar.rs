@@ -34,6 +34,8 @@ pub enum Value {
     Change,
     /// Minutes to confirm a commit in.
     Minutes,
+    /// When a commit is applied (`commit at`): HH:MM, "YYYY-MM-DD HH:MM", RFC 3339.
+    Time,
     /// A person's account.
     User,
     /// A file anywhere (save, load: in the home folder if relative).
@@ -42,6 +44,10 @@ pub enum Value {
     NixFile,
     /// A network interface of the machine (`show interfaces <interface>`).
     Interface,
+    /// A declared backup's name (`services restic backups <name>`).
+    Backup,
+    /// A backup's snapshot (`latest`, or its id) — or, where it may be left out, the path after it.
+    Snapshot,
     /// Free text (a comment).
     Text,
 }
@@ -54,10 +60,13 @@ impl Value {
             Value::Count => "<count>",
             Value::Change => "<change>",
             Value::Minutes => "<minutes>",
+            Value::Time => "<time>",
             Value::User => "<user>",
             Value::File => "<file>",
             Value::NixFile => "<nix-file>",
             Value::Interface => "<interface>",
+            Value::Backup => "<backup>",
+            Value::Snapshot => "<snapshot>",
             Value::Text => "<\"text\">",
         }
     }
@@ -78,8 +87,14 @@ impl Value {
             // As the ledger writes it (#85) or not.
             Value::Change => whole(w.strip_prefix('#').unwrap_or(w), "change numbers", 1, u64::MAX).map(drop),
             Value::Minutes => whole(w, "minutes", 1, 1440).map(drop),
+            Value::Time => crate::at::form(w),
             Value::User if !w.is_empty() => Ok(()),
             Value::File | Value::NixFile | Value::Interface if !w.is_empty() => Ok(()),
+            // As modules/backup.nix asserts a name is (it names its key's file).
+            Value::Backup if (1..=64).contains(&w.len()) && w.starts_with(|c: char| c.is_ascii_alphanumeric()) && w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') => Ok(()),
+            Value::Backup => bail!("'{w}' is not a backup's name (letters, digits, - and _: show system backups lists them)"),
+            Value::Snapshot if w == "latest" || w.starts_with('/') || ((8..=64).contains(&w.len()) && w.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) => Ok(()),
+            Value::Snapshot => bail!("'{w}' is neither a snapshot (latest, or an id from show system backups) nor a path"),
             Value::Text => Ok(()),
             _ => bail!("an empty word is not a {}", self.placeholder()),
         }
@@ -211,8 +226,9 @@ const DETAIL: &[Display] = &[Display::Detail];
 const COMPARISON: &[Display] = &[Display::Diff];
 
 static ROOTS: &[Node] = &[
+    fixed("clear", "Clear something the machine holds", In::Op).then(&[fixed("system", "This machine", In::Op).then(&[fixed("commit", "Cancel the commit scheduled with commit at (it asks first)", In::Op).whole(|_| Ok(Op::ClearCommit))])]),
     fixed("commit", "Make the candidate the machine's configuration", In::Cf).whole(commit).then(COMMIT_FIRST),
-    fixed("configure", "Edit the configuration (a candidate, until you commit it)", In::Op).top_only().whole(|_| Ok(Op::Configure)),
+    fixed("configure", "Edit the configuration (a candidate, until you commit it)", In::Op).top_only().whole(|_| Ok(Op::Configure { exclusive: false })).then(&[fixed("exclusive", "With the candidate yours alone: your other sessions cannot change it until you leave", In::Op).whole(|_| Ok(Op::Configure { exclusive: true }))]),
     fixed("delete", "Remove a value, a setting, or everything below a place", In::Cf).whole(|r| Ok(Op::Delete { words: r.path.clone() })).then(&[node(Word::Path, "What to remove", In::Cf).whole(|r| Ok(Op::Delete { words: r.path.clone() }))]),
     fixed("edit", "Go down to a part of the configuration", In::Cf).then(&[node(Word::Path, "Where to go", In::Cf).whole(|r| Ok(Op::Edit { words: r.path.clone() }))]),
     fixed("exit", "Leave torqcli", In::Op).top_only().whole(|_| Ok(Op::Exit)),
@@ -244,6 +260,7 @@ static SHOW: &[Node] = &[
 
 static SHOW_SYSTEM: &[Node] = &[
     fixed("alarms", "Whether this machine is as its history says", In::Op).whole(|r| Ok(Op::ShowAlarms { display: r.display })).pipes(Pipes::Views(DETAIL)),
+    fixed("backups", "The backups the configuration declares: whether each has its key, its snapshots, its last run", In::Op).whole(|_| Ok(Op::ShowBackups)).pipes(Pipes::Filters),
     fixed("commit", "The configurations so far, newest first", In::Op).whole(|r| Ok(Op::ShowCommits { display: r.display })).pipes(Pipes::Views(DETAIL)),
     fixed("ledger", "Every change, as the ledger has it (refused and failed ones too)", In::Op).whole(ledger).pipes(Pipes::Filters).then(&[value(Value::Count, "How many entries (20)").whole(ledger).pipes(Pipes::Filters)]),
     fixed("proposals", "Changes proposed and waiting for a person (the agent's): request system apply <n> applies one", In::Op).whole(|_| Ok(Op::ShowProposals)).pipes(Pipes::Filters),
@@ -255,12 +272,15 @@ static SHOW_SYSTEM: &[Node] = &[
 ];
 
 static REQUEST_SYSTEM: &[Node] = &[
+    fixed("agent", "The agent (torq-agent): what it may do without asking", In::Op).then(&[fixed("trust", "For <minutes> (at most 60), the agent's untainted proposals in your own folder apply without asking — never the system's; ledgered; it asks your password", In::Op).then(&[fixed("revoke", "End your trust in the agent now", In::Op).whole(|_| Ok(Op::Request(Request::TrustRevoke))), value(Value::Minutes, "1 to 60").whole(|r| Ok(Op::Request(Request::Trust { minutes: r.number(Value::Minutes).unwrap_or(0) as u32 })))])]),
     fixed("apply", "Apply a change someone else proposed (the agent's): it shows it and asks first", In::Op).then(&[value(Value::Change, "The proposal's number, from show system proposals").whole(|r| Ok(Op::Request(Request::Apply { proposal: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),
+    fixed("backup", "A backup the configuration declares (services restic backups)", In::Op).then(&[fixed("key", "Give its key, typed here: kept root's alone, outside the configuration, never in the ledger (it asks your password)", In::Op).then(&[value(Value::Backup, "The backup's name, from show system backups").whole(|r| Ok(Op::Request(Request::BackupKey { name: r.value(Value::Backup).unwrap_or_default().into() })))])]),
     fixed("ledger", "The ledger", In::Op).then(&[fixed("acknowledge", "You have looked into where it and the repository disagree: say no more of it (ledgered; a new one is said as ever)", In::Op).whole(|_| Ok(Op::Request(Request::LedgerAcknowledge)))]),
     fixed("password", "Change a person's password (yours, or <user>'s)", In::Op).whole(password).then(&[value(Value::User, "Whose (yours, if none)").whole(password)]),
     fixed("pull", "Load the configuration waiting on the remote (its incoming branch) into the candidate: nothing changes until you commit it", In::Op).whole(|_| Ok(Op::Request(Request::Pull))),
     fixed("remote", "The configuration's remote", In::Op).then(&[fixed("clear", "Clear its alarm, having looked into it (ledgered; raised again if still true)", In::Op).whole(|_| Ok(Op::Request(Request::RemoteClear))), fixed("key", "This machine's key for it, to add to the repository as a deploy key (made the first time)", In::Op).whole(|_| Ok(Op::Request(Request::RemoteKey)))]),
     fixed("repair", "Return a machine changed outside TorqOS to its last configuration (it asks first)", In::Op).whole(|_| Ok(Op::Request(Request::Repair))),
+    fixed("restore", "Put a path back from a backup, as its owner: what is there now is set aside, not lost (it asks your password)", In::Op).then(&[value(Value::Backup, "The backup's name, from show system backups").then(&[value(Value::Snapshot, "A snapshot's id, from show system backups — or, for the newest, the path").whole(restore).then(&[value(Value::File, "The path, under /home or /var/lib").whole(restore)])])]),
     fixed("revert", "Undo one change: a new change that reverses it (it asks first, unless it only touches your own settings)", In::Op).then(&[value(Value::Change, "The change's number, from show system ledger").whole(|r| Ok(Op::Request(Request::Revert { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),
     fixed("snapshot", "The data as it was before a change", In::Op).then(&[fixed("delete", "Delete one, for the room or for what is in it: on the record first, and there is no undoing it (it asks your password)", In::Op).then(&[value(Value::Change, "The change's number, from show system snapshots").whole(|r| Ok(Op::Request(Request::SnapshotDelete { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]), fixed("restore", "Put a path back, as its owner: what is there now is set aside, not lost (it asks your password)", In::Op).then(&[value(Value::Change, "The change's number, from show system snapshots").then(&[value(Value::File, "The path, under /home or /var/lib").whole(|r| Ok(Op::Request(Request::RestoreData { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()?, path: r.value(Value::File).map(String::from).unwrap_or_default() })))])]), fixed("take", "Take one now, before work you may think better of (it asks your password)", In::Op).whole(|_| Ok(Op::Request(Request::SnapshotTake)))]),
     fixed("software", "This machine's software", In::Op).then(&[fixed("rollback", "Load an earlier configuration's software into the candidate (a downgrade)", In::Op).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(|r| Ok(Op::Request(Request::SoftwareRollback { n: r.number(Value::Rollback).unwrap_or(0) })))])]),
@@ -288,19 +308,23 @@ static LOAD_FROM: &[Node] = &[
 /// Right after `commit`: `check` stands alone; the rest combine, each once.
 static COMMIT_FIRST: &[Node] = &[
     fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).then(&COMMIT_MORE),
+    fixed("at", "Commit at a time: approved now, applied then (clear system commit cancels it)", In::Cf).once().then(&AT),
     fixed("check", "Check the candidate evaluates, without committing", In::Cf).once().whole(commit),
     fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
     fixed("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)", In::Cf).once().whole(commit).then(&CONFIRMED),
 ];
-static COMMIT_MORE: [Node; 3] = [
+static COMMIT_MORE: [Node; 4] = [
     fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).then(&COMMIT_MORE),
+    fixed("at", "Commit at a time: approved now, applied then (clear system commit cancels it)", In::Cf).once().then(&AT),
     fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
     fixed("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)", In::Cf).once().whole(commit).then(&CONFIRMED),
 ];
 static COMMENT: [Node; 1] = [value(Value::Text, "What the change is for").whole(commit).then(&COMMIT_MORE)];
-static CONFIRMED: [Node; 3] = [
+static AT: [Node; 1] = [value(Value::Time, "HH:MM (today, or tomorrow if it has passed), \"YYYY-MM-DD HH:MM\" (local), or RFC 3339; within 30 days").whole(commit).then(&COMMIT_MORE)];
+static CONFIRMED: [Node; 4] = [
     value(Value::Minutes, "1 to 1440: confirm by committing again").whole(commit).then(&COMMIT_MORE),
     fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).then(&COMMIT_MORE),
+    fixed("at", "Commit at a time: approved now, applied then (clear system commit cancels it)", In::Cf).once().then(&AT),
     fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
 ];
 
@@ -356,6 +380,19 @@ fn password(r: &Read) -> Result<Op> {
     Ok(Op::Request(Request::Password { user: r.value(Value::User).map(String::from) }))
 }
 
+/// `request system restore <backup> [<snapshot>] <path>`: one word after the name is the path (the
+/// newest snapshot); two, the snapshot and the path.
+fn restore(r: &Read) -> Result<Op> {
+    let name = r.value(Value::Backup).unwrap_or_default().to_string();
+    let first = r.value(Value::Snapshot).unwrap_or_default();
+    Ok(Op::Request(match r.value(Value::File) {
+        Some(_) if first.starts_with('/') => bail!("'{first}' is a path: the snapshot comes before it (request system restore {name} <snapshot> <path>)"),
+        Some(path) => Request::Restore { name, snapshot: Some(first.to_string()), path: path.to_string() },
+        None if first.starts_with('/') => Request::Restore { name, snapshot: None, path: first.to_string() },
+        None => bail!("needs <file> (the path, under /home or /var/lib) after the snapshot"),
+    }))
+}
+
 fn update(r: &Read) -> Result<Op> {
     Ok(Op::Request(Request::Update { all: r.has("all") }))
 }
@@ -385,10 +422,14 @@ fn up(r: &Read) -> Result<Op> {
 }
 
 fn commit(r: &Read) -> Result<Op> {
+    if r.has("at") && r.has("confirmed") {
+        bail!("commit at and commit confirmed do not go together: a scheduled commit lands with no one there to confirm it");
+    }
     Ok(Op::Commit(CommitOptions {
         check: r.has("check"),
         confirm: r.has("confirmed").then(|| r.value(Value::Minutes).and_then(|m| m.parse().ok()).unwrap_or(10)),
         comment: r.value(Value::Text).map(String::from),
+        at: r.value(Value::Time).map(String::from),
         and_quit: r.has("and-quit"),
     }))
 }

@@ -29,6 +29,8 @@ struct Cli {
     activate_cmd: Option<String>,
     boot_cmd: Option<String>,
     schedule_cmd: Option<String>,
+    commit_at_cmd: Option<String>,
+    commit_at_cancel_cmd: Option<String>,
     current_system: Option<PathBuf>,
     system_profile: Option<PathBuf>,
     json: bool,
@@ -39,11 +41,22 @@ enum Cmd {
     Init,
     Setup,
     Password { user: String, hash_file: PathBuf, approved_by: String },
-    Propose { diff: PathBuf, reason: String, actor: Actor, tainted: bool, base: Option<String> },
+    Propose { diff: PathBuf, reason: String, actor: Actor, tainted: bool, base: Option<String>, session: Option<String> },
+    SessionStart,
+    SessionTaint { id: String, source: String },
+    SessionShow { id: String },
+    TrustGrant { minutes: u32, approved_by: String },
+    TrustRevoke { approved_by: String },
+    Trust,
     Show { seq: u64 },
     Apply { seq: u64, approved_by: String, confirm_tainted: bool, confirm: Option<u32> },
     Confirm { approved_by: String },
     ExpireConfirm { seq: Option<u64>, reboot: bool },
+    Schedule { seq: u64, at: String, approved_by: String },
+    RunScheduled { timer: u64 },
+    CancelScheduled { seq: u64, approved_by: String },
+    Scheduled,
+    ResumeScheduled,
     Revert { seq: u64, approved_by: String },
     Reconcile { approved_by: String },
     Repair { approved_by: String },
@@ -63,6 +76,9 @@ enum Cmd {
     RestoreData { seq: u64, path: String, approved_by: String },
     SnapshotTake { approved_by: String },
     SnapshotDelete { seq: u64, approved_by: String },
+    Backups,
+    BackupKey { name: String, key_file: PathBuf, approved_by: String },
+    BackupRestore { name: String, snapshot: Option<String>, path: String, approved_by: String },
     AdoptKey { url: String },
     AdoptInspect { url: String },
     Adopt { url: String, own: PathBuf, head: String, tip: String, user: String },
@@ -101,6 +117,8 @@ fn command_line() -> clap::Command {
         .arg(opt("activate-cmd", "TORQ_ACTIVATE_CMD", "Activate an existing system (rollback of an unconfirmed commit); `{system}`."))
         .arg(opt("boot-cmd", "TORQ_BOOT_CMD", "Make a system the boot default (`confirm`); `{system}`, `{profile}`."))
         .arg(opt("schedule-cmd", "TORQ_SCHEDULE_CMD", "Schedule `{broker} expire-confirm {seq}` after `{seconds}` [default: a transient systemd timer]."))
+        .arg(opt("commit-at-cmd", "TORQ_COMMIT_AT_CMD", "`commit at`: arm the timer that runs `{broker} run-scheduled {id}` at `{at}` [default: a transient systemd timer]."))
+        .arg(opt("commit-at-cancel-cmd", "TORQ_COMMIT_AT_CANCEL_CMD", "`commit at`: stop schedule `{id}`'s timer [default: systemctl stop torq-commit-at-{id}.timer]."))
         .arg(path(
             "current-system",
             "TORQ_CURRENT_SYSTEM",
@@ -130,9 +148,26 @@ fn command_line() -> clap::Command {
                 .arg(Arg::new("diff").long("diff").required(true).value_parser(value_parser!(PathBuf)))
                 .arg(Arg::new("reason").long("reason").required(true))
                 .arg(Arg::new("actor").long("actor").default_value("user").value_parser(["user", "agent"]))
-                .arg(flag("tainted", "The proposing session ingested untrusted content (web, email, downloads)."))
-                .arg(Arg::new("base").long("base").help("The commit this change was prepared against: refused if the configuration has moved on.")),
+                .arg(flag("tainted", "The proposing session ingested untrusted content (web, email, downloads): only adds to what the broker's record of the session says."))
+                .arg(Arg::new("base").long("base").help("The commit this change was prepared against: refused if the configuration has moved on."))
+                .arg(Arg::new("session").long("session").help("The agent's session (session-start): the proposal is tainted as the broker's record of it says; an agent's proposal without one is tainted.")),
         )
+        .subcommand(Command::new("session-start").about("The agent starts a session (ADR-042): its record kept by the broker (ledgered in the proposals that cite it); its id printed."))
+        .subcommand(
+            Command::new("session-taint")
+                .about("The agent's session read untrusted text: marked tainted for good (nothing clears it).")
+                .arg(Arg::new("id").required(true))
+                .arg(Arg::new("source").long("source").required(true).help("What it read: a tool's name.")),
+        )
+        .subcommand(Command::new("session").about("The broker's record of one of the agent's sessions.").arg(Arg::new("id").required(true)))
+        .subcommand(
+            Command::new("trust-grant")
+                .about("Session trust (ADR-042): for the next MINUTES (at most 60), the agent's untainted user-tier proposals in the approver's own folder apply without asking; ledgered.")
+                .arg(Arg::new("minutes").long("minutes").required(true).value_parser(value_parser!(u32)))
+                .arg(by()),
+        )
+        .subcommand(Command::new("trust-revoke").about("End the approver's trust in the agent now (ledgered).").arg(by()))
+        .subcommand(Command::new("trust").about("The trust that holds now: whose, and until when."))
         .subcommand(Command::new("show").about("Show a proposal or applied change.").arg(seq()))
         .subcommand(
             Command::new("apply")
@@ -151,6 +186,17 @@ fn command_line() -> clap::Command {
                 .arg(Arg::new("seq").value_parser(value_parser!(u64)).help("Only if this applied change, or the timer it names, is the one waiting."))
                 .arg(flag("reboot", "Run at boot: the machine restarted before the change was confirmed.")),
         )
+        .subcommand(
+            Command::new("schedule")
+                .about("Commit at: approve a proposal now, to be applied at a time (one at a time); its timer applies it then as the one who approved it, unless the configuration has moved on.")
+                .arg(seq())
+                .arg(Arg::new("at").long("at").required(true).help("When: an RFC 3339 time, in the future, at most 30 days away."))
+                .arg(by()),
+        )
+        .subcommand(Command::new("run-scheduled").about("Apply the commit scheduled with this timer id, or refuse it on the record (its timer runs this).").arg(Arg::new("id").required(true).value_parser(value_parser!(u64))))
+        .subcommand(Command::new("cancel-scheduled").about("Cancel a scheduled commit (its `apply_scheduled` entry): ledgered, its timer stopped.").arg(seq()).arg(by()))
+        .subcommand(Command::new("scheduled").about("The commits scheduled and waiting for their time."))
+        .subcommand(Command::new("resume-scheduled").about("At boot: arm again the timers of commits scheduled before the restart; refuse those whose time passed meanwhile."))
         .subcommand(Command::new("revert").about("Undo one applied change: a new commit that reverts it, rebuild, ledger.").arg(seq()).arg(by()))
         .subcommand(
             Command::new("reconcile")
@@ -179,6 +225,9 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("verify-store").about("Check the running system's store paths against what the store recorded when each was built (the audit of M3, M5); kept for status."))
         .subcommand(Command::new("snapshots").about("The snapshots of the data this machine still has (ADR-038)."))
         .subcommand(Command::new("restore-data").about("Put a path back as it was before a change (ADR-038): as its owner, what is there set aside, ledgered.").arg(seq()).arg(Arg::new("path").long("path").required(true)).arg(by()))
+        .subcommand(Command::new("backups").about("The backups the configuration declares (ADR-038): whether each has its key, the snapshots its repository holds, and how it last ran. Read only."))
+        .subcommand(Command::new("backup-key").about("Keep a declared backup's key (its passphrase, read from a file) root's alone, outside the config repo, where its passwordFile points; ledgered without the key.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("key-file").long("key-file").required(true).value_parser(value_parser!(PathBuf))).arg(by()))
+        .subcommand(Command::new("backup-restore").about("Put a path back from a declared backup (ADR-038): restic restores it where only root can reach it, then its owner writes it, what is there set aside; ledgered.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("snapshot").long("snapshot").help("A snapshot's id [default: latest].")).arg(Arg::new("path").long("path").required(true)).arg(by()))
         .subcommand(Command::new("fetch-incoming").about("Fetch the remote's `incoming` branch into the config repo (refs/torq/incoming), for torqcli's `request system pull` to load into a candidate: nothing is applied."))
         .subcommand(Command::new("ledger-acknowledge").about("A person has looked into where the ledger and the repository disagree: said no more, and on the record.").arg(by()))
         .subcommand(Command::new("remote-clear").about("Clear the remote's alarm, having looked into it (ledgered): the next push checks the remote's whole history again, and raises it again if it is still true.").arg(by()))
@@ -205,8 +254,15 @@ fn parse_cli() -> Cli {
             actor: s(sub, "actor").unwrap_or_default().parse().unwrap_or(Actor::User),
             tainted: sub.get_flag("tainted"),
             base: s(sub, "base"),
+            session: s(sub, "session"),
         },
         "show" => Cmd::Show { seq: seq(sub).unwrap_or_default() },
+        "session-start" => Cmd::SessionStart,
+        "session-taint" => Cmd::SessionTaint { id: s(sub, "id").unwrap_or_default(), source: s(sub, "source").unwrap_or_default() },
+        "session" => Cmd::SessionShow { id: s(sub, "id").unwrap_or_default() },
+        "trust-grant" => Cmd::TrustGrant { minutes: sub.get_one::<u32>("minutes").copied().unwrap_or_default(), approved_by: by(sub) },
+        "trust-revoke" => Cmd::TrustRevoke { approved_by: by(sub) },
+        "trust" => Cmd::Trust,
         "apply" => Cmd::Apply {
             seq: seq(sub).unwrap_or_default(),
             approved_by: by(sub),
@@ -215,6 +271,11 @@ fn parse_cli() -> Cli {
         },
         "confirm" => Cmd::Confirm { approved_by: by(sub) },
         "expire-confirm" => Cmd::ExpireConfirm { seq: seq(sub), reboot: sub.get_flag("reboot") },
+        "schedule" => Cmd::Schedule { seq: seq(sub).unwrap_or_default(), at: s(sub, "at").unwrap_or_default(), approved_by: by(sub) },
+        "run-scheduled" => Cmd::RunScheduled { timer: *sub.get_one::<u64>("id").unwrap_or(&0) },
+        "cancel-scheduled" => Cmd::CancelScheduled { seq: seq(sub).unwrap_or_default(), approved_by: by(sub) },
+        "scheduled" => Cmd::Scheduled,
+        "resume-scheduled" => Cmd::ResumeScheduled,
         "revert" => Cmd::Revert { seq: seq(sub).unwrap_or_default(), approved_by: by(sub) },
         "reconcile" => Cmd::Reconcile { approved_by: by(sub) },
         "repair" => Cmd::Repair { approved_by: by(sub) },
@@ -228,6 +289,9 @@ fn parse_cli() -> Cli {
         "remote-clear" => Cmd::RemoteClear { approved_by: by(sub) },
         "ledger-acknowledge" => Cmd::Acknowledge { approved_by: by(sub) },
         "fetch-incoming" => Cmd::FetchIncoming,
+        "backups" => Cmd::Backups,
+        "backup-key" => Cmd::BackupKey { name: s(sub, "name").unwrap_or_default(), key_file: p(sub, "key-file").unwrap_or_default(), approved_by: by(sub) },
+        "backup-restore" => Cmd::BackupRestore { name: s(sub, "name").unwrap_or_default(), snapshot: s(sub, "snapshot"), path: s(sub, "path").unwrap_or_default(), approved_by: by(sub) },
         "snapshots" => Cmd::Snapshots,
         "verify-store" => Cmd::VerifyStore,
         "snapshot-take" => Cmd::SnapshotTake { approved_by: by(sub) },
@@ -247,6 +311,8 @@ fn parse_cli() -> Cli {
         activate_cmd: s(&m, "activate-cmd"),
         boot_cmd: s(&m, "boot-cmd"),
         schedule_cmd: s(&m, "schedule-cmd"),
+        commit_at_cmd: s(&m, "commit-at-cmd"),
+        commit_at_cancel_cmd: s(&m, "commit-at-cancel-cmd"),
         current_system: p(&m, "current-system"),
         system_profile: p(&m, "system-profile"),
         json: m.get_flag("json"),
@@ -312,6 +378,8 @@ fn settings(cli: &mut Cli) -> Result<Settings> {
         activate: cli.activate_cmd.clone(),
         boot: cli.boot_cmd.clone(),
         schedule: cli.schedule_cmd.clone(),
+        commit_at: cli.commit_at_cmd.clone(),
+        commit_at_cancel: cli.commit_at_cancel_cmd.clone(),
         current_system: cli.current_system.clone(),
         system_profile: cli.system_profile.clone(),
     };
@@ -334,6 +402,8 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         .with_system_profile(&s.system_profile)
         .with_confirm_commands(&s.build, &s.activate, &s.boot, &s.schedule)
         .with_snapshots(&s.snapshot)
+        .with_backups(&s.backups)
+        .with_backup_restore(&s.restore)
         .with_people(&s.people)
         .with_agent_limits(&s.agent)
         .with_remote(s.remote.as_deref())
@@ -344,10 +414,11 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
     // afterwards (ADR-036): best-effort, never failing the command.
     let writes = matches!(
         cli.cmd,
-        Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. }
-            | Cmd::ExpireConfirm { .. } | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. }
+        Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. } | Cmd::SessionStart | Cmd::SessionTaint { .. } | Cmd::TrustGrant { .. } | Cmd::TrustRevoke { .. }
+            | Cmd::ExpireConfirm { .. } | Cmd::Schedule { .. } | Cmd::RunScheduled { .. } | Cmd::CancelScheduled { .. } | Cmd::ResumeScheduled | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. } | Cmd::BackupKey { .. } | Cmd::BackupRestore { .. }
     );
     let _push = writes.then_some(PushAfter(&b, b.ledger.read_all().map_or(0, |l| l.len())));
+    let sched = torq_broker::at::Scheduler::new(&b, &s.commit_at, &s.commit_at_cancel);
     match cli.cmd {
         Cmd::Serve => unreachable!("served before the settings are read"),
         Cmd::RemoteKey => {
@@ -449,16 +520,19 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 println!("initialised {} (ledger: {})", s.repo.display(), b.ledger.path().display());
             }
         }
+        Cmd::Backups => println!("{}", serde_json::to_string(&b.backups())?),
+        Cmd::BackupKey { name, key_file, approved_by } => {
+            let key = plain_file(&key_file, torq_broker::backup::KEY_MAX as u64 + 1, "the key")?;
+            let e = b.set_backup_key(&name, key.strip_suffix('\n').unwrap_or(&key), &approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        Cmd::BackupRestore { name, snapshot, path, approved_by } => println!("{}", serde_json::to_string(&b.restore_backup(&name, snapshot.as_deref(), &path, &approved_by)?)?),
         Cmd::Password { user, hash_file, approved_by } => {
             // (A file, as a diff is passed: the caller's standard input is sudo's, for its own password.)
-            // A plain file, never followed through a link (it is opened as root).
-            use std::os::unix::fs::OpenOptionsExt;
-            let f = std::fs::OpenOptions::new().read(true).custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32).open(&hash_file).context("reading the hash (a plain file, not a link)")?;
-            if !f.metadata()?.is_file() {
-                anyhow::bail!("the hash file is not a plain file");
-            }
-            let mut hash = String::new();
-            std::io::Read::read_to_string(&mut std::io::Read::take(f, 1024), &mut hash)?;
+            let hash = plain_file(&hash_file, 1024, "the hash")?;
             let e = b.set_password(&user, hash.trim_end(), &approved_by)?;
             if json {
                 return print_entry(&e);
@@ -472,18 +546,54 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             }
             println!("set up: change #{} (commit {})", e.body.seq, e.body.data["commit"].as_str().unwrap_or_default());
         }
-        Cmd::Propose { diff, reason, actor, tainted, base } => {
-            let e = b.propose_on(base.as_deref(), &diff, &reason, actor, tainted)?;
+        Cmd::Propose { diff, reason, actor, tainted, base, session } => {
+            let e = b.propose_in(base.as_deref(), &diff, &reason, actor, tainted, session.as_deref())?;
+            // Under a person's trust, applied now (session.rs): the proposal stands either way.
+            let trusted = torq_broker::session::apply_trusted(&b, &e);
             if json {
-                return print_entry(&e);
+                let mut v = serde_json::to_value(&e)?;
+                match &trusted {
+                    Ok(Some(a)) => v["trust_applied"] = serde_json::to_value(a)?,
+                    Ok(None) => {}
+                    Err(err) => v["trust_error"] = format!("{err:#}").into(),
+                }
+                println!("{v}");
+                return Ok(());
+            }
+            match &trusted {
+                Ok(Some(a)) => println!("applied under {}'s trust as change #{}", printable(a.body.approved_by.as_deref().unwrap_or("?")), a.body.seq),
+                Ok(None) => {}
+                Err(err) => println!("not applied under trust: {}", printable(&format!("{err:#}"))),
             }
             println!("proposal #{} · tier: {} · actor: {}{}", e.body.seq, e.body.tier, e.body.actor,
-                if tainted { " · TAINTED" } else { "" });
+                if e.body.tainted { " · TAINTED" } else { "" });
             // (Names as the proposal wrote them: escaped as everything shown is, audit of 2026-11-01, L1.)
             println!("files: {}", printable(&e.body.data["files"].to_string()));
             println!("\n{}", printable_text(&b.proposal_text(&e, "diff").unwrap_or_default()));
             println!("approve with: torq-broker apply {} --approved-by <name>", e.body.seq);
         }
+        Cmd::SessionStart => {
+            let r = torq_broker::session::start(&b)?;
+            println!("{}", json!({ "session": r.id }));
+        }
+        Cmd::SessionTaint { id, source } => println!("{}", serde_json::to_string(&torq_broker::session::taint(&b, &id, &source)?)?),
+        Cmd::SessionShow { id } => match torq_broker::session::read(&b, &id)? {
+            Some(r) => println!("{}", serde_json::to_string(&r)?),
+            None => anyhow::bail!("no such session"),
+        },
+        Cmd::TrustGrant { minutes, approved_by } => {
+            let e = torq_broker::session::grant(&b, &approved_by, minutes)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{}): until {}", printable(&e.body.reason), e.body.seq, e.body.data["until"].as_str().unwrap_or("?"));
+        }
+        Cmd::TrustRevoke { approved_by } => match (torq_broker::session::revoke(&b, &approved_by)?, json) {
+            (e, true) => println!("{}", json!({ "revoked": e })),
+            (Some(e), false) => println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq),
+            (None, false) => println!("{} has no trust in the agent to revoke", printable(&approved_by)),
+        },
+        Cmd::Trust => println!("{}", json!({ "trust": torq_broker::session::active(&b.ledger.read_all()?) })),
         Cmd::Show { seq } => {
             let mut e = b.ledger.get(seq)?;
             // A proposal's diff and what it does, from beside the ledger, as if they were in it: what a
@@ -530,6 +640,31 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             (Some(e), false) => println!("{} (ledger #{})", e.body.reason, e.body.seq),
             (None, false) => println!("nothing is waiting for confirmation"),
         },
+        Cmd::Schedule { seq, at, approved_by } => {
+            let e = sched.schedule(seq, &approved_by, &at)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("proposal #{seq} is scheduled for {} (ledger #{}): torq-broker cancel-scheduled {} cancels it", e.body.data["at"].as_str().unwrap_or("?"), e.body.seq, e.body.seq);
+        }
+        Cmd::RunScheduled { timer } => match (sched.run(timer)?, json) {
+            (e, true) => println!("{}", json!({ "ran": e })),
+            (Some(e), false) => println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq),
+            (None, false) => println!("nothing is scheduled by that id"),
+        },
+        Cmd::CancelScheduled { seq, approved_by } => {
+            let e = sched.cancel(seq, &approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        Cmd::Scheduled => println!("{}", json!({ "scheduled": sched.scheduled()? })),
+        Cmd::ResumeScheduled => {
+            for e in sched.resume()? {
+                println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+            }
+        }
         Cmd::Revert { seq, approved_by } => {
             let e = b.revert(seq, &approved_by)?;
             if json {
@@ -608,6 +743,8 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                         "torn": s.torn,
                         "store_modified": s.store_modified,
                         "remote_alarm": s.remote_alarm.as_ref().map(|a| json!({ "at": a.at, "why": a.why })),
+                        // A person's trust in the agent, while it holds: shown, not a problem.
+                        "trust": torq_broker::session::active(&b.ledger.read_all().unwrap_or_default()),
                     })
                 );
                 std::process::exit(if s.busy.is_some() { 75 } else if problems.is_empty() { 0 } else { 1 });
@@ -646,6 +783,18 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
     Ok(())
 }
 
+/// A small file a secret came in (a hash, a backup's key): a plain file, never followed through a link
+/// (it is opened as root), at most `max` bytes of it.
+fn plain_file(path: &Path, max: u64, what: &str) -> Result<String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32).open(path).with_context(|| format!("reading {what} (a plain file, not a link)"))?;
+    if !f.metadata()?.is_file() {
+        anyhow::bail!("{what} is not in a plain file");
+    }
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut std::io::Read::take(f, max), &mut s)?;
+    Ok(s)
+}
 
 /// Ledger text and proposed diffs are written by whoever proposed, the agent included, and must not
 /// be able to make one thing look like another on a terminal (escape sequences, carriage returns,
