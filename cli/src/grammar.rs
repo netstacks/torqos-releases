@@ -125,6 +125,9 @@ pub enum Pipes {
     Filters,
     /// Filters, and these `| display` views.
     Views(&'static [Display]),
+    /// A command that does something as it goes (`commit`, `request system update`): `| display
+    /// detail` alone — each step shown as it happens. No filters: what it prints is not data.
+    Steps,
     /// The candidate's `show`: `| compare`, `| display set|detail` (after compare: `| display diff`),
     /// and filters.
     Candidate,
@@ -227,7 +230,7 @@ const COMPARISON: &[Display] = &[Display::Diff];
 
 static ROOTS: &[Node] = &[
     fixed("clear", "Clear something the machine holds", In::Op).then(&[fixed("system", "This machine", In::Op).then(&[fixed("commit", "Cancel the commit scheduled with commit at (it asks first)", In::Op).whole(|_| Ok(Op::ClearCommit))])]),
-    fixed("commit", "Make the candidate the machine's configuration", In::Cf).whole(commit).then(COMMIT_FIRST),
+    fixed("commit", "Make the candidate the machine's configuration", In::Cf).whole(commit).pipes(Pipes::Steps).then(COMMIT_FIRST),
     fixed("configure", "Edit the configuration (a candidate, until you commit it)", In::Op).top_only().whole(|_| Ok(Op::Configure { exclusive: false })).then(&[fixed("exclusive", "With the candidate yours alone: your other sessions cannot change it until you leave", In::Op).whole(|_| Ok(Op::Configure { exclusive: true }))]),
     fixed("delete", "Remove a value, a setting, or everything below a place", In::Cf).whole(|r| Ok(Op::Delete { words: r.path.clone() })).then(&[node(Word::Path, "What to remove", In::Cf).whole(|r| Ok(Op::Delete { words: r.path.clone() }))]),
     fixed("edit", "Go down to a part of the configuration", In::Cf).then(&[node(Word::Path, "Where to go", In::Cf).whole(|r| Ok(Op::Edit { words: r.path.clone() }))]),
@@ -283,8 +286,8 @@ static REQUEST_SYSTEM: &[Node] = &[
     fixed("restore", "Put a path back from a backup, as its owner: what is there now is set aside, not lost (it asks your password)", In::Op).then(&[value(Value::Backup, "The backup's name, from show system backups").then(&[value(Value::Snapshot, "A snapshot's id, from show system backups — or, for the newest, the path").whole(restore).then(&[value(Value::File, "The path, under /home or /var/lib").whole(restore)])])]),
     fixed("revert", "Undo one change: a new change that reverses it (it asks first, unless it only touches your own settings)", In::Op).then(&[value(Value::Change, "The change's number, from show system ledger").whole(|r| Ok(Op::Request(Request::Revert { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),
     fixed("snapshot", "The data as it was before a change", In::Op).then(&[fixed("delete", "Delete one, for the room or for what is in it: on the record first, and there is no undoing it (it asks your password)", In::Op).then(&[value(Value::Change, "The change's number, from show system snapshots").whole(|r| Ok(Op::Request(Request::SnapshotDelete { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]), fixed("restore", "Put a path back, as its owner: what is there now is set aside, not lost (it asks your password)", In::Op).then(&[value(Value::Change, "The change's number, from show system snapshots").then(&[value(Value::File, "The path, under /home or /var/lib").whole(|r| Ok(Op::Request(Request::RestoreData { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()?, path: r.value(Value::File).map(String::from).unwrap_or_default() })))])]), fixed("take", "Take one now, before work you may think better of (it asks your password)", In::Op).whole(|_| Ok(Op::Request(Request::SnapshotTake)))]),
-    fixed("software", "This machine's software", In::Op).then(&[fixed("rollback", "Load an earlier configuration's software into the candidate (a downgrade)", In::Op).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(|r| Ok(Op::Request(Request::SoftwareRollback { n: r.number(Value::Rollback).unwrap_or(0) })))])]),
-    fixed("update", "Load the newest TorqOS into the candidate (nothing changes until you commit it)", In::Op).whole(update).then(&[fixed("all", "Every input, nixpkgs too", In::Op).whole(update)]),
+    fixed("software", "This machine's software", In::Op).then(&[fixed("rollback", "Load an earlier configuration's software into the candidate (a downgrade)", In::Op).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(|r| Ok(Op::Request(Request::SoftwareRollback { n: r.number(Value::Rollback).unwrap_or(0), detail: r.display.is_some() }))).pipes(Pipes::Steps)])]),
+    fixed("update", "Load the newest TorqOS into the candidate (nothing changes until you commit it)", In::Op).whole(update).pipes(Pipes::Steps).then(&[fixed("all", "Every input, nixpkgs too", In::Op).whole(update).pipes(Pipes::Steps)]),
 ];
 
 static FILE: &[Node] = &[
@@ -307,23 +310,23 @@ static LOAD_FROM: &[Node] = &[
 
 /// Right after `commit`: `check` stands alone; the rest combine, each once.
 static COMMIT_FIRST: &[Node] = &[
-    fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).then(&COMMIT_MORE),
+    fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).pipes(Pipes::Steps).then(&COMMIT_MORE),
     fixed("at", "Commit at a time: approved now, applied then (clear system commit cancels it)", In::Cf).once().then(&AT),
-    fixed("check", "Check the candidate evaluates, without committing", In::Cf).once().whole(commit),
+    fixed("check", "Check the candidate evaluates, without committing", In::Cf).once().whole(commit).pipes(Pipes::Steps),
     fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
-    fixed("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)", In::Cf).once().whole(commit).then(&CONFIRMED),
+    fixed("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)", In::Cf).once().whole(commit).pipes(Pipes::Steps).then(&CONFIRMED),
 ];
 static COMMIT_MORE: [Node; 4] = [
-    fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).then(&COMMIT_MORE),
+    fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).pipes(Pipes::Steps).then(&COMMIT_MORE),
     fixed("at", "Commit at a time: approved now, applied then (clear system commit cancels it)", In::Cf).once().then(&AT),
     fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
-    fixed("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)", In::Cf).once().whole(commit).then(&CONFIRMED),
+    fixed("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)", In::Cf).once().whole(commit).pipes(Pipes::Steps).then(&CONFIRMED),
 ];
-static COMMENT: [Node; 1] = [value(Value::Text, "What the change is for").whole(commit).then(&COMMIT_MORE)];
-static AT: [Node; 1] = [value(Value::Time, "HH:MM (today, or tomorrow if it has passed), \"YYYY-MM-DD HH:MM\" (local), or RFC 3339; within 30 days").whole(commit).then(&COMMIT_MORE)];
+static COMMENT: [Node; 1] = [value(Value::Text, "What the change is for").whole(commit).pipes(Pipes::Steps).then(&COMMIT_MORE)];
+static AT: [Node; 1] = [value(Value::Time, "HH:MM (today, or tomorrow if it has passed), \"YYYY-MM-DD HH:MM\" (local), or RFC 3339; within 30 days").whole(commit).pipes(Pipes::Steps).then(&COMMIT_MORE)];
 static CONFIRMED: [Node; 4] = [
-    value(Value::Minutes, "1 to 1440: confirm by committing again").whole(commit).then(&COMMIT_MORE),
-    fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).then(&COMMIT_MORE),
+    value(Value::Minutes, "1 to 1440: confirm by committing again").whole(commit).pipes(Pipes::Steps).then(&COMMIT_MORE),
+    fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).pipes(Pipes::Steps).then(&COMMIT_MORE),
     fixed("at", "Commit at a time: approved now, applied then (clear system commit cancels it)", In::Cf).once().then(&AT),
     fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
 ];
@@ -394,7 +397,7 @@ fn restore(r: &Read) -> Result<Op> {
 }
 
 fn update(r: &Read) -> Result<Op> {
-    Ok(Op::Request(Request::Update { all: r.has("all") }))
+    Ok(Op::Request(Request::Update { all: r.has("all"), detail: r.display.is_some() }))
 }
 
 fn file(r: &Read, action: FileAction) -> Result<Op> {
@@ -431,6 +434,7 @@ fn commit(r: &Read) -> Result<Op> {
         comment: r.value(Value::Text).map(String::from),
         at: r.value(Value::Time).map(String::from),
         and_quit: r.has("and-quit"),
+        detail: r.display.is_some(),
     }))
 }
 
@@ -676,8 +680,10 @@ fn apply_pipes(node: &Node, segments: &mut [Vec<String>], read: &mut Read, befor
             bail!("`{}` prints nothing to filter", before.join(" "));
         }
         let own = if filters.is_empty() { pipe_words(node, read) } else { vec![] };
-        let paging = (!read.no_more).then(|| "no-more".to_string());
-        let offered: Vec<String> = own.iter().chain(&filter_names).chain(&paging).cloned().collect();
+        // A command's steps are no output to filter: `| display detail` alone.
+        let filter_names: &[String] = if node.pipes == Pipes::Steps { &[] } else { &filter_names };
+        let paging = (!read.no_more && node.pipes != Pipes::Steps).then(|| "no-more".to_string());
+        let offered: Vec<String> = own.iter().chain(filter_names).chain(&paging).cloned().collect();
         let Some(first) = seg.first().cloned() else { bail!("a | needs something after it (one of: {})", offered.join(", ")) };
         let word = match resolve(&first, &offered, &after) {
             Ok(w) => w,
@@ -738,7 +744,7 @@ pub fn pipe_words(node: &Node, read: &Read) -> Vec<String> {
     if node.pipes == Pipes::Candidate && !read.compare && read.display.is_none() {
         w.push("compare".to_string());
     }
-    if matches!(node.pipes, Pipes::Candidate | Pipes::Views(_)) && read.display.is_none() && !views(node, read).is_empty() {
+    if matches!(node.pipes, Pipes::Candidate | Pipes::Views(_) | Pipes::Steps) && read.display.is_none() && !views(node, read).is_empty() {
         w.push("display".into());
     }
     w
@@ -750,6 +756,7 @@ pub fn views(node: &Node, read: &Read) -> Vec<String> {
         Pipes::Candidate if read.compare => COMPARISON,
         Pipes::Candidate => CONFIGURATION_VIEWS,
         Pipes::Views(v) => v,
+        Pipes::Steps => DETAIL,
         _ => &[],
     };
     v.iter().map(|d| d.name().to_string()).collect()
@@ -835,9 +842,16 @@ pub fn pipe_next(mode: Mode, words: &[String]) -> Vec<(String, String, Option<Va
             let mut out: Vec<(String, String, Option<Value>)> = Vec::new();
             if filters.is_empty() {
                 for w in pipe_words(node, &walked.read) {
-                    let help = if w == "compare" { "What the candidate changes" } else { "Show it differently" };
+                    let help = match (w.as_str(), node.pipes) {
+                        ("compare", _) => "What the candidate changes",
+                        (_, Pipes::Steps) => "Show what it does as it does it",
+                        _ => "Show it differently",
+                    };
                     out.push((w, help.to_string(), None));
                 }
+            }
+            if node.pipes == Pipes::Steps {
+                return out;
             }
             out.extend(crate::filter::FILTERS.iter().map(|t| (t.name.to_string(), t.help.to_string(), None)));
             if !walked.read.no_more {
@@ -851,6 +865,7 @@ pub fn pipe_next(mode: Mode, words: &[String]) -> Vec<(String, String, Option<Va
             let help = match v.as_str() {
                 "set" => "As set commands",
                 "detail" if node.pipes == Pipes::Candidate || matches!(node.pipes, Pipes::Views(x) if x.contains(&Display::Set)) => "With the files and commit behind it",
+                "detail" if node.pipes == Pipes::Steps => "Each step as it happens, how long it took, and Nix's and the broker's own output",
                 "detail" => "With the commits and store paths behind it",
                 _ => "As the raw diff of the files (what the broker records)",
             };

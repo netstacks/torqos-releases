@@ -40,6 +40,7 @@ mod ui;
 mod nixerr;
 mod setup;
 mod install;
+mod evalcache;
 
 use anyhow::{bail, Context, Result};
 
@@ -225,46 +226,20 @@ fn asks_for_password(cli: &Cli) -> bool {
     }
 }
 
-/// The machine's owner (`torq.user`) in the configuration at `copy`: the one user the catalog's SSH
-/// admits.
-fn owner(copy: &Path, host: &str) -> Result<String> {
-    let out = Command::new("nix")
-        // As the broker builds it: a flake.lock that does not match flake.nix is an error, not re-locked.
-        .args(["eval", "--no-update-lock-file", "--raw"])
-        .arg(format!("{}#nixosConfigurations.{host}.config.torq.user", flake_ref(copy)))
-        .output()
-        .context("running nix eval")?;
-    if !out.status.success() {
-        bail!("cannot read this machine's owner: {}", last_error(&out.stderr));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
+/// The owner SSH admits, and each key that will get in: (a warning for its options, what it is, where from).
+type Admitted = (String, Vec<(String, String, String)>);
 
-/// Who will be able to log in as the owner over SSH under the configuration being approved (`copy`,
-/// already changed): the files sshd reads (`services.openssh.authorizedKeysFiles`) and the keys
-/// declared in the config (`users.users.<owner>.openssh.authorizedKeys`, which NixOS writes to
-/// /etc/ssh/authorized_keys.d/<owner> — taken from the config, not from what is running now).
-/// One description per key line, as `ssh-keygen -l` shows it, so the person approving sees exactly
-/// whose keys will get in.
-fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<(String, String, String)>> {
-    if !pkg::valid_user(owner) {
-        bail!("'{owner}' is not a valid user name");
+/// Who will be able to log in as the owner over SSH under an evaluated configuration (`admits`, as
+/// `SSH_NIX` reads it: SSH on): the files sshd reads (`services.openssh.authorizedKeysFiles`) and the
+/// keys declared in the config (`users.users.<owner>.openssh.authorizedKeys`, which NixOS writes to
+/// /etc/ssh/authorized_keys.d/<owner> — taken from the config, not from what is running now). The
+/// owner, and one description per key line, as `ssh-keygen -l` shows it, so the person approving
+/// sees exactly whose keys will get in.
+fn admitted(v: &serde_json::Value) -> Result<Admitted> {
+    let owner = v["owner"].as_str().context("cannot read this machine's owner (torq.user)")?.to_string();
+    if !pkg::valid_user(&owner) {
+        bail!("'{}' is not a valid user name", history::one_line(&owner, 40));
     }
-    let out = Command::new("nix")
-        .args(["eval", "--no-update-lock-file", "--json"])
-        .arg(format!("{}#nixosConfigurations.{host}.config", flake_ref(copy)))
-        .arg("--apply")
-        .arg(format!(
-            "c: let u = c.users.users.\"{owner}\" or null; k = if u == null then {{ keys = []; keyFiles = []; }} else u.openssh.authorizedKeys; in \
-             {{ files = c.services.openssh.authorizedKeysFiles; declared = k.keys ++ map builtins.readFile k.keyFiles; \
-             exists = c.users.users ? \"{owner}\"; home = c.users.users.\"{owner}\".home or null; uid = c.users.users.\"{owner}\".uid or null; }}"
-        ))
-        .output()
-        .context("running nix eval")?;
-    if !out.status.success() {
-        bail!("cannot read the SSH settings: {}", last_error(&out.stderr));
-    }
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     // The owner's home and uid as the configuration being approved has them — not as the machine has
     // them now, which the change may alter (audit of 2026-10-31). A uid NixOS assigns itself (none
     // declared) is this machine's, if the user exists; only a key file named by uid (%U) needs it.
@@ -275,7 +250,7 @@ fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<(String, Strin
     let uid = match v["uid"].as_u64() {
         Some(u) => u.to_string(),
         None => {
-            let out = Command::new("getent").args(["passwd", owner]).output().context("running getent")?;
+            let out = Command::new("getent").args(["passwd", &owner]).output().context("running getent")?;
             let entry = String::from_utf8_lossy(&out.stdout).into_owned();
             entry.trim().split(':').nth(2).filter(|u| !u.is_empty()).map(String::from).unwrap_or_default()
         }
@@ -290,7 +265,7 @@ fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<(String, Strin
             sources.push(("declared in the config".into(), declared.collect::<Vec<_>>().join("\n")));
             continue;
         }
-        let file = pkg::expand_keys_pattern(pattern, home, owner, uid)?;
+        let file = pkg::expand_keys_pattern(pattern, home, &owner, uid)?;
         match fs::read_to_string(&file) {
             Ok(t) => sources.push((file, t)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -305,7 +280,7 @@ fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<(String, Strin
             }
         }
     }
-    Ok(keys)
+    Ok((owner, keys))
 }
 
 /// The ledger, read through the broker (its state directory is root's): any account may read it.
@@ -358,47 +333,102 @@ fn check_repo(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// The configuration to evaluate: always `torq`, the one the broker builds (never the host name),
-/// and the config repo must have it.
-fn config_name(repo: &Path) -> Result<String> {
-    let out = Command::new("nix")
-        .args(["eval", "--no-update-lock-file", "--json"])
-        .arg(format!("{}#nixosConfigurations", flake_ref(repo)))
-        .args(["--apply", "builtins.attrNames"])
-        .output()
-        .context("running nix eval")?;
-    if !out.status.success() {
-        bail!("cannot read the config repo: {}", last_error(&out.stderr));
+/// SSH as a configuration (`x`, its `config`) has it, in Nix: on, passwords (keys only unless
+/// PasswordAuthentication is true: modules/services.nix), and — when on — what its keys are read
+/// from: the owner (`torq.user`), their home and uid, the key files sshd reads, the keys declared
+/// (`admitted` reads them). The owner is named in Nix, never spliced in from outside.
+const SSH_NIX: &str = "x: let o = x.services.openssh; in { on = o.enable; passwords = o.settings.PasswordAuthentication != false; \
+    admits = if !o.enable then null else let name = x.torq.user; u = x.users.users.${name} or null; \
+    k = if u == null then { keys = []; keyFiles = []; } else u.openssh.authorizedKeys; in \
+    { owner = name; files = o.authorizedKeysFiles; declared = k.keys ++ map builtins.readFile k.keyFiles; exists = u != null; \
+    home = if u == null then null else u.home or null; uid = if u == null then null else u.uid or null; }; }";
+
+/// What the check reads of the changed configuration (`c`), in Nix: its toplevel's drvPath (forced,
+/// so its errors and warnings appear), whether it reads the tree, and SSH (SSH_NIX).
+const EVALUATE_NIX: &str = "{ drv = builtins.unsafeDiscardStringContext c.system.build.toplevel.drvPath; readsTree = (c.torq.packages.configDir or null) != null; ssh = ssh c; }";
+
+/// A name for what a kept result was read by: a hash of the Nix that read it (and the configuration
+/// it reads), so a torqcli that reads it differently never takes an older one's for its own.
+fn form_of(parts: &[&str]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for p in parts {
+        h.update((p.len() as u64).to_le_bytes());
+        h.update(p.as_bytes());
     }
-    let names: Vec<String> = serde_json::from_slice(&out.stdout)?;
-    // The broker always builds `torq` (torq.broker.configName): checking any other configuration
-    // here would approve something it never builds.
-    if names.iter().any(|n| n == CONFIG) {
-        Ok(CONFIG.to_string())
-    } else {
-        bail!(
-            "{} has no configuration named `{CONFIG}` (it has {names:?}); the broker builds only `{CONFIG}`",
-            repo.display()
-        )
-    }
+    h.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
-/// Evaluate the whole system from the changed scratch copy: the same modules that will build it
-/// report unknown, unfree or unsupported packages, or a broken update, before anything is proposed.
-/// Evaluate the configuration in `copy` (its system, `host`); its warnings, if it evaluates. Never
-/// from Nix's evaluation cache: a cached result says no warnings again.
-fn evaluate(copy: &Path, host: &str, log: &Path) -> Result<Vec<String>> {
-    let out = Command::new("nix")
-        .args(["eval", "--no-update-lock-file", "--no-eval-cache", "--raw"])
-        .arg(format!("{}#nixosConfigurations.{host}.config.system.build.toplevel.drvPath", flake_ref(copy)))
-        .output()
-        .context("running nix eval")?;
-    if !out.status.success() {
-        // The whole of nix's explanation goes to the log; the screen gets one clear sentence.
-        let _ = fs::OpenOptions::new().append(true).open(log).and_then(|mut f| f.write_all(&out.stderr));
-        bail!("{}", pkg::explain_check_error(&history::one_line(&last_error(&out.stderr), 300)));
+/// The form of SSH kept by commit (evalcache.rs).
+pub(crate) fn ssh_form() -> String {
+    format!("ssh-{}", form_of(&[CONFIG, SSH_NIX]))
+}
+
+/// The form of a check's result kept with the candidate (session.rs `check_key`).
+pub(crate) fn check_form() -> String {
+    format!("check-{}", form_of(&[CONFIG, SSH_NIX, EVALUATE_NIX]))
+}
+
+#[cfg(test)]
+#[test]
+fn a_kept_result_is_named_by_what_read_it() {
+    assert_ne!(ssh_form(), check_form());
+    assert_ne!(form_of(&[CONFIG, SSH_NIX]), form_of(&[CONFIG, &format!("{SSH_NIX} ")]), "any change to the Nix is another form");
+    assert_ne!(form_of(&["ab", "c"]), form_of(&["a", "bc"]));
+    assert_eq!(ssh_form(), ssh_form());
+}
+
+/// One `nix eval` of the configuration in `copy`: always `torq`, the one the broker builds (never the
+/// host name), which the config repo must have; `what` is a Nix expression of its `config` (`c`) and
+/// `ssh` (SSH_NIX). Its JSON, and Nix's standard error (its warnings). Nix's output goes to the log,
+/// and with `live` to the terminal as it comes. `check`: the commit's check — never from Nix's
+/// evaluation cache (a cached result says no warnings again), its error said as a check's.
+fn eval_config(copy: &Path, what: &str, log: &Path, live: bool, check: bool) -> Result<(serde_json::Value, String)> {
+    let apply = format!("cs: if !(cs ? {CONFIG}) then {{ missing = builtins.attrNames cs; }} else let c = cs.{CONFIG}.config; ssh = {SSH_NIX}; in {what}");
+    let mut cmd = Command::new("nix");
+    // As the broker builds it: a flake.lock that does not match flake.nix is an error, not re-locked.
+    cmd.args(["eval", "--no-update-lock-file", "--json"]);
+    if check {
+        cmd.arg("--no-eval-cache");
     }
-    Ok(nixerr::warnings(&String::from_utf8_lossy(&out.stderr)))
+    cmd.arg(format!("{}#nixosConfigurations", flake_ref(copy))).arg("--apply").arg(apply);
+    let out = run::output(&mut cmd, log, live).context("running nix eval")?;
+    if !out.status.success() {
+        // The whole of nix's explanation is in the log; the screen gets one clear sentence.
+        let why = history::one_line(&last_error(&out.stderr), 300);
+        if check {
+            bail!("{}", pkg::explain_check_error(&why));
+        }
+        bail!("cannot read the SSH settings: {why}");
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).context("reading nix eval's answer")?;
+    // The broker always builds `torq` (torq.broker.configName): checking any other configuration
+    // here would approve something it never builds.
+    if let Some(names) = v.get("missing") {
+        bail!("the config repo has no configuration named `{CONFIG}` (it has {}); the broker builds only `{CONFIG}`", history::one_line(&names.to_string(), 200));
+    }
+    Ok((v, String::from_utf8_lossy(&out.stderr).into_owned()))
+}
+
+fn ssh_facts(v: &serde_json::Value) -> session::SshFacts {
+    session::SshFacts { state: session::Ssh { on: v["on"] == true, passwords: v["passwords"] == true }, admits: v["admits"].clone() }
+}
+
+/// Evaluate the changed configuration in `copy` once, as the broker will build it: its toplevel (so
+/// the same modules that will build it report unknown, unfree or unsupported packages, or a broken
+/// update, with its warnings), SSH as it will be, and whether it reads the tree's files (its flake
+/// passes `configDir` to torq.lib.mkSystem: without that, a change to them would commit and do
+/// nothing).
+fn evaluate(copy: &Path, log: &Path, live: bool) -> Result<session::Evaluated> {
+    let what = EVALUATE_NIX;
+    let (v, stderr) = eval_config(copy, what, log, live, true)?;
+    Ok(session::Evaluated { warnings: nixerr::warnings(&stderr), ssh: ssh_facts(&v["ssh"]), reads_tree: v["readsTree"] == true })
+}
+
+/// SSH as the configuration in `copy` has it (the state before a change), evaluated.
+fn ssh_state(copy: &Path, log: &Path, live: bool) -> Result<session::SshFacts> {
+    let (v, _) = eval_config(copy, "ssh c", log, live, false)?;
+    Ok(ssh_facts(&v))
 }
 
 /// The most useful line of a nix error — ours if there is one, else nix's last `error:` — as one
@@ -417,21 +447,6 @@ fn last_error(stderr: &[u8]) -> String {
     history::one_line(&line, 300)
 }
 
-
-/// Whether the configuration at `copy` reads the tree's files (its flake passes `configDir` to
-/// torq.lib.mkSystem): without that, a change to them would commit and do nothing.
-fn reads_tree(copy: &Path, host: &str) -> Result<bool> {
-    let out = Command::new("nix")
-        .args(["eval", "--no-update-lock-file", "--json"])
-        .arg(format!("{}#nixosConfigurations.{host}.config.torq", flake_ref(copy)))
-        .args(["--apply", "k: (k.packages.configDir or null) != null"])
-        .output()
-        .context("running nix eval")?;
-    if !out.status.success() {
-        bail!("cannot read the config repo: {}", last_error(&out.stderr));
-    }
-    Ok(serde_json::from_slice(&out.stdout)?)
-}
 
 #[cfg(test)]
 mod lock_tests {

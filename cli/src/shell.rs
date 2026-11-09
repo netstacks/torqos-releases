@@ -3,9 +3,9 @@
 //! session.rs, the tree in tree.rs, the candidate in candidate.rs.
 
 use crate::candidate::{Candidate, Repo};
-use crate::session::{Configuration, History, Machine, Mode, Session, Ssh, Waiting};
+use crate::session::{Configuration, Evaluated, History, Machine, Mode, Session, SshFacts, Waiting};
 use crate::tree::Schema;
-use crate::{broker, check_repo, config_name, evaluate, history, me, run, scratch_dir, Cli, BROKER, REPO};
+use crate::{broker, check_repo, evaluate, history, me, run, scratch_dir, Cli, BROKER, REPO};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
@@ -18,6 +18,8 @@ const NIXOS_SCHEMA: &str = "/etc/torq/nixos-schema.json";
 
 struct Real<'a> {
     cli: &'a Cli,
+    /// `| display detail`: steps and Nix's and the broker's output shown as they come (no spinner).
+    detail: std::cell::Cell<bool>,
 }
 
 impl Real<'_> {
@@ -80,13 +82,20 @@ impl Real<'_> {
         }
         // Not evaluable: then the broker's build of it fails just the same, and nothing is switched on —
         // said, not a reason to refuse here.
-        let states = match self.ssh(&head, &files) {
-            Ok(s) => s,
+        let after = match self.evaluate(&head, &files) {
+            Ok(e) => e.ssh,
             Err(e) => return Ok(format!("(SSH not checked: the configuration it leaves does not evaluate: {})\n", history::one_line(&format!("{e:#}"), 120))),
         };
-        // Asked at the terminal: its sentences fit it (ui.rs). As a commit is asked (session.rs).
+        // Asked at the terminal: its sentences fit it (ui.rs). As a commit is asked (session.rs), SSH
+        // before it kept by commit.
         let ui = crate::ui::Ui::plain_at(crate::ui::fit(crate::ui::columns(false)));
-        crate::session::ssh_review(self, states, &head, &files, "reverted", &ui)
+        let cache = crate::evalcache::Cache::personal();
+        crate::session::ssh_review(self, || crate::session::ssh_before(self, &cache, &head), &after, "reverted", &ui)
+    }
+
+    /// The progress line, unless detail shows each step instead.
+    fn progress(&self, phase: &str) -> Option<run::Progress> {
+        (!self.detail.get()).then(|| run::Progress::start(phase))
     }
 
 
@@ -118,21 +127,31 @@ fn done(o: run::Outcome, what: &str) -> Result<serde_json::Value> {
 }
 
 impl Machine for Real<'_> {
-    fn check(&self, base: &str, files: &[(String, Option<String>)]) -> Result<Vec<String>> {
+    fn evaluate(&self, base: &str, files: &[(String, Option<String>)]) -> Result<Evaluated> {
         let (_scratch, copy) = self.changed_copy(base, files)?;
         let log = run::start_log()?;
-        let _p = run::Progress::start("Checking");
-        let host = config_name(&copy)?;
-        let warnings = evaluate(&copy, &host, &log)?;
-        // A tree file the configuration does not read would commit and change nothing: a flake.nix
-        // that does not pass `configDir` to torq.lib.mkSystem (as `torq pkg` checked).
-        if files.iter().any(|(p, _)| p != "flake.lock") && !crate::reads_tree(&copy, &host)? {
-            bail!(
-                "this machine's config does not read its settings files yet: its flake.nix must call \
-                 torq.lib.mkSystem with `configDir = ./.;` (a system change, made as Nix)"
-            );
-        }
-        Ok(warnings)
+        let _p = self.progress("Checking");
+        evaluate(&copy, &log, self.detail.get())
+    }
+
+    fn ssh_at(&self, base: &str) -> Result<SshFacts> {
+        let (_scratch, copy) = self.changed_copy(base, &[])?;
+        let log = run::go_on_log()?;
+        let _p = self.progress("Reading the SSH settings");
+        crate::ssh_state(&copy, &log, self.detail.get())
+    }
+
+    fn set_detail(&self, on: bool) {
+        self.detail.set(on);
+    }
+
+    fn detail(&self) -> bool {
+        self.detail.get()
+    }
+
+    fn show(&self, line: &str) {
+        println!("{}", history::clean(line));
+        let _ = std::io::stdout().flush();
     }
 
     fn remote(&self) -> Result<String> {
@@ -487,7 +506,8 @@ impl Machine for Real<'_> {
         let file = file.to_string_lossy();
         let args = propose_args(&file, base, reason);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let proposed = done(run::broker_json(broker(self.cli, &args)?, &log)?, "commit")?;
+        let live = self.detail.get();
+        let proposed = crate::session::step(self, "Proposing the change to the broker", || done(run::broker_json_live(broker(self.cli, &args)?, &log, live)?, "commit"))?;
         let seq = proposed["seq"].as_u64().context("the broker did not say which proposal it made")?;
         // What was shown (and, for the system, asked) must be what the broker applies.
         if proposed["tier"].as_str() != Some(tier) {
@@ -504,10 +524,10 @@ impl Machine for Real<'_> {
             args.extend(["--confirm", m]);
         }
         let outcome = {
-            let _p = if crate::asks_for_password(self.cli) { None } else { Some(run::Progress::start("Committing")) };
-            run::broker_json(broker(self.cli, &args)?, &log)
+            let _p = if crate::asks_for_password(self.cli) || live { None } else { Some(run::Progress::start("Committing")) };
+            crate::session::step(self, "The broker applies it: it builds the system and switches to it", || run::broker_json_live(broker(self.cli, &args)?, &log, live))
         };
-        match outcome.map_err(anyhow::Error::from).and_then(|o| done(o, "commit")) {
+        match outcome.and_then(|o| done(o, "commit")) {
             Ok(applied) => applied["seq"].as_u64().context("the broker did not say which change it applied"),
             // The answer was lost, or unclear: the ledger says whether the change was made. (A
             // refusal is certain, and keeps the candidate.)
@@ -725,13 +745,10 @@ impl Machine for Real<'_> {
 
     /// As `torq service enable ssh` did: the catalog's SSH lets in the owner's keys only, so these —
     /// as the changed configuration will have them — are exactly what approving it approves.
-    fn ssh_keys(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(String, Vec<String>)> {
-        let (_scratch, copy) = self.changed_copy(base, files)?;
-        let _p = run::Progress::start("Reading the SSH keys");
-        let host = config_name(&copy)?;
-        let owner = crate::owner(&copy, &host)?;
+    fn ssh_keys(&self, facts: &SshFacts) -> Result<(String, Vec<String>)> {
+        let (owner, keys) = crate::admitted(&facts.admits)?;
         let mut rows = Vec::new();
-        for (note, id, place) in crate::owner_keys(&copy, &host, &owner)? {
+        for (note, id, place) in keys {
             if !note.is_empty() {
                 rows.push(format!("  ! {}", history::one_line(note.trim_end_matches(": "), 120)));
             }
@@ -739,30 +756,6 @@ impl Machine for Real<'_> {
             rows.push(format!("    {}  (from {})", history::clean(&id), history::one_line(&place, 80)));
         }
         Ok((owner, rows))
-    }
-
-    fn ssh(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(Ssh, Ssh)> {
-        let state = |files: &[(String, Option<String>)]| -> Result<Ssh> {
-            let (_scratch, copy) = self.changed_copy(base, files)?;
-            let host = config_name(&copy)?;
-            let out = std::process::Command::new("nix")
-                .args(["eval", "--no-update-lock-file", "--json"])
-                .arg(format!("{}#nixosConfigurations.{host}.config", crate::flake_ref(&copy)))
-                .args([
-                    "--apply",
-                    "c: { on = c.services.openssh.enable; \
-                     passwords = c.services.openssh.settings.PasswordAuthentication != false; }",
-                ])
-                .output()
-                .context("running nix eval")?;
-            if !out.status.success() {
-                bail!("cannot read the SSH settings: {}", history::one_line(&crate::last_error(&out.stderr), 200));
-            }
-            let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-            Ok(Ssh { on: v["on"] == true, passwords: v["passwords"] == true })
-        };
-        let _p = run::Progress::start("Reading the SSH settings");
-        Ok((state(&[])?, state(files)?))
     }
 
     fn ledger(&self, count: usize, fit: Option<usize>) -> Result<String> {
@@ -909,7 +902,7 @@ impl Machine for Real<'_> {
         v["url"].as_str().map(String::from).with_context(|| format!("{file} names no releases (url)"))
     }
     fn check_release(&self, repo: &str, rev: &str) -> Result<crate::release::Signed> {
-        let _p = run::Progress::start("Checking the release's signature");
+        let _p = self.progress("Checking the release's signature");
         crate::release::check(repo, rev, Path::new(crate::release::SIGNERS))
     }
     fn running_version(&self) -> Option<String> {
@@ -1232,6 +1225,23 @@ fn describe(e: &anyhow::Error) -> String {
     out
 }
 
+/// Whether a run may ask a person what a command offers to go on with (Session::asks): the shell, or
+/// one command, with standard input and output a terminal — never a script (`-c`), whatever it runs at.
+fn asks(run: &Invocation, stdin_terminal: bool, stdout_terminal: bool) -> bool {
+    !matches!(run, Invocation::Script(_)) && stdin_terminal && stdout_terminal
+}
+
+#[cfg(test)]
+#[test]
+fn a_script_is_never_asked() {
+    let script = Invocation::Script("request system update; configure; commit".into());
+    assert!(!asks(&script, true, true), "a -c script, even at a terminal");
+    for run in [Invocation::Interactive, Invocation::Command(vec!["request".into(), "system".into(), "update".into()])] {
+        assert!(asks(&run, true, true));
+        assert!(!asks(&run, false, true) && !asks(&run, true, false), "input or output not a terminal");
+    }
+}
+
 /// The command line (`name`: as torqcli was run). A refusal says why, then how torqcli is run.
 fn parse_args(name: &str, args: &[String]) -> Result<Invocation> {
     // (One line, as every message: the usage after the reason.)
@@ -1375,12 +1385,16 @@ fn run_shell(args: &[String]) -> Result<i32> {
     check_repo(&cli)?;
     let schema = Schema::parse(&fs::read_to_string(SCHEMA).with_context(|| format!("reading {SCHEMA} (is this TorqOS?)"))?)?;
     let tree = crate::nixos::Tree::parse(&fs::read_to_string(NIXOS_SCHEMA).with_context(|| format!("reading {NIXOS_SCHEMA} (is this TorqOS, from S1 on?)"))?)?;
-    let machine = Real { cli: &cli };
+    let machine = Real { cli: &cli, detail: std::cell::Cell::new(false) };
     let who = me()?;
     // Only the interactive shell keeps a candidate between runs; a script's is its own.
     let saved = if run == Invocation::Interactive { Some(Candidate::default_path()?) } else { None };
     let mut s = Session::new(schema, tree, Repo::new(&cli.repo), saved, &machine, &who);
     s.screen = || crate::ui::columns(false);
+    s.cache = crate::evalcache::Cache::personal();
+    // Offered to go on (install what an update loaded) only where a person is at a terminal: never a
+    // script, which must not stop on a question it was not written to answer.
+    s.asks = asks(&run, std::io::stdin().is_terminal(), std::io::stdout().is_terminal());
     let fail = |line: &str, e: anyhow::Error| {
         say_error(&format!("{}: {}", history::one_line(line, 80), describe(&e)));
         Ok(1)
@@ -1423,7 +1437,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
         Invocation::Interactive => {
             let history_cli = Cli { repo: cli.repo.clone(), broker: cli.broker.clone() };
             let history = crate::complete::Later::new(move || {
-                let real = Real { cli: &history_cli };
+                let real = Real { cli: &history_cli, detail: std::cell::Cell::new(false) };
                 real.configurations(&Repo::new(&history_cli.repo), 30).map(|h| crate::session::configuration_lines(&h)).unwrap_or_default()
             });
             interactive(&mut s, history)
@@ -1977,13 +1991,13 @@ impl Real<'_> {
             fs::write(copy.join("flake.nix"), f)?;
         }
         let out = {
-            let _p = run::Progress::start("Looking for updates");
+            let _p = self.progress("Looking for updates");
             let mut cmd = std::process::Command::new("nix");
             cmd.args(["flake", "update", "--flake"]).arg(crate::flake_ref(&copy));
             if !all {
                 cmd.arg("torq");
             }
-            cmd.output().context("running nix flake update")?
+            run::output(&mut cmd, &run::start_log()?, self.detail.get()).context("running nix flake update")?
         };
         if !out.status.success() {
             bail!("couldn't look for updates: {}", history::one_line(&crate::last_error(&out.stderr), 200));

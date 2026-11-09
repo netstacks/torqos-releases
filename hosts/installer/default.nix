@@ -1,7 +1,7 @@
 # The TorqOS installer's own system (ADR-031, docs/INSTALL.md): an ISO to boot from a USB stick or
 # disc, whose console puts TorqOS on one of the machine's disks (modules/installer.nix).
 #   nix build .#iso
-{ lib, pkgs, modulesPath, ... }:
+{ config, lib, pkgs, modulesPath, ... }:
 {
   imports = [ (modulesPath + "/installer/cd-dvd/iso-image.nix") ];
   torq.installer.enable = true;
@@ -14,6 +14,8 @@
   isoImage.makeUsbBootable = true;
   isoImage.volumeID = "TORQOS";
   isoImage.appendToMenuLabel = " installer";
+  # What a first boot builds from (ADR-048 5): in the ISO's store, for `torq install` to copy onto the disk.
+  isoImage.storeContents = config.torq.installer.firstBuild;
   # torqos-x86_64-linux.iso, beside the image's torqos-x86_64-linux.qcow2.
   image.baseName = lib.mkForce "torqos-${pkgs.stdenv.hostPlatform.system}";
 

@@ -142,7 +142,7 @@ Order matters: the socket first, because everything after keys on identity.
 
 ### M4 — the desktop as a configuration (ADR-034, ADR-037, ADR-038)
 Can run in its own worktree beside M3; it is a configuration, not broker work.
-- [ ] `torqos-desktop`: niri, terminal, launcher, portal, Flatpak. *Test:* a VM boots it to a
+- [ ] `torqos-desktop`: COSMIC (ADR-045), its portal, Flatpak. *Test:* a VM boots it to a
       session; `load override` on an image machine produces it. **⏹ review:** does the
       configuration carry anything of the base's that should be a setting?
 - [ ] `users <name> flatpaks`. *Test:* declared → present after switch; removed → gone.

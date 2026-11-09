@@ -42,6 +42,8 @@ pub struct CommitOptions {
     pub at: Option<String>,
     /// `and-quit`: leave configuration mode once committed.
     pub and_quit: bool,
+    /// `| display detail`: each step shown as it happens (`Machine::set_detail`).
+    pub detail: bool,
 }
 
 /// One command. Paths are relative to where configuration mode is (`edit`), except in operational
@@ -147,13 +149,13 @@ pub enum Request {
     /// The remote's incoming configuration into the candidate (ADR-036).
     Pull,
     /// The newest TorqOS (`all`: every input) into the candidate.
-    Update { all: bool },
+    Update { all: bool, detail: bool },
     /// Session trust (ADR-042): the agent's untainted proposals in one's own folder apply without asking, for `minutes`.
     Trust { minutes: u32 },
     /// End one's trust in the agent.
     TrustRevoke,
     /// An earlier configuration's software into the candidate.
-    SoftwareRollback { n: usize },
+    SoftwareRollback { n: usize, detail: bool },
 }
 
 /// How `load` takes a saved configuration: as the whole candidate, onto it, or as `set` lines.
@@ -199,6 +201,11 @@ fn display_text(d: &Option<Display>) -> String {
 }
 
 #[cfg(test)]
+fn detail_text(detail: bool) -> String {
+    if detail { " | display detail".into() } else { String::new() }
+}
+
+#[cfg(test)]
 fn join(w: &[String]) -> String {
     w.iter().map(|x| quote(x)).collect::<Vec<_>>().join(" ")
 }
@@ -237,6 +244,7 @@ pub fn render(op: &Op) -> String {
         if o.and_quit {
             s.push_str(" and-quit");
         }
+        s.push_str(&detail_text(o.detail));
         s
     };
     match op {
@@ -280,9 +288,9 @@ pub fn render(op: &Op) -> String {
             Request::RemoteKey => "request system remote key".into(),
             Request::RemoteClear => "request system remote clear".into(),
             Request::Pull => "request system pull".into(),
-            Request::Update { all: false } => "request system update".into(),
-            Request::Update { all: true } => "request system update all".into(),
-            Request::SoftwareRollback { n } => format!("request system software rollback {n}"),
+            Request::Update { all: false, detail } => format!("request system update{}", detail_text(*detail)),
+            Request::Update { all: true, detail } => format!("request system update all{}", detail_text(*detail)),
+            Request::SoftwareRollback { n, detail } => format!("request system software rollback {n}{}", detail_text(*detail)),
         },
         Op::Save { file } => format!("save {}", quote(file)),
         Op::Load { how, from } => {
@@ -384,8 +392,12 @@ mod tests {
             (Mode::Operational, Op::Request(Request::RemoteKey)),
             (Mode::Operational, Op::Request(Request::RemoteClear)),
             (Mode::Operational, Op::Request(Request::Pull)),
-            (Mode::Operational, Op::Request(Request::Update { all: true })),
-            (Mode::Operational, Op::Request(Request::SoftwareRollback { n: 2 })),
+            (Mode::Operational, Op::Request(Request::Update { all: true, detail: false })),
+            (Mode::Operational, Op::Request(Request::Update { all: false, detail: true })),
+            (Mode::Configuration, Op::Commit(CommitOptions { confirm: Some(10), detail: true, ..Default::default() })),
+            (Mode::Configuration, Op::Commit(CommitOptions { check: true, detail: true, ..Default::default() })),
+            (Mode::Operational, Op::Request(Request::SoftwareRollback { n: 2, detail: false })),
+            (Mode::Operational, Op::Request(Request::SoftwareRollback { n: 1, detail: true })),
             (Mode::Operational, Op::Exit),
             (Mode::Configuration, Op::Set { words: v("system host-name torq") }),
             (Mode::Configuration, Op::Set { words: v("system packages [ htop vim ]") }),
@@ -420,12 +432,12 @@ mod tests {
             (Mode::Configuration, Op::Top { then: Some(Box::new(Op::Run(Box::new(Op::ShowServices)))) }),
             (Mode::Configuration, Op::Commit(CommitOptions::default())),
             (Mode::Configuration, Op::Commit(CommitOptions { check: true, ..Default::default() })),
-            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: Some(5), comment: Some("ssh; keys | only \"x\"".into()), at: None, and_quit: false })),
+            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: Some(5), comment: Some("ssh; keys | only \"x\"".into()), at: None, and_quit: false, detail: false })),
             (Mode::Configuration, Op::Commit(CommitOptions { and_quit: true, ..Default::default() })),
             (Mode::Configuration, Op::Commit(CommitOptions { at: Some("10:00".into()), ..Default::default() })),
             (Mode::Configuration, Op::Commit(CommitOptions { at: Some("2026-11-08 10:00".into()), comment: Some("night".into()), and_quit: true, ..Default::default() })),
             (Mode::Operational, Op::ClearCommit),
-            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: None, comment: Some("why".into()), at: None, and_quit: true })),
+            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: None, comment: Some("why".into()), at: None, and_quit: true, detail: true })),
             (Mode::Configuration, Op::Run(Box::new(Op::ShowAlarms { display: None }))),
             (Mode::Configuration, Op::Run(Box::new(Op::ShowActive { path: v("system"), display: None }))),
             (Mode::Configuration, Op::Run(Box::new(Op::ShowRollback { n: 1, compare: Some(0), display: diff }))),
@@ -492,7 +504,8 @@ mod tests {
     fn filters_follow_every_show() {
         let filters = vec![f("grep", "-Ei \"host|name\""), f("sort", "-r"), f("wc", "-l")];
         let mut n = 0;
-        for (mode, op) in ops().into_iter().filter(|(mode, op)| crate::grammar::pipe_help(*mode, &w(&render(op))).is_some()) {
+        let filtered = |mode: Mode, op: &Op| crate::grammar::pipe_next(mode, &w(&format!("{} |", render(op)))).iter().any(|(x, _, _)| x == "grep");
+        for (mode, op) in ops().into_iter().filter(|(mode, op)| filtered(*mode, op)) {
             let line = format!("{} | grep -Ei \"host|name\" | sort -r | wc -l", render(&op));
             assert_eq!(pl(mode, &line).unwrap_or_else(|e| panic!("{line}: {e:#}")), (op.clone(), filters.clone()), "{line}");
             n += 1;
@@ -553,7 +566,14 @@ mod tests {
         }
         assert_eq!(pl(o, "show packages rg | grep x").unwrap(), (Op::ShowPackages { terms: w("rg") }, vec![f("grep", "x")]), "a search is a show like any other");
         assert_eq!(pl(o, "file show a.nix | head").unwrap().0, Op::File { action: FileAction::Show, path: Some("a.nix".into()) }, "a file shown is output too");
-        for line in ["set system host-name a | wc -l", "commit | grep x", "rollback 1 | head"] {
+        // What a command does as it goes is no output to filter: it shows its steps, nothing else.
+        for line in ["commit | grep x", "commit check | display set", "commit | display detail | wc -l"] {
+            let e = err(c, line);
+            assert!(e.contains("not a word here") || e.contains("not a view"), "{line}: {e}");
+        }
+        assert_eq!(pl(c, "commit confirmed 10 | display detail").unwrap().0, Op::Commit(CommitOptions { confirm: Some(10), detail: true, ..Default::default() }));
+        assert_eq!(pl(o, "request system update | d d").unwrap().0, Op::Request(Request::Update { all: false, detail: true }), "abbreviated as any pipe");
+        for line in ["set system host-name a | wc -l", "rollback 1 | head"] {
             let e = err(c, line);
             assert!(e.contains("prints nothing to filter"), "{line}: {e}");
         }

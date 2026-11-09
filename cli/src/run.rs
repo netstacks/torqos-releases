@@ -28,6 +28,16 @@ pub fn log_path() -> Result<PathBuf> {
 /// Start a fresh log for this command: private to the user (0600), and never written through a
 /// symlink.
 pub fn start_log() -> Result<PathBuf> {
+    open_log(true)
+}
+
+/// The log as this command has it so far, added to (made as `start_log` makes it if there is none):
+/// a step after another, whose output belongs with the first's.
+pub fn go_on_log() -> Result<PathBuf> {
+    open_log(false)
+}
+
+fn open_log(fresh: bool) -> Result<PathBuf> {
     use std::os::unix::fs::OpenOptionsExt;
     let p = log_path()?;
     fs::create_dir_all(p.parent().unwrap()).with_context(|| format!("creating {}", p.display()))?;
@@ -37,7 +47,7 @@ pub fn start_log() -> Result<PathBuf> {
     let f = fs::OpenOptions::new()
         .write(true)
         .create(true)
-        .truncate(true)
+        .truncate(fresh)
         .mode(0o600)
         .open(&p)
         .with_context(|| format!("writing {}", p.display()))?;
@@ -91,6 +101,110 @@ impl Drop for Progress {
             let _ = h.join();
         }
     }
+}
+
+/// The longest line kept before it is shown.
+const LINE: usize = 8192;
+
+/// What a command writes as it runs, kept in the log, and with `live` (`| display detail`) shown on
+/// the terminal line by line as it comes, each line cleaned of anything that could fool a terminal
+/// (history::clean) — Nix's and the broker's text are not ours.
+pub struct Live<W: Write> {
+    log: W,
+    live: bool,
+    line: Vec<u8>,
+}
+
+impl<W: Write> Live<W> {
+    pub fn new(log: W, live: bool) -> Self {
+        Live { log, live, line: Vec::new() }
+    }
+    fn show(&mut self) {
+        let text = String::from_utf8_lossy(&self.line).into_owned();
+        // A progress line nix redraws (`\r`) is shown as its last state.
+        let text = text.trim_end_matches(['\n', '\r']).rsplit('\r').next().unwrap_or_default().to_string();
+        println!("  {}", crate::history::clean(&text));
+        let _ = std::io::stdout().flush();
+        self.line.clear();
+    }
+}
+
+impl<W: Write> Write for Live<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.log.write_all(buf)?;
+        if self.live {
+            for &b in buf {
+                self.line.push(b);
+                // A line that never ends (a progress bar redrawn with `\r` alone) is shown as it
+                // stands once it is long, not kept growing.
+                if b == b'\n' || self.line.len() >= LINE {
+                    self.show();
+                }
+            }
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.log.flush()
+    }
+}
+
+impl<W: Write> Drop for Live<W> {
+    fn drop(&mut self) {
+        if self.live && !self.line.is_empty() {
+            self.show();
+        }
+    }
+}
+
+/// Run `cmd`: its exit status, standard output, and standard error — which is also appended to
+/// `log`, and with `live` shown as it comes (Live).
+pub fn output(cmd: &mut Command, log: &std::path::Path, live: bool) -> Result<std::process::Output> {
+    // (The log opened first: nothing is started that could not be followed.)
+    let log = fs::OpenOptions::new().append(true).create(true).open(log).context("opening the log")?;
+    let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut stderr = Vec::new();
+    let (status, stdout) = streamed(child, &mut Live::new(log, live), Some(&mut stderr))?;
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
+/// A started child's standard output, collected, and its standard error through `err` as it comes
+/// (and into `keep`). However that goes, the child is waited for — stopped first if its errors
+/// could not be read, so nothing is left running unwatched.
+fn streamed(mut child: std::process::Child, err: &mut dyn Write, mut keep: Option<&mut Vec<u8>>) -> Result<(std::process::ExitStatus, Vec<u8>)> {
+    use std::io::Read;
+    let reading = child.stdout.take().map(|mut stdout| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            stdout.read_to_end(&mut out).map(|_| out)
+        })
+    });
+    let copied = (|| -> Result<()> {
+        let mut errors = child.stderr.take().context("the command's errors")?;
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = errors.read(&mut buf)?;
+            if n == 0 {
+                return Ok(());
+            }
+            if let Some(k) = keep.as_deref_mut() {
+                k.extend_from_slice(&buf[..n]);
+            }
+            err.write_all(&buf[..n])?;
+        }
+    })();
+    if copied.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait();
+    let out = reading.map(|r| r.join());
+    copied?;
+    let out = match out {
+        Some(Ok(o)) => o?,
+        Some(Err(_)) => anyhow::bail!("reading the command's output failed"),
+        None => Vec::new(),
+    };
+    Ok((status?, out))
 }
 
 /// How a broker command ended, read from its exit code and JSON (CLI-DESIGN.md, "The broker's
@@ -221,18 +335,20 @@ fn ask_password(user: &str, again: bool) -> Result<String> {
 /// Run the broker with `--json` (added once, if the arguments have not got it): its exit code and
 /// standard output. Its standard error — the rebuild's output — goes to `err`. Over the socket, a
 /// change that needs the caller's password asks for it at the terminal (three tries), and only then.
-fn exec(call: Call, err: &mut dyn Write, err_stdio: impl Fn() -> Result<Stdio>) -> Result<(Option<i32>, Vec<u8>)> {
+fn exec(call: Call, err: &mut dyn Write, err_stdio: impl Fn() -> Result<Stdio>, live: bool) -> Result<(Option<i32>, Vec<u8>)> {
     match call {
         Call::Exec(mut c) => {
             if !c.get_args().any(|a| a == "--json") {
                 c.arg("--json");
             }
-            let out = c
-                .stdin(Stdio::inherit()) // sudo may need to ask for a password
-                .stdout(Stdio::piped())
-                .stderr(err_stdio()?)
-                .output()
-                .context("running the broker")?;
+            c.stdin(Stdio::inherit()); // sudo may need to ask for a password
+            if live {
+                // Its standard error through `err` as it comes (shown, and logged).
+                let child = c.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("running the broker")?;
+                let (status, out) = streamed(child, err, None)?;
+                return Ok((status.code(), out));
+            }
+            let out = c.stdout(Stdio::piped()).stderr(err_stdio()?).output().context("running the broker")?;
             Ok((out.status.code(), out.stdout))
         }
         Call::Socket(args) => {
@@ -259,10 +375,12 @@ fn exec(call: Call, err: &mut dyn Write, err_stdio: impl Fn() -> Result<Stdio>) 
 /// Run the broker with `--json`: its exit code and parsed stdout. stderr (and the rebuild's
 /// output) goes to `log`; so does stdout when it is not a success, since with --json the broker's
 /// own explanation is there and the log is where a person looks.
-fn call(broker: Call, log: &std::path::Path) -> Result<(Option<i32>, Option<Value>)> {
+fn call(broker: Call, log: &std::path::Path, live: bool) -> Result<(Option<i32>, Option<Value>)> {
     let mut log_file = fs::OpenOptions::new().append(true).create(true).open(log).context("opening the log")?;
     let for_child = || log_file.try_clone().map(Stdio::from).context("opening the log");
-    let (code, stdout) = exec(broker, &mut log_file.try_clone().context("opening the log")?, for_child)?;
+    let mut shown = Live::new(log_file.try_clone().context("opening the log")?, live);
+    let (code, stdout) = exec(broker, &mut shown, for_child, live)?;
+    drop(shown);
     if code != Some(0) {
         writeln!(log_file, "\ntorq-broker {code:?}: {}", String::from_utf8_lossy(&stdout).trim())?;
     }
@@ -272,7 +390,7 @@ fn call(broker: Call, log: &std::path::Path) -> Result<(Option<i32>, Option<Valu
 /// Run the broker for something it only reads (the ledger), its errors on the terminal: exit code
 /// and standard output.
 pub fn read(broker: Call) -> Result<(Option<i32>, Vec<u8>)> {
-    exec(broker, &mut std::io::stderr(), || Ok(Stdio::inherit()))
+    exec(broker, &mut std::io::stderr(), || Ok(Stdio::inherit()), false)
 }
 
 fn broken(code: Option<i32>) -> String {
@@ -286,7 +404,12 @@ fn broken(code: Option<i32>) -> String {
 
 /// A broker command that changes something, or reads one thing: done, busy, refused, or broken.
 pub fn broker_json(broker: Call, log: &std::path::Path) -> Result<Outcome> {
-    let (code, v) = call(broker, log)?;
+    broker_json_live(broker, log, false)
+}
+
+/// `broker_json`, the broker's own output (the build, the switch) shown as it comes with `live`.
+pub fn broker_json_live(broker: Call, log: &std::path::Path, live: bool) -> Result<Outcome> {
+    let (code, v) = call(broker, log, live)?;
     Ok(match (code, v) {
         (Some(0), Some(v)) => Outcome::Done(v),
         (Some(75), _) => Outcome::Busy,
@@ -299,7 +422,7 @@ pub fn broker_json(broker: Call, log: &std::path::Path) -> Result<Outcome> {
 /// `status --json` is an answer whatever its exit code — 0 all well, 1 problems found, 75 busy —
 /// so its JSON is returned for all three (or why there is none).
 pub fn broker_status(broker: Call, log: &std::path::Path) -> Result<std::result::Result<Value, String>> {
-    let (code, v) = call(broker, log)?;
+    let (code, v) = call(broker, log, false)?;
     Ok(match (code, v) {
         (Some(0 | 1 | 75), Some(v)) if v.get("error").is_none() => Ok(v),
         (Some(1), Some(v)) => Err(crate::history::one_line(v["error"].as_str().unwrap_or("the broker refused"), 200)),
@@ -339,5 +462,21 @@ mod tests {
         assert!(request(&args(&["revert", "3", "--approved-by"])).is_err(), "a flag without its value");
         let line = serde_json::to_string(&request(&args(&["status"])).unwrap()).unwrap();
         assert_eq!(line, r#"{"args":["status"]}"#, "no password, diff or hash unless there is one");
+    }
+
+    /// A command's errors are kept in the log as they come, its output returned apart — shown or not.
+    #[test]
+    fn output_keeps_errors_in_the_log() {
+        let d = tempfile::tempdir().unwrap();
+        let log = d.path().join("last.log");
+        for live in [false, true] {
+            fs::write(&log, "").unwrap();
+            let out = output(Command::new("sh").args(["-c", "echo out; printf 'one\\ntwo' >&2; exit 3"]), &log, live).unwrap();
+            assert_eq!((out.status.code(), out.stdout.as_slice(), out.stderr.as_slice()), (Some(3), &b"out\n"[..], &b"one\ntwo"[..]));
+            assert_eq!(fs::read_to_string(&log).unwrap(), "one\ntwo");
+        }
+        let mut kept = Vec::new();
+        Live::new(&mut kept, false).write_all(b"a\nb").unwrap();
+        assert_eq!(kept, b"a\nb");
     }
 }

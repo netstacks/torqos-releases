@@ -316,8 +316,8 @@ Its §5 lists claims without a test.
    statement and CI's unfree check (ROADMAP M2).
 
 ## Desktop (off in the base; the torqos-desktop configuration's, ADR-034, M4)
-7. niri runs its stock config: `Mod+T` spawns `alacritty` (not installed; we ship `foot`), no
-   `xwayland-satellite` (X11 apps fail), no cursor theme. Ship a TorqOS niri config.
+7. ~~niri runs its stock config.~~ Moot: the desktop is COSMIC (ADR-045); `modules/desktop.nix`
+   still carries niri until M4 rewrites it.
 8. ~~Template hard-codes user `casey`.~~ Fixed: `torq user` (nixos/torq.json) is the one place
    (asserted set and well-formed); per-user apps are `users/<name>/packages.json`.
 
@@ -604,7 +604,7 @@ Its §5 lists claims without a test.
      reach of the file system, not of someone reading the raw disk.
    - **Not built:** offering data at `rollback`. The declared backup and `request system restore`: 6zm.
 
-6zl. **The audit of M3 (2026-11-06).** Fixed from it:
+6zl. **The audit of M3 (2026-11-06, `docs/AUDIT-2026-11-06.md`).** Fixed from it:
    - **H1:** a proposal's gate read the tier it was proposed with, while `apply` used what the diff did
      at HEAD. The socket refuses a proposal with no `--base`; `apply` refuses one that no longer does
      what was judged, ledgered as `apply_refused`.
@@ -790,3 +790,41 @@ Its §5 lists claims without a test.
    - **A grant lasted as long as its `until` said:** it lasts its minutes from its own entry, at most 60.
    - **Adopt took a ledger with a trust grant standing or a commit at waiting:** refused.
    - **The doctor's limits** are tested as numbers.
+6zt. **One check per commit, the install question, `| display detail` (torqcli, `work/w8`,
+   2026-11-08).** A commit evaluates the configuration once (docs/CLI-DESIGN.md, "The commit
+   model"); `commit check` then `commit` once in all; `request system update` asks to install. Open:
+   - **Kept results are the person's own files:** SSH before a change (`~/.cache/torq`) and a
+     check's result (in the candidate) are trusted as the candidate itself is — whoever can write
+     them can already change what that person commits. A tampered or stale one can make the review
+     show less: SSH off after the change (a reused check's) makes the SSH review return early, so
+     the refusal of a change that locks everyone out (keys only, none) is skipped, and so is the
+     refusal of tree files the configuration does not read (`reads_tree`); a key list or the
+     passwords notice can be left out. The same-user trust model holds — it is that person's own
+     approval of their own candidate — and the broker builds the commit itself. Kept results are
+     named by a hash of the Nix that read them, so another torqcli's are not reused.
+   - **The cache folder** is held open and checked (this user's, 0700, not a link) before each
+     entry is read or written by name in it; `~/.cache` above it is the person's own and is not
+     checked (a link there points into their own files, or nowhere they could not already write).
+   - **Not yet seen at a real terminal or in a VM test:** the live output of `| display detail`
+     (Nix's and the broker's lines, the password asked between them) and the install question are
+     tested through the fake machine only; the one `nix eval` was run against this repository's
+     dev-vm configuration by hand. tests/trust-loop.nix could run `commit | display detail` and an
+     update answered at a terminal.
+   - **What the broker streams** during its build is what it sends as frames: if it sends its build
+     output only at the end, detail shows it then.
+
+6zu. **A first boot with no network (ADR-048 5, built 2026-11-09, `tests/installer.nix`).** Open:
+   - **x86_64 only.** The first configurations are x86 machines (an AMD and an Intel CPU, their
+     microcode); an arm64 installer carries nothing for its first build, which fetches.
+   - **Evaluating the x86 installer needs an x86 builder:** the carried set is read from the .drv files
+     at build time and imported (`hosts/installer/first-build.nix`). CI and the dev host are x86_64; an
+     arm64 machine evaluating `nixosConfigurations.installer-x86_64-linux` would need a remote builder.
+   - **Covered by its samples, proved on one machine:** what differs between two kinds of machine (AMD
+     with Wi-Fi and SSH by key; Intel with neither) and two machines of each. A machine whose hardware
+     brings what none of them has (an out-of-tree driver, `boot.extraModulePackages`) needs the
+     network at its first build; setup does not yet say so before it starts (ADR-048 5's message).
+     The VM test builds change #1 for a machine none of the samples is (a VM, no firmware): 23
+     derivations, from the disk alone. Real hardware (firmware, iwd) is proved on the Zenbook.
+   - **Setup's own path is not what the test runs:** the test loads the registration as setup does
+     (`register_carried`) and builds as the broker would; tests/image.nix's setup still switches to a
+     prebuilt specialisation.

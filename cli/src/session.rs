@@ -14,9 +14,18 @@ const AGENT: &str = "torq-agent";
 
 /// What the session needs from the machine: evaluation and the broker.
 pub trait Machine {
-    /// `commit check`: does the configuration at commit `base`, with these tree files changed
-    /// (None: deleted), evaluate? Its warnings (NixOS's `warnings`), if it does.
-    fn check(&self, base: &str, files: &[(String, Option<String>)]) -> Result<Vec<String>>;
+    /// `commit check`: the configuration at commit `base`, with these tree files changed (None:
+    /// deleted), evaluated once — as the broker will build it (its toplevel, so its errors and
+    /// warnings appear), and with it SSH as it will be and whether it reads the tree's files.
+    fn evaluate(&self, base: &str, files: &[(String, Option<String>)]) -> Result<Evaluated>;
+    /// SSH as the committed configuration at `base` has it (evaluated: the state before a change).
+    fn ssh_at(&self, base: &str) -> Result<SshFacts>;
+    /// With `on`, the commands that follow show what they do as they do it (`| display detail`): each
+    /// step and how long it took, and Nix's and the broker's own output, live; off, a progress line.
+    fn set_detail(&self, on: bool);
+    fn detail(&self) -> bool;
+    /// One line shown now, as it happens (with detail), not with the command's output at its end.
+    fn show(&self, line: &str);
     /// Propose `diff` against `base` and apply it (with `confirm` minutes: commit confirmed). The
     /// broker's tier must be `tier`. Returns the applied ledger entry's number.
     fn commit(&self, diff: &str, base: &str, tier: &str, reason: &str, confirm: Option<u32>) -> Result<u64>;
@@ -56,14 +65,11 @@ pub trait Machine {
     /// `request system password [<user>]`: a person types the new password; it is set and kept
     /// outside the config repo, ledgered without the hash.
     fn set_password(&self, user: &str) -> Result<String>;
-    /// SSH as the configuration at `base` has it, and as it will with `files` changed — evaluated, so
-    /// every way of turning it on counts (`services openssh`, its `sshd` alias, a config file, the old
-    /// list).
-    fn ssh(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(Ssh, Ssh)>;
-    /// Turning SSH on: who it admits, and the keys that will be able to log in as them — read from
-    /// the configuration at `base` with `files` changed, as it will be. One line per key (and a
-    /// warning line above a key with options); none: nobody could log in.
-    fn ssh_keys(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(String, Vec<String>)>;
+    /// Who SSH admits under an evaluated configuration (`facts`, SSH on), and the keys that will be
+    /// able to log in as them: the configuration's declared keys, and the key files sshd reads as
+    /// they are on disk now (nothing is evaluated). One line per key (and a warning line above a key
+    /// with options); none: nobody could log in.
+    fn ssh_keys(&self, facts: &SshFacts) -> Result<(String, Vec<String>)>;
     /// `show system ledger <count>`: the ledger's last entries, as a person reads them.
     fn ledger(&self, count: usize, fit: Option<usize>) -> Result<String>;
     /// The proposals waiting for a person (ADR-041): `show system proposals`.
@@ -179,8 +185,113 @@ pub enum Pending {
     Discarded,
 }
 
+/// SSH as an evaluated configuration has it: on, passwords, and (when on) what its keys are read
+/// from — the owner, their home and uid, the key files sshd reads, the keys declared — for
+/// `ssh_keys` (every way of turning it on counts: `services openssh`, its `sshd` alias, a config
+/// file, the old list).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SshFacts {
+    pub state: Ssh,
+    pub admits: serde_json::Value,
+}
+
+/// What one evaluation of a changed configuration says (`Machine::evaluate`).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Evaluated {
+    /// NixOS's `warnings`.
+    pub warnings: Vec<String>,
+    /// SSH as it will be.
+    pub ssh: SshFacts,
+    /// Whether the configuration reads the tree's files (`configDir`).
+    pub reads_tree: bool,
+}
+
+/// `commit check`'s result, kept with the candidate it checked: a `commit` of exactly those changes
+/// on that base uses it instead of evaluating again (`key`: check_key).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Checked {
+    pub key: String,
+    pub result: Evaluated,
+    /// SSH before the change, where it was needed (SSH on after it).
+    pub before: Option<SshFacts>,
+}
+
+/// What a check is of: what read it (`check_form`), the base, and the exact changes (each file's path and content, or deleted),
+/// hashed. Any change to the candidate, or another base, is another key.
+pub fn check_key(base: &str, files: &[(String, Option<String>)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sorted: Vec<&(String, Option<String>)> = files.iter().collect();
+    sorted.sort();
+    let mut h = Sha256::new();
+    let mut part = |b: &[u8]| {
+        h.update((b.len() as u64).to_le_bytes());
+        h.update(b);
+    };
+    // What read it: a result of another torqcli's Nix is another key.
+    part(crate::check_form().as_bytes());
+    part(base.as_bytes());
+    for (p, c) in sorted {
+        part(p.as_bytes());
+        match c {
+            Some(c) => {
+                part(b"+");
+                part(c.as_bytes());
+            }
+            None => part(b"-"),
+        }
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Detail on (`| display detail`) for one command, and off again however it ends.
+struct Detailed<'m>(Option<&'m dyn Machine>);
+
+impl<'m> Detailed<'m> {
+    fn on(m: &'m dyn Machine, on: bool) -> Self {
+        if !on {
+            return Detailed(None);
+        }
+        m.set_detail(true);
+        Detailed(Some(m))
+    }
+}
+
+impl Drop for Detailed<'_> {
+    fn drop(&mut self) {
+        if let Some(m) = self.0 {
+            m.set_detail(false);
+        }
+    }
+}
+
+/// `what` run as one step of a command: with detail, named as it starts and said how long it took.
+pub fn step<T>(m: &dyn Machine, what: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    if !m.detail() {
+        return f();
+    }
+    m.show(&format!("{what}…"));
+    let started = std::time::Instant::now();
+    let r = f();
+    m.show(&format!("{what}: {} ({})", if r.is_ok() { "done" } else { "failed" }, crate::ui::elapsed(started.elapsed())));
+    r
+}
+
+/// SSH before a change, at commit `base`: kept from an earlier evaluation of that commit, or
+/// evaluated (and kept). Said, with detail, which.
+pub fn ssh_before(m: &dyn Machine, cache: &crate::evalcache::Cache, base: &str) -> Result<SshFacts> {
+    if let Some(f) = cache.get(base) {
+        if m.detail() {
+            m.show(&format!("SSH settings before the change: from the cache (commit {} was evaluated before)", short(base)));
+        }
+        return Ok(f);
+    }
+    let f = step(m, "Reading the SSH settings before the change (evaluating the configuration in effect)", || m.ssh_at(base))?;
+    cache.put(base, &f);
+    Ok(f)
+}
+
 /// SSH in an evaluated configuration.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Ssh {
     pub on: bool,
     /// Passwords as well as keys (`services openssh settings PasswordAuthentication`).
@@ -250,6 +361,14 @@ pub struct Session<'a> {
     /// The saved candidate as this session last read or wrote it (None: not read since the command
     /// began).
     print: Option<candidate::Print>,
+    /// Where SSH as a commit has it is kept between runs (evalcache.rs): the shell's is the person's
+    /// own cache folder; a test's none, or its own.
+    pub cache: crate::evalcache::Cache,
+    /// Whether a person is at a terminal to be asked what a command offers to go on with (installing
+    /// what `request system update` loaded): never in a script (`-c`), nor with input not a terminal.
+    pub asks: bool,
+    /// An operational command run from configuration mode (`run …`): there, an update only loads.
+    from_configuration: bool,
 }
 
 /// Split a command line into words as a shell does: whitespace-separated, "double" or 'single'
@@ -328,7 +447,7 @@ fn word(out: &mut Vec<String>, w: String) -> Result<()> {
 
 impl<'a> Session<'a> {
     pub fn new(schema: Schema, tree: crate::nixos::Tree, repo: Repo, saved: Option<PathBuf>, machine: &'a dyn Machine, me: &str) -> Self {
-        Session { schema, tree, repo, saved, mode: Mode::Operational, edit: Vec::new(), candidate: None, machine, me: me.into(), screen: || None, fit: None, done: false, page: true, exclusive: None, print: None }
+        Session { schema, tree, repo, saved, mode: Mode::Operational, edit: Vec::new(), candidate: None, machine, me: me.into(), screen: || None, fit: None, done: false, page: true, exclusive: None, print: None, cache: crate::evalcache::Cache::none(), asks: false, from_configuration: false }
     }
 
     /// The whole tree over both kinds of files (whole.rs).
@@ -616,6 +735,7 @@ impl<'a> Session<'a> {
             Op::Rollback { n, path } if path.is_empty() => self.rollback(n),
             Op::Rollback { n, path } => self.rollback_part(n, &path),
             Op::Commit(o) => {
+                let _detail = Detailed::on(self.machine, o.detail);
                 let quit = o.and_quit;
                 let out = self.commit(o)?;
                 if !quit {
@@ -626,10 +746,12 @@ impl<'a> Session<'a> {
                 Ok(format!("{out}{}{}", self.said("Exiting configuration mode"), self.let_go()))
             }
             Op::Run(op) => {
-                let was = self.mode;
+                let (was, from) = (self.mode, self.from_configuration);
+                self.from_configuration = was == Mode::Configuration;
                 self.mode = Mode::Operational;
                 let r = self.run(*op);
                 self.mode = was;
+                self.from_configuration = from;
                 self.done = false;
                 r
             }
@@ -929,7 +1051,7 @@ impl<'a> Session<'a> {
                     let mut help = self.tree.resolve(&[place.clone(), vec!["enable".into()]].concat()).map(|r| r.help.to_string()).unwrap_or_default();
                     // SSH: how TorqOS has it, as the configuration evaluates (modules/services.nix).
                     if place[1] == "openssh" {
-                        let (_, ssh) = self.machine.ssh(&head, &[])?;
+                        let ssh = ssh_before(self.machine, &self.cache, &head)?.state;
                         help = if ssh.passwords { "SSH: passwords and keys, repeated wrong guesses blocked; root never logs in".into() } else { "SSH: keys only; root never logs in".into() };
                     }
                     rows.push((place.join(" "), help));
@@ -1134,8 +1256,16 @@ impl<'a> Session<'a> {
             syntax::Request::Restore { name, snapshot, path } => self.machine.restore_backup(&name, snapshot.as_deref(), &path, &self.me),
             syntax::Request::SnapshotDelete { change } => self.machine.snapshot_delete(change, &self.me),
             syntax::Request::Pull => self.pull(),
-            syntax::Request::Update { all } => self.update(all),
-            syntax::Request::SoftwareRollback { n } => self.software_rollback(n),
+            syntax::Request::Update { all, detail } => {
+                let _detail = Detailed::on(self.machine, detail);
+                let loaded = self.update(all)?;
+                self.offer_install(loaded)
+            }
+            syntax::Request::SoftwareRollback { n, detail } => {
+                let _detail = Detailed::on(self.machine, detail);
+                let loaded = self.software_rollback(n)?;
+                self.offer_install(loaded)
+            }
         }
     }
 
@@ -1155,6 +1285,42 @@ impl<'a> Session<'a> {
         Ok(self.said(&format!("commit at {} cancelled (#{n})", s.when)))
     }
 
+    /// After `request system update` or `request system software rollback <n>` loaded software (`loaded`
+    /// says what): in operational mode, with a person at the terminal, and the software the candidate's
+    /// only change, they are asked whether to install it now — yes commits it (one check, the password
+    /// a system change asks); no leaves it in the candidate. Anything else is load-only, as in
+    /// configuration mode and in scripts: the candidate's other changes are never committed by
+    /// surprise.
+    fn offer_install(&mut self, loaded: String) -> Result<String> {
+        if self.mode != Mode::Operational || self.from_configuration || !self.asks || self.candidate()?.lock.is_none() {
+            return Ok(loaded);
+        }
+        // The first update of an image's own TorqOS moves it to the releases too (its flake.nix): a
+        // change to read in full first.
+        if self.base_source()?.as_deref().is_some_and(crate::software::image_own) {
+            return Ok(loaded);
+        }
+        let base = self.candidate()?.base.clone();
+        if base != self.repo.head()? {
+            return Ok(loaded);
+        }
+        let a = self.against()?;
+        let changes = a.changes(&self.schema)?;
+        if changes.is_empty() {
+            return Ok(loaded);
+        }
+        if changes.iter().any(|(p, _, _)| p != "flake.lock") {
+            return Ok(loaded + &self.said("The candidate also holds other changes, not yet committed: so this waits to be installed with them, by `configure`, `show | compare`, `commit`."));
+        }
+        match self.machine.ask(&format!("{loaded}{}", self.ui().line("", "Install it now? "))) {
+            Answer::Yes => self.commit_as(CommitOptions::default(), true),
+            // (`torqcli <command>`: its candidate is its own, gone when it ends.)
+            Answer::No if self.saved.is_none() => Ok(self.said("Not installed, and not kept: this run's candidate ends with it (in the shell, an update waits in your candidate for `configure; commit`).")),
+            Answer::No => Ok(self.said("Not installed: it stays in the candidate, and `configure; commit` installs it later.")),
+            Answer::NobodyToAsk => Ok(loaded),
+        }
+    }
+
     /// `request system update [all]`: the newest TorqOS (with `all`, every input) into the candidate.
     fn update(&mut self, all: bool) -> Result<String> {
         let base = self.candidate()?.base.clone();
@@ -1164,7 +1330,7 @@ impl<'a> Session<'a> {
             Some(url) if Some(&url) != source.as_ref() => {
                 let flake = self.repo.file_at(&base, "flake.nix")?.context("this machine has no flake.nix")?;
                 let flake = crate::software::with_source(&String::from_utf8(flake).context("flake.nix is not text")?, &url)?;
-                self.machine.lock_with(&base, &flake, all)?
+                step(self.machine, "Locking the newest software of the new source", || self.machine.lock_with(&base, &flake, all))?
             }
             // An image's own TorqOS has no newer version: the first update moves the machine to the
             // releases (ADR-028), as `set system software torq source` would.
@@ -1178,7 +1344,7 @@ impl<'a> Session<'a> {
                 let moved = self.said(&format!("This machine runs the TorqOS it was installed with: the update moves it to TorqOS's releases ({releases})."));
                 return Ok(format!("{moved}{shown}"));
             }
-            _ => self.machine.update_lock(&base, all)?,
+            _ => step(self.machine, "Locking the newest software", || self.machine.update_lock(&base, all))?,
         };
         let signed = self.release_signed(&new)?;
         Ok(format!("{}{signed}", self.load_software(new, "This machine has the newest software: nothing to load.")?))
@@ -1190,7 +1356,7 @@ impl<'a> Session<'a> {
         let base = self.candidate()?.base.clone();
         let flake = self.repo.file_at(&base, "flake.nix")?.context("this machine has no flake.nix")?;
         let flake = crate::software::with_source(&String::from_utf8(flake).context("flake.nix is not text")?, url)?;
-        let lock = self.machine.lock_with(&base, &flake, all)?;
+        let lock = step(self.machine, "Locking the newest software of the source", || self.machine.lock_with(&base, &flake, all))?;
         let signed = self.release_signed(&lock)?;
         let base_lock = self.repo.file_at(&base, "flake.lock")?;
         let shown = software_compare(base_lock.as_deref(), &Some(lock.clone()), &self.versions(&base)?);
@@ -1204,7 +1370,7 @@ impl<'a> Session<'a> {
     fn release_signed(&mut self, lock: &str) -> Result<String> {
         let repo = crate::software::releases_repo(&self.machine.releases()?);
         let Some(rev) = crate::software::release_commit(lock, &repo) else { return Ok(String::new()) };
-        let signed = self.machine.check_release(&repo, &rev)?;
+        let signed = step(self.machine, "Checking the release's signature", || self.machine.check_release(&repo, &rev))?;
         let version = signed.version.filter(|v| crate::release::is_version(&v.number));
         let named = version.as_ref().map(|v| format!(" (TorqOS {})", shown_version(v))).unwrap_or_default();
         self.candidate()?.release = version.map(|v| candidate::Release { rev: rev.clone(), version: v });
@@ -1455,21 +1621,81 @@ impl<'a> Session<'a> {
         Ok(Against { base, files, lock, data, new_lock, nix, base_nix, versions })
     }
 
+    /// The check of `files` on `base`: `commit check`'s kept result if it is of exactly these (true:
+    /// reused), else one evaluation — and, if SSH is on after it and the change can touch SSH
+    /// (`ssh_relevant`), SSH before it (kept by commit, evalcache.rs).
+    fn checked(&mut self, base: &str, files: &[(String, Option<String>)], ssh_relevant: bool) -> Result<(Checked, bool)> {
+        let key = check_key(base, files);
+        if let Some(c) = self.candidate()?.checked.clone().filter(|c| c.key == key) {
+            if self.machine.detail() {
+                self.machine.show("Evaluating the configuration: not again — `commit check` evaluated these same changes");
+            }
+            return Ok((c, true));
+        }
+        let m = self.machine;
+        let result = step(m, "Evaluating the configuration, as the broker will build it", || m.evaluate(base, files))?;
+        // A tree file the configuration does not read would commit and change nothing: a flake.nix
+        // that does not pass `configDir` to torq.lib.mkSystem (as `torq pkg` checked).
+        if files.iter().any(|(p, _)| p != "flake.lock") && !result.reads_tree {
+            bail!(
+                "this machine's config does not read its settings files yet: its flake.nix must call \
+                 torq.lib.mkSystem with `configDir = ./.;` (a system change, made as Nix)"
+            );
+        }
+        let before = if ssh_relevant && result.ssh.state.on { Some(ssh_before(m, &self.cache, base)?) } else { None };
+        Ok((Checked { key, result, before }, false))
+    }
+
+    /// Whether the change can touch who logs in over SSH: any system-tier change can (a software update
+    /// too: TorqOS's own modules may change how SSH is set up; audit of 2026-10-31) — only a person's
+    /// own data files cannot.
+    fn ssh_relevant(&self, files: &[(String, Option<String>)]) -> bool {
+        files.iter().any(|(p, _)| self.schema.tier_of(p) != Some("user"))
+    }
+
+    /// After a commit of `files` on `base`: SSH as the commit has it, kept under the commit the broker
+    /// made — only if HEAD is that commit (its parent `base`, its files these), so the next commit
+    /// need not evaluate the state before it.
+    fn keep_after(&self, base: &str, files: &[(String, Option<String>)], ssh: &SshFacts) {
+        let Ok(head) = self.repo.head() else { return };
+        let ours = self.repo.parent_of(&head).ok().flatten().as_deref() == Some(base)
+            && files.iter().all(|(p, c)| self.repo.file_at(&head, p).ok() == Some(c.as_ref().map(|c| c.as_bytes().to_vec())));
+        if ours {
+            self.cache.put(&head, ssh);
+        }
+    }
+
     fn commit(&mut self, o: CommitOptions) -> Result<String> {
+        self.commit_as(o, false)
+    }
+
+    /// `commit`; `asked`: a person has just said yes to installing what it commits (the question after
+    /// `request system update`), having seen what it changes — asked again only if there is more to
+    /// read than that (SSH, warnings, notices).
+    fn commit_as(&mut self, o: CommitOptions, asked: bool) -> Result<String> {
         let s = self.schema.clone();
         let head = self.repo.head()?;
         let a = self.against()?;
         let base = a.base.clone();
         let changes = a.changes(&s)?;
         let files: Vec<(String, Option<String>)> = changes.iter().map(|(p, _, n)| (p.clone(), n.clone())).collect();
+        let ssh_relevant = self.ssh_relevant(&files);
         if o.check {
             if base != head {
                 bail!("the configuration has changed since your candidate was started: `rollback 0` starts over");
             }
             // The rules between settings, as `commit` applies them.
             crate::whole::software_allowed(&a.data)?;
-            let warned = self.warned(&self.machine.check(&base, &files)?);
-            return Ok(format!("{warned}{}", self.said("configuration check succeeds")));
+            let (checked, reused) = self.checked(&base, &files, ssh_relevant)?;
+            let warned = self.warned(&checked.result.warnings);
+            let again = if reused { self.said("As the last `commit check` of these same changes found (not evaluated again):") } else { String::new() };
+            // Kept with the candidate: a `commit` of exactly these changes uses it. (Not kept — another
+            // session changed or holds the candidate — is no failure: that commit evaluates again.)
+            if !reused {
+                self.candidate()?.checked = Some(checked);
+                let _ = self.save();
+            }
+            return Ok(format!("{again}{warned}{}", self.said("configuration check succeeds")));
         }
         // `commit at`: the time first, so that nobody approves a change for a time that is refused.
         if o.at.is_some() && changes.is_empty() {
@@ -1516,21 +1742,27 @@ impl<'a> Session<'a> {
         let tier = self.tier_of(&changes);
         // A person approves at a terminal: a system change, and a change to someone else's folder.
         let others = self.others_folders(&changes);
-        let warned = self.warned(&self.machine.check(&base, &files)?);
+        let (checked, reused) = self.checked(&base, &files, ssh_relevant)?;
+        let reused_note = if reused { self.said("The candidate is as `commit check` checked it: that check's result is used, not evaluated again.") } else { String::new() };
+        let warned = reused_note + &self.warned(&checked.result.warnings);
         let compare = a.compare(&self.whole())?;
         let mut shown: String = compare.lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
+        // What there is to read beyond the comparison starts here.
+        let compared = shown.len();
         // The comparison as it is; the sentences around it fit the window (ui.rs).
         let ui = self.ui();
         // SSH admits keys only unless passwords are allowed (modules/services.nix, however it is turned
         // on): keys only and none, nobody could log in; with some, approving it approves exactly those
         // (as the changed configuration has them). Whether this turns SSH on is read from the
-        // evaluated configurations, before and after: every way counts. Only tree and Nix files can.
-        // Any system-tier change can (a software update too: TorqOS's own modules may change how SSH is
-        // set up; audit of 2026-10-31) — only a person's own data files cannot.
-        let ssh_relevant = files.iter().any(|(p, _)| self.schema.tier_of(p) != Some("user"));
+        // evaluated configurations, before (kept by commit, or evaluated) and after: every way counts.
         if ssh_relevant {
-            let states = self.machine.ssh(&base, &files)?;
-            shown.push_str(&ssh_review(self.machine, states, &base, &files, "committed", &ui)?);
+            let (m, cache) = (self.machine, self.cache.clone());
+            let before = checked.before.clone();
+            let before = || match before {
+                Some(b) => Ok(b),
+                None => ssh_before(m, &cache, &base),
+            };
+            shown.push_str(&ssh_review(self.machine, before, &checked.result.ssh, "committed", &ui)?);
         }
         // How the machine boots: a mistake shows only at the next restart (no `commit confirmed` timer runs
         // on a system that does not come up), so say so before anyone approves it.
@@ -1572,6 +1804,10 @@ impl<'a> Session<'a> {
             };
             return Ok(warned + &self.said(&said) + &kept);
         }
+        // Already approved (the install question): asked again only with what it did not show.
+        let more = shown[compared..].to_string();
+        let why = why.filter(|_| !asked || !more.trim().is_empty());
+        let shown = if asked { more } else { shown };
         // Asked: the warnings were shown with the question; not asked, they come with the outcome.
         let warned = if why.is_some() { String::new() } else { warned };
         if let Some(why) = why {
@@ -1595,6 +1831,7 @@ impl<'a> Session<'a> {
             return Ok(warned + &self.said(&format!("commit at {local} scheduled (#{seq}): it lands then unless the configuration changes first; `clear system commit` cancels it")));
         }
         let seq = self.machine.commit(&diff, &base, tier, &reason, confirm)?;
+        self.keep_after(&base, &files, &checked.result.ssh);
         let kept = self.discard_committed();
         Ok(warned + &match confirm {
             Some(m) => format!(
@@ -2186,17 +2423,21 @@ fn settings_changed(compare: &str) -> usize {
 
 /// What a change does to who can log in over SSH, said before a person approves it (a commit, a
 /// revert — `verb`), whenever it changes that, not only when SSH turns on (audit of 2026-11-01):
-/// `states` is SSH before and after it (evaluated: every way of setting it counts).
+/// `after` is SSH as the change leaves it, `before` how to know SSH before it (asked only when SSH
+/// is on after it; evaluated, or kept from an evaluation of that commit: every way of setting it
+/// counts).
 /// - Passwords accepted after it, and newly (SSH just on, or passwords just allowed): said so, with
 ///   the keys if SSH just turned on.
 /// - Keys only after it, and none: refused — nobody could log in, and getting back in needs the
 ///   console. Keys only, and newly so (SSH just on, passwords just turned off) or other keys than
 ///   before (a key removed, another owner): the keys, approved as they are.
-pub fn ssh_review(m: &dyn Machine, states: (Ssh, Ssh), base: &str, files: &[(String, Option<String>)], verb: &str, ui: &crate::ui::Ui) -> Result<String> {
-    let (was, now) = states;
+pub fn ssh_review(m: &dyn Machine, before: impl FnOnce() -> Result<SshFacts>, after: &SshFacts, verb: &str, ui: &crate::ui::Ui) -> Result<String> {
+    let now = after.state;
     if !now.on {
         return Ok(String::new());
     }
+    let before = before()?;
+    let was = before.state;
     let listed = |owner: &str, keys: &[String]| if keys.is_empty() { String::new() } else { format!("Keys that will be able to log in as {owner}:\n{}\n", keys.join("\n")) };
     if now.passwords {
         if was.on && was.passwords {
@@ -2204,12 +2445,12 @@ pub fn ssh_review(m: &dyn Machine, states: (Ssh, Ssh), base: &str, files: &[(Str
         }
         let mut out = format!("{}\n", ui.line("! ", "SSH will accept passwords as well as keys (services openssh settings PasswordAuthentication): repeated wrong guesses are blocked."));
         if !was.on {
-            let (owner, keys) = m.ssh_keys(base, files)?;
+            let (owner, keys) = m.ssh_keys(after)?;
             out.push_str(&listed(&owner, &keys));
         }
         return Ok(out);
     }
-    let (owner, keys) = m.ssh_keys(base, files)?;
+    let (owner, keys) = m.ssh_keys(after)?;
     if keys.is_empty() {
         let how = if was.on { "would let in" } else { "lets in" };
         bail!(
@@ -2218,7 +2459,7 @@ pub fn ssh_review(m: &dyn Machine, states: (Ssh, Ssh), base: &str, files: &[(Str
              (`set services openssh settings PasswordAuthentication true`)"
         );
     }
-    if was.on && !was.passwords && m.ssh_keys(base, &[])? == (owner.clone(), keys.clone()) {
+    if was.on && !was.passwords && m.ssh_keys(&before)? == (owner.clone(), keys.clone()) {
         return Ok(String::new());
     }
     Ok(listed(&owner, &keys))
@@ -2353,7 +2594,12 @@ mod tests {
         keys: Vec<String>,
         /// The keys before the change, where a test says they differ (else: as after it).
         keys_before: Option<Vec<String>>,
-        ssh_asked: RefCell<Vec<Files>>,
+        ssh_asked: RefCell<Vec<serde_json::Value>>,
+        /// `| display detail`: on, and what was shown as it happened.
+        detail: std::cell::Cell<bool>,
+        shown: RefCell<Vec<String>>,
+        /// The evaluation fails, saying this.
+        broken: Option<String>,
         /// What `file edit` leaves a file as (None: unchanged), and what it was given.
         edit_to: Option<String>,
         edit_again: Option<String>,
@@ -2387,17 +2633,64 @@ mod tests {
         at_commits: RefCell<Vec<(String, String, String, String, String)>>,
         scheduled: Vec<Scheduled>,
         cancelled: RefCell<Vec<u64>>,
+        /// The repo a commit lands in, as the broker would make it (else: none does).
+        lands_in: Option<PathBuf>,
+        /// What happens in that repo once it has landed (another commit, the change amended).
+        then_sh: Option<String>,
     }
     impl Machine for Fake {
-        fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<Vec<String>> {
+        /// One evaluation: the warnings a test gives, and SSH after the change — as the evaluator would:
+        /// `services openssh|sshd enable true` in the changed files, or the old list's `ssh`; passwords
+        /// only where PasswordAuthentication is true (modules/services.nix: keys only otherwise). A test
+        /// may say otherwise (`ssh_state`), or that it fails (`broken`).
+        fn evaluate(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<Evaluated> {
             self.checks.borrow_mut().push(files.to_vec());
-            Ok(self.warnings.clone())
+            if self.detail.get() {
+                self.show("  (nix eval's own output)");
+            }
+            if let Some(why) = &self.broken {
+                bail!("{why}");
+            }
+            let has = |path: &str, f: &dyn Fn(&serde_json::Value) -> bool| {
+                files.iter().any(|(p, c)| p == path && c.as_deref().and_then(|c| serde_json::from_str(c).ok()).is_some_and(|v| f(&v)))
+            };
+            let yes = Some(&serde_json::Value::Bool(true));
+            let old = has("services.json", &|v| v.as_array().is_some_and(|a| a.iter().any(|x| x == "ssh")));
+            let nixos = has("nixos/services.json", &|v| v.pointer("/openssh/enable") == yes || v.pointer("/sshd/enable") == yes);
+            let passwords = has("nixos/services.json", &|v| v.pointer("/openssh/settings/PasswordAuthentication") == yes);
+            let state = self.ssh_state.map_or(Ssh { on: old || nixos, passwords }, |s| s.1);
+            let paths: Vec<&String> = files.iter().map(|(p, _)| p).collect();
+            Ok(Evaluated { warnings: self.warnings.clone(), ssh: SshFacts { state, admits: serde_json::json!({ "when": "after", "files": paths }) }, reads_tree: true })
+        }
+        /// SSH before the change: off, unless a test says.
+        fn ssh_at(&self, _base: &str) -> Result<SshFacts> {
+            *self.ssh_calls.borrow_mut() += 1;
+            Ok(SshFacts { state: self.ssh_state.map_or(Ssh::default(), |s| s.0), admits: serde_json::json!({ "when": "before" }) })
+        }
+        fn set_detail(&self, on: bool) {
+            self.detail.set(on);
+        }
+        fn detail(&self) -> bool {
+            self.detail.get()
+        }
+        fn show(&self, line: &str) {
+            self.shown.borrow_mut().push(line.into());
         }
         fn commit(&self, diff: &str, base: &str, tier: &str, reason: &str, confirm: Option<u32>) -> Result<u64> {
             if self.refuse {
                 bail!("commit refused: busy");
             }
             self.commits.borrow_mut().push((diff.into(), base.into(), tier.into(), reason.into(), confirm));
+            if let Some(repo) = &self.lands_in {
+                std::fs::write(repo.join(".change.diff"), diff).unwrap();
+                sh(repo, "git apply .change.diff && rm .change.diff && git add -A && git commit -qm change");
+                if let Some(script) = &self.then_sh {
+                    sh(repo, script);
+                }
+            }
+            if self.detail.get() {
+                self.show("  (the broker's build output)");
+            }
             Ok(42)
         }
         /// The clock is 2026-11-07 12:30 local, an hour east of UTC.
@@ -2472,26 +2765,9 @@ mod tests {
         fn facts(&self) -> Result<crate::facts::Facts> {
             Ok(crate::facts::Facts { nixos: "26.05".into(), kernel: "6.18".into(), uptime: 60, generations: 2, ..Default::default() })
         }
-        /// As the evaluator would: `services openssh|sshd enable true` in the changed files, or the old
-        /// list's `ssh`; passwords only where PasswordAuthentication is true (modules/services.nix: keys
-        /// only otherwise). A test may say otherwise.
-        fn ssh(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<(Ssh, Ssh)> {
-            *self.ssh_calls.borrow_mut() += 1;
-            if let Some(s) = self.ssh_state {
-                return Ok(s);
-            }
-            let has = |path: &str, f: &dyn Fn(&serde_json::Value) -> bool| {
-                files.iter().any(|(p, c)| p == path && c.as_deref().and_then(|c| serde_json::from_str(c).ok()).is_some_and(|v| f(&v)))
-            };
-            let yes = Some(&serde_json::Value::Bool(true));
-            let old = has("services.json", &|v| v.as_array().is_some_and(|a| a.iter().any(|x| x == "ssh")));
-            let nixos = has("nixos/services.json", &|v| v.pointer("/openssh/enable") == yes || v.pointer("/sshd/enable") == yes);
-            let passwords = has("nixos/services.json", &|v| v.pointer("/openssh/settings/PasswordAuthentication") == yes);
-            Ok((Ssh::default(), Ssh { on: old || nixos, passwords }))
-        }
-        fn ssh_keys(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<(String, Vec<String>)> {
-            self.ssh_asked.borrow_mut().push(files.to_vec());
-            match (&self.keys_before, files.is_empty()) {
+        fn ssh_keys(&self, facts: &SshFacts) -> Result<(String, Vec<String>)> {
+            self.ssh_asked.borrow_mut().push(facts.admits.clone());
+            match (&self.keys_before, facts.admits["when"] == "before") {
                 (Some(before), true) => Ok(("dev".into(), before.clone())),
                 _ => Ok(("dev".into(), self.keys.clone())),
             }
@@ -3324,7 +3600,7 @@ mod tests {
         let e = format!("{:#}", s.exec("commit").unwrap_err());
         assert!(e.contains("lets in dev's keys only, and they have none") && e.contains("PasswordAuthentication true"), "{e}");
         assert!(m.commits.borrow().is_empty() && m.asked.borrow().is_empty(), "nothing asked, nothing committed");
-        assert_eq!(m.ssh_asked.borrow()[0][0].0, "nixos/services.json", "as the change will have it");
+        assert_eq!(m.ssh_asked.borrow()[0]["files"][0], "nixos/services.json", "as the change will have it");
         // The old list is never added to: it says what to set instead.
         let e = format!("{:#}", s.exec("set torq services enabled ssh").unwrap_err());
         assert!(e.contains("old list of services: `set services openssh enable true` turns it on"), "{e}");
@@ -3509,9 +3785,9 @@ mod tests {
         assert!(diff.contains("+++ b/services/httpd.nix"), "{diff}");
         assert_eq!(tier, "system");
         assert!(m.asked.borrow()[0].contains("services.httpd.enable = true"), "the person approves the Nix as written");
-        assert_eq!(*m.ssh_calls.borrow(), 1, "a config file may turn SSH on: SSH is evaluated");
-        // Only a Nix file changed: SSH is still evaluated.
-        let (d, m) = (repo(), Fake { answer: true, edit_to: Some("{ ... }: { }\n".into()), ..Default::default() });
+        assert_eq!(m.checks.borrow().len(), 1, "evaluated once, SSH with it: a config file may turn it on");
+        // Only a Nix file changed: SSH is still reviewed (it may turn SSH on).
+        let (d, m) = (repo(), Fake { answer: true, edit_to: Some("{ ... }: { }\n".into()), ssh_state: Some((Ssh::default(), Ssh { on: true, passwords: true })), ..Default::default() });
         sh(d.path(), "printf '{ ... }:\\n{\\n}\\n' > system.nix && git add -A && git commit -qm nix");
         let saved = d.path().join("c2.json");
         let mut s = session(d.path(), Some(saved.clone()), &m);
@@ -4569,5 +4845,261 @@ mod tests {
         s.exec("exit").unwrap();
         s.exec("exit").unwrap();
         assert!(s.done);
+    }
+
+    /// A commit evaluates the configuration once (the check, which reads SSH and the tree with it);
+    /// SSH before the change only when SSH is on after it, and then from the cache once that commit
+    /// was evaluated — and a commit the broker lands keeps its own SSH there for the next one.
+    #[test]
+    fn a_commit_evaluates_once_and_ssh_before_it_comes_from_the_cache() {
+        let keys_only = Ssh { on: true, passwords: false };
+        let key = "    256 SHA256:abc dev@mac (ED25519)  (from /home/dev/.ssh/authorized_keys)".to_string();
+        // SSH off after it: one evaluation, nothing more.
+        let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set system host-name three", "commit"]);
+        assert_eq!((m.checks.borrow().len(), *m.ssh_calls.borrow()), (1, 0));
+        // SSH on after it: the state before is evaluated once, then kept by commit.
+        let cache = tempfile::tempdir().unwrap();
+        let (d, m) = (repo(), Fake { answer: true, ssh_state: Some((keys_only, keys_only)), keys: vec![key.clone()], lands_in: None, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        s.cache = crate::evalcache::Cache::at(&cache.path().join("torq"));
+        run(&mut s, &["configure", "set system host-name three", "commit"]);
+        assert_eq!((m.checks.borrow().len(), *m.ssh_calls.borrow()), (1, 1), "the check, and SSH before it");
+        let mut s = session(d.path(), None, &m);
+        s.cache = crate::evalcache::Cache::at(&cache.path().join("torq"));
+        run(&mut s, &["configure", "set system host-name four", "commit"]);
+        assert_eq!((m.checks.borrow().len(), *m.ssh_calls.borrow()), (2, 1), "the same base again: SSH before it from the cache");
+        // The commit the broker made keeps SSH as it has it: the next commit, on it, evaluates once.
+        let m = Fake { answer: true, ssh_state: Some((keys_only, keys_only)), keys: vec![key], lands_in: Some(d.path().to_path_buf()), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        s.cache = crate::evalcache::Cache::at(&cache.path().join("torq"));
+        let before = Repo::new(d.path()).head().unwrap();
+        run(&mut s, &["configure", "set system host-name five", "commit"]);
+        let after = Repo::new(d.path()).head().unwrap();
+        assert_ne!(before, after, "the change landed");
+        assert_eq!(crate::evalcache::Cache::at(&cache.path().join("torq")).get(&after).map(|f| f.admits["when"].clone()), Some(serde_json::json!("after")), "kept as the commit has it");
+        let mut s = session(d.path(), None, &m);
+        s.cache = crate::evalcache::Cache::at(&cache.path().join("torq"));
+        run(&mut s, &["configure", "set system host-name six", "commit"]);
+        assert_eq!((m.checks.borrow().len(), *m.ssh_calls.borrow()), (2, 0), "one evaluation each, nothing before");
+        // Without a cache, SSH before is evaluated each time.
+        let m = Fake { answer: true, ssh_state: Some((keys_only, keys_only)), keys: vec!["k".into()], ..Default::default() };
+        for host in ["seven", "eight"] {
+            let mut s = session(d.path(), None, &m);
+            run(&mut s, &["configure", &format!("set system host-name {host}"), "commit"]);
+        }
+        assert_eq!(*m.ssh_calls.borrow(), 2);
+    }
+
+    /// `commit check` then `commit`: the check is not done twice — unless the candidate changed, or
+    /// its base moved. Said plainly when it is used.
+    #[test]
+    fn commit_after_commit_check_uses_its_result() {
+        let (d, m) = (repo(), Fake { answer: true, warnings: vec!["w1".into()], ..Default::default() });
+        let saved = d.path().join("candidate.json");
+        let mut s = session(d.path(), Some(saved.clone()), &m);
+        run(&mut s, &["configure", "set system host-name three"]);
+        assert!(s.exec("commit check").unwrap().ends_with("configuration check succeeds\n"));
+        assert_eq!(m.checks.borrow().len(), 1);
+        // Another session, the same shared candidate: its commit uses the check.
+        let mut s2 = session(d.path(), Some(saved.clone()), &m);
+        s2.exec("configure").unwrap();
+        assert_eq!(s2.exec("commit").unwrap(), "commit complete (change #42)\n");
+        assert_eq!(m.checks.borrow().len(), 1, "not evaluated again");
+        let q = m.asked.borrow()[0].clone();
+        assert!(q.contains("that check's result is used, not evaluated again") && q.contains("! warning: w1"), "said, with the check's warnings: {q}");
+        // Changed after the check: evaluated again.
+        let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set system host-name three", "commit check", "set system host-name four", "commit"]);
+        assert_eq!(m.checks.borrow().len(), 2);
+        assert_eq!(m.checks.borrow()[1][0].1.as_deref().map(|c| c.contains("four")), Some(true), "the candidate as it is");
+        assert!(!m.asked.borrow()[0].contains("not evaluated again"));
+        // Changed and changed back: the same changes, the same check.
+        let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set system host-name three", "commit check", "set system host-name four", "set system host-name three", "commit"]);
+        assert_eq!(m.checks.borrow().len(), 1);
+        // The base moved: the kept check is of another configuration (and the commit is refused).
+        let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set system host-name three", "commit check"]);
+        let c = s.candidate().unwrap();
+        let (base, files) = (c.base.clone(), c.checked.clone().unwrap().key);
+        assert_eq!(files, check_key(&base, &[("system/host.json".into(), Some("{\n  \"host-name\": \"three\"\n}\n".into()))]));
+        assert_ne!(check_key(&base, &[]), check_key("other", &[]), "the base is part of the key");
+        assert_ne!(check_key(&base, &[("a".into(), None)]), check_key(&base, &[("a".into(), Some(String::new()))]), "deleted is not empty");
+        sh(d.path(), "printf x > other && git add -A && git commit -qm moved");
+        assert!(format!("{:#}", s.exec("commit").unwrap_err()).contains("has changed since your candidate was started"));
+        assert_eq!(m.checks.borrow().len(), 1);
+        // A check that failed is no result: the commit evaluates (and fails) again.
+        let (d, m) = (repo(), Fake { answer: true, broken: Some("error: undefined variable 'x'".into()), ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set system host-name three"]);
+        assert!(s.exec("commit check").is_err() && s.exec("commit").is_err());
+        assert_eq!(m.checks.borrow().len(), 2);
+        assert!(m.asked.borrow().is_empty() && m.commits.borrow().is_empty(), "an error is said before anything is asked");
+    }
+
+    /// In operational mode, the software an update loads is offered for install at once — when it is
+    /// the candidate's only change and a person is there to answer; otherwise it is loaded, as ever.
+    #[test]
+    fn an_update_offers_to_install_what_it_loads() {
+        let newer = crate::pkg::ymd(NEWER);
+        // Yes: committed, with one check and no second question.
+        let (d, m) = (repo_with_software(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        s.asks = true;
+        assert_eq!(s.exec("request system update").unwrap(), "commit complete (change #42)\n");
+        assert_eq!((m.asked.borrow().len(), m.checks.borrow().len(), m.commits.borrow().len()), (1, 1, 1));
+        let q = m.asked.borrow()[0].clone();
+        assert!(q.contains(&format!("+   torq {newer};")) && q.ends_with("Install it now? "), "what it loads, then the question: {q}");
+        assert_eq!(m.commits.borrow()[0].2, "system");
+        // With more to read than the software (SSH): asked again, with that alone.
+        let on = Ssh { on: true, passwords: true };
+        let (d, m) = (repo_with_software(), Fake { answer: true, ssh_state: Some((Ssh::default(), on)), ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        s.asks = true;
+        s.exec("request system update").unwrap();
+        assert_eq!(m.asked.borrow().len(), 2);
+        let again = m.asked.borrow()[1].clone();
+        assert!(again.contains("SSH will accept passwords") && !again.contains("torq") && again.contains("Commit?"), "{again}");
+        // No: left in the candidate, said how to install it later.
+        let (d, m) = (repo_with_software(), Fake { no: true, ..Default::default() });
+        let saved = d.path().join("candidate.json");
+        let mut s = session(d.path(), Some(saved), &m);
+        s.asks = true;
+        assert_eq!(s.exec("request system update").unwrap(), "Not installed: it stays in the candidate, and `configure; commit` installs it later.\n");
+        let (d2, m2) = (repo_with_software(), Fake { no: true, ..Default::default() });
+        let mut one = session(d2.path(), None, &m2);
+        one.asks = true;
+        assert!(one.exec("request system update").unwrap().starts_with("Not installed, and not kept"), "a candidate of its own says so");
+        assert!(m.commits.borrow().is_empty() && m.checks.borrow().is_empty());
+        assert!(s.uncommitted().unwrap(), "still in the candidate");
+        // Other changes in the candidate: never committed by surprise — loaded, and said why it waits.
+        run(&mut s, &["configure", "set system host-name three", "exit"]);
+        let out = s.exec("request system update").unwrap();
+        assert!(out.contains(&format!("+   torq {newer};")) && out.contains("also holds other changes") && out.contains("`configure`, `show | compare`, `commit`"), "{out}");
+        assert_eq!(m.asked.borrow().len(), 1, "not asked again");
+        // A script, or input that is no terminal: loaded only, never a question to hang on.
+        let (d, m) = (repo_with_software(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        assert!(s.exec("request system update").unwrap().ends_with("Loaded into the candidate: `commit` (in configuration mode) installs it.\n"));
+        assert!(m.asked.borrow().is_empty() && m.commits.borrow().is_empty());
+        // Configuration mode: loaded only.
+        let mut s = session(d.path(), None, &m);
+        s.asks = true;
+        run(&mut s, &["configure", "run request system update"]);
+        assert!(m.asked.borrow().is_empty() && m.commits.borrow().is_empty());
+        // A software rollback is offered as an update is.
+        let (d, m) = (repo_with_software(), Fake { answer: true, ledger: None, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        s.asks = true;
+        assert_eq!(s.exec("request system software rollback 1").unwrap(), "commit complete (change #42)\n");
+        assert!(m.asked.borrow()[0].ends_with("Install it now? "));
+        // An error is said before any password: the check fails, nothing is committed.
+        let (d, m) = (repo_with_software(), Fake { answer: true, broken: Some("error: attribute 'x' missing".into()), ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        s.asks = true;
+        assert!(format!("{:#}", s.exec("request system update").unwrap_err()).contains("attribute 'x' missing"));
+        assert!(m.commits.borrow().is_empty() && m.asked.borrow().len() == 1);
+    }
+
+    /// `| display detail`: each step named as it starts and how long it took, the machine's own
+    /// output with it, shown as it happens; without it, nothing is shown along the way.
+    #[test]
+    fn display_detail_shows_each_step_as_it_happens() {
+        let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set system host-name three", "commit"]);
+        assert!(m.shown.borrow().is_empty(), "nothing along the way");
+        run(&mut s, &["set system host-name four", "commit | display detail"]);
+        let shown = m.shown.borrow().clone();
+        let at = |l: &str| shown.iter().position(|x| x.starts_with(l)).unwrap_or_else(|| panic!("{l}: {shown:?}"));
+        assert!(at("Evaluating the configuration, as the broker will build it…") < at("  (nix eval's own output)"));
+        assert!(at("  (nix eval's own output)") < at("Evaluating the configuration, as the broker will build it: done ("));
+        assert!(at("Evaluating the configuration, as the broker will build it: done (") < at("  (the broker's build output)"));
+        assert!(!m.detail.get(), "for that command alone");
+        // A check then: said that it is not evaluated again; the update's steps too.
+        m.shown.borrow_mut().clear();
+        run(&mut s, &["set system host-name five", "commit check", "commit confirmed 5 | display detail"]);
+        assert!(m.shown.borrow().iter().any(|l| l.contains("not again — `commit check` evaluated these same changes")), "{:?}", m.shown.borrow());
+        let (d, m) = (repo_with_software(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        s.exec("request system update | display detail").unwrap();
+        assert!(m.shown.borrow().iter().any(|l| l.starts_with("Locking the newest software: done")), "{:?}", m.shown.borrow());
+        // Failed: said so, with its time.
+        let (d, m) = (repo(), Fake { answer: true, broken: Some("error: x".into()), ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set system host-name three"]);
+        assert!(s.exec("commit check | display detail").is_err());
+        assert!(m.shown.borrow().iter().any(|l| l.starts_with("Evaluating the configuration, as the broker will build it: failed (")));
+        assert!(!m.detail.get(), "off again after an error");
+    }
+
+    /// SSH after a commit is kept under the new HEAD only when HEAD is that commit: its parent the
+    /// base, its files the change's. Not when nothing landed, when what landed differs, or when another
+    /// commit came after it.
+    #[test]
+    fn ssh_is_kept_only_under_the_commit_that_landed() {
+        // Each case its own cache: the cases' repositories are alike, and commits made within one
+        // second (as in the build sandbox) get the same ids, so one cache would answer across cases.
+        let commit = |lands: bool, then: Option<&str>| {
+            let cache = tempfile::tempdir().unwrap();
+            let kept = crate::evalcache::Cache::at(&cache.path().join("torq"));
+            let d = repo();
+            let m = Fake { answer: true, lands_in: lands.then(|| d.path().to_path_buf()), then_sh: then.map(String::from), ..Default::default() };
+            let mut s = session(d.path(), None, &m);
+            s.cache = kept.clone();
+            let base = Repo::new(d.path()).head().unwrap();
+            run(&mut s, &["configure", "set system host-name three", "commit"]);
+            let head = Repo::new(d.path()).head().unwrap();
+            let parent = Repo::new(d.path()).parent_of(&head).unwrap().unwrap();
+            (base, head, parent, kept, (d, cache))
+        };
+        // Landed as it was: kept (SSH off after it, so nothing was kept before it).
+        let (base, head, _, kept, _d) = commit(true, None);
+        assert!(kept.get(&base).is_none() && kept.get(&head).is_some());
+        // Nothing landed: HEAD is still the base, which is not the change.
+        let (base, head, _, kept, _d) = commit(false, None);
+        assert_eq!(base, head);
+        assert!(kept.get(&base).is_none());
+        // Landed on the base, but with other content.
+        let (base, head, parent, kept, _d) = commit(true, Some("printf '{ \"host-name\": \"other\" }\\n' > system/host.json && git commit -q --amend -am amended"));
+        assert_eq!(parent, base);
+        assert!(kept.get(&head).is_none() && kept.get(&base).is_none());
+        // Landed, then another commit after it (its files the change's, its parent not the base).
+        let (base, head, parent, kept, _d) = commit(true, Some("printf x > other && git add -A && git commit -qm later"));
+        assert_ne!(parent, base);
+        assert!(kept.get(&head).is_none() && kept.get(&parent).is_none());
+    }
+
+    /// The install is offered only on a candidate based on the configuration in effect, and never for
+    /// an image's first update (it moves the machine to the releases: its flake.nix too).
+    #[test]
+    fn the_install_is_offered_only_where_the_update_is_all_there_is() {
+        // The configuration moved since the candidate was started: loaded, said, not offered.
+        let (d, m) = (repo_with_software(), Fake { no: true, ..Default::default() });
+        let saved = d.path().join("candidate.json");
+        let mut s = session(d.path(), Some(saved.clone()), &m);
+        s.asks = true;
+        s.exec("request system update").unwrap();
+        assert_eq!(m.asked.borrow().len(), 1);
+        sh(d.path(), "printf x > other && git add -A && git commit -qm moved");
+        let mut s = session(d.path(), Some(saved), &m);
+        s.asks = true;
+        let out = s.exec("request system update").unwrap();
+        assert!(out.contains("`commit` will be refused"), "{out}");
+        assert_eq!(m.asked.borrow().len(), 1, "not offered");
+        // An image's first update: loaded, not offered, and not called other changes.
+        let d = repo_with_software();
+        sh(d.path(), "printf '{\\n  inputs = {\\n    torq.url = \"path:/nix/store/0123456789abcdfghijklmnpqrsvwxyz-source\";\\n  };\\n}\\n' > flake.nix && git add -A && git commit -qm flake");
+        let m = Fake { answer: true, release: Some(("0123456789abcdef0123456789abcdef01234567".into(), true)), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        s.asks = true;
+        let out = s.exec("request system update").unwrap();
+        assert!(out.starts_with("This machine runs the TorqOS it was installed with") && !out.contains("other changes"), "{out}");
+        assert!(m.asked.borrow().is_empty() && m.commits.borrow().is_empty());
     }
 }

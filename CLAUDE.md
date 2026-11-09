@@ -43,7 +43,7 @@ flake.nix              entry point: images, VMs, checks, packages, the dev shell
 modules/               the distribution, as NixOS modules (torq.* options)
   base.nix             nix settings, users, locale, core packages
   security.nix         hardening (boot chain and TPM: later)
-  desktop.nix          a desktop (niri), off in the base; the torqos-desktop configuration's (ADR-034, M4)
+  desktop.nix          a desktop (COSMIC, ADR-045), off in the base; the torqos-desktop configuration's (ADR-034, M4)
   broker.nix           the privileged change broker service + config repo
   shell.nix            the login shell: zsh + oh-my-zsh and the TorqOS prompt (shell/torq.zsh-theme)
   setup.nix            first-boot setup, at the console of a machine made from the image
@@ -110,7 +110,7 @@ virtualisation). Without it QEMU falls back to TCG and they take minutes.
 As of 2026-11-07 the owner set 0.3.0's scope: everything that is not desktop or GUI. M3's build list is done
 (the socket broker, the agent's account and `torq agent run`, the remote with push, anchor, pull and adopt,
 strict mode and break-glass, btrfs images with data snapshots, ledger hardening) and its audit
-(`~/torq-audit-m3/`, kept off the repository until its findings are fixed; KNOWN-GAPS 6zl) is being
+(`docs/AUDIT-2026-11-06.md`, in the repository since its findings were fixed or recorded, KNOWN-GAPS 6zl) was
 worked through. Then: the release path (A2, A3), `commit at`, `configure exclusive`, systemd-repart;
 the declared backup and `request system restore` (ADR-038); the agent's doctor mode, proposals with
 taint tracking, and session trust (M5, AI-LAYER.md). The desktop (M4) and the agent's GUI parts come after.
@@ -133,8 +133,10 @@ done (`docs/AUDIT-2026-11-04.md`); **left of M2:** the `v0.2.0` tag.
 **Then M3 — trust** (ADR-035, ADR-036): the broker as a socket service with identity from
 `SO_PEERCRED`, the agent's account, the config repo's remote (push after every change, the ledger
 anchored there, pull as a proposal, adopt at setup), strict mode and `torq break-glass`, data
-snapshots. **M4 — the desktop as a configuration** (`torqos-desktop`; applications by rung,
-ADR-037; data declared, ADR-038). **M5 — the agent** (doctor, proposals, session trust; the three
+snapshots. **M3.5 — the install** (ADR-046, ADR-047): a console UI for installer and setup, firmware
+and Wi-Fi on real hardware (the owner's Zenbook S 16 is the target), recipes — anyone's shared
+configuration repository as a starting point. **M4 — the desktop as a configuration** (COSMIC only,
+ADR-045; `torqos-desktop`, the official recipe; applications by rung, ADR-037; data declared, ADR-038). **M5 — the agent** (doctor, proposals, session trust; the three
 scenarios of ADR-034 as VM tests). `docs/ROADMAP.md` has each. What is left of M1.5 is human
 polish, below these.
 

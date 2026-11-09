@@ -890,6 +890,21 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** the desktop configuration turns on `services.flatpak` and the portal for its
   compositor; disk for runtimes; the agent builds Nix packages, not Flatpaks. The repository shows
   every application on the machine, by rung.
+- **Amended (2026-11-09, the owner; ADR-045): the COSMIC Store installs by hand, and the tree keeps
+  what it is asked to.** NixOS's COSMIC module installs COSMIC Store wherever Flatpak is on, so every
+  TorqOS Desktop has it (a CLI machine has neither). On NixOS it is a Flatpak store in practice (its
+  system-package side needs PackageKit, which NixOS has not). "Never `flatpak install` by hand" gives way
+  for it:
+  - **The Store installs freely, per user, without a password**: a person's own Flatpak in their own home
+    is user tier, sandboxed, and touches nothing of the system. System-wide installs from it are refused
+    (the remote set user-only; a system Flatpak is a tree setting, rung 2 as above).
+  - **A switch never removes what the tree did not declare.** The reconciler installs and removes the
+    Flatpaks `users <name> flatpaks` names, and only those (nix-flatpak's `uninstallUnmanaged` off).
+  - **What was installed by hand shows in `show | compare`** ("installed from the Store, not in the
+    tree"), and **keep** (`request users <name> flatpaks keep`, or a button in TorqOS Settings) writes it
+    into `users <name> flatpaks`, user tier, so a machine rebuilt from its repository or a recipe
+    (ADR-047) brings it back. Not kept, it stays the person's state, like a file in their home.
+  - The agent installs nothing through the Store; its applications are rung 1 or 3, as above.
 
 ## ADR-038 — Data: what a rebuild does not bring back, and what TorqOS does about it
 - **Status:** proposed, 2026-11-03; local snapshots accepted and built 2026-11-06 (the owner: btrfs in
@@ -1478,3 +1493,300 @@ other is a silent mistake: a configuration the CLI does not see, a proposal show
   (M4's, M5's) add to the strings to move.
 - **Not:** a crate shared with the outside (the socket is TorqOS's own, ADR-040); the broker's logic in
   the shared crate; a change of the ledger's format or field order, ever, for this.
+
+## ADR-045 — The desktop is COSMIC, and only COSMIC; TorqOS Settings is torqcli in a window
+
+**Status:** accepted, 2026-11-08 (the owner). Amends ADR-034 (its compositor), ADR-040 ("Not: polkit", for
+a desktop session only) and ADR-019's history (niri and Quickshell). The design is decided here; the code is M4's.
+**Context:** ADR-034 named niri as `torqos-desktop`'s compositor, and `modules/desktop.nix` still carries
+niri, tuigreet and Quickshell from before ADR-019. Nothing of it has been built since. The owner runs Pop!_OS
+with COSMIC on their own laptop and wants that refinement: smooth scrolling, a good display, a conventional
+desktop a person who does not tile can use. The pinned nixpkgs (nixos-26.05) carries COSMIC 1.2.0
+(`cosmic-comp`, `cosmic-settings`, `xdg-desktop-portal-cosmic`, `cosmic-greeter`, `cosmic-osd`) with NixOS
+modules of its own (`services.desktopManager.cosmic`, `services.displayManager.cosmic-greeter`). Three
+things the desktop must do weighed more than the compositor's taste: an approval for a system change that an
+ordinary application cannot imitate as easily as a window; capture and input for the agent (ADR-034's
+*watch the desktop*) that are granted, not open to every client; and settings that are the tree's, not a GUI's
+own state. niri gives none of these by itself: wlr screencopy and virtual input, and a dialog that is one
+more client. COSMIC has a polkit agent in its shell (`cosmic-osd`) and goes through portals.
+- **Decision:**
+  1. **COSMIC is the desktop, and the only one.** `torqos-desktop` is COSMIC on Wayland with the
+     cosmic-greeter, through NixOS's own modules, at the version the release's nixpkgs pins. TorqOS builds,
+     tests and documents no other desktop: no niri, no GNOME, no KDE, no "any compositor" abstraction. What
+     TorqOS adds to the desktop (below) is written for COSMIC, with libcosmic, and may use what only COSMIC
+     has. A person may still install another desktop through the tree like any NixOS setting; TorqOS does
+     not support it. Flatpak and the portal per ADR-037; Firefox from Flathub; COSMIC's own terminal, files
+     and launcher instead of foot and fuzzel.
+  2. **TorqOS Settings (`torq-settings`): torqcli in a window.** A COSMIC application (Rust, libcosmic,
+     `settings/` crate) for the person at the machine: the tree (browse, search, change), the candidate and
+     `show | compare`, commit with a reason, history and the ledger, `rollback`, the pending proposals (the
+     agent's among them) to approve or refuse with the reason each is tainted, alarms, backups and snapshots,
+     `commit confirmed`'s countdown with its confirm. It is **a client of the broker's socket and nothing
+     more**: the person's own uid by `SO_PEERCRED` (ADR-040), the same requests torqcli sends, the types of
+     `torq-wire` (ADR-044, which therefore comes first), no privilege, no setuid, no D-Bus service of its
+     own, no second path to a commit. What it shows is what torqcli would print — the same prompt text, the
+     same refusals, word for word, from the broker; a word the GUI has and the CLI does not is a bug in one
+     of them. Every action it offers is a torqcli command the person could type, and it can show that command.
+  3. **COSMIC Settings, wrapped: a setting the tree owns is changed through the tree.** COSMIC Settings'
+     pages that change the system — date and time zone, the host name, users, and others as they are found —
+     call systemd's and accounts-daemon's D-Bus services, which on NixOS either refuse (the setting is
+     declared) or change a file the next switch overwrites. TorqOS carries a small patch to cosmic-settings
+     (in its overlay, offered upstream as a hook if upstream wants one) so that each such page shows the
+     tree's value and, on a change, opens TorqOS Settings at that setting with the new value in the
+     candidate — a proposal, committed like any other. No D-Bus shim that answers in systemd's name, and
+     no polkit rule that lets a page through: the tree is the only writer of the system (ADR-016).
+     Network connections (Wi-Fi and its secrets) stay NetworkManager's state, not configuration (the fence).
+  4. **A person's COSMIC look is theirs, and can be saved.** cosmic-config keeps one file per setting under
+     `~/.config/cosmic/`. The tree may set defaults for them (system-wide, through COSMIC's defaults
+     directory); a change in COSMIC Settings' own pages (theme, panel, dock, shortcuts) is the person's and
+     needs nothing. `show | compare` on the desktop says where the person's settings differ from the
+     tree's defaults, and **"save my desktop"** (`request users <name> desktop save`) turns them into
+     settings of `users <name> desktop …`, user tier, no password, so a machine adopted from the repository
+     (ADR-036) comes back looking the same. The tree's COSMIC words are generated from cosmic-config's keys
+     at the pinned version, not written by hand: COSMIC is young and its keys move between releases.
+  5. **Approval on the desktop goes through polkit and COSMIC's agent.** A system-tier request from a
+     graphical session is approved by the person's own password asked by COSMIC's polkit agent (the action
+     `org.torqos.approve`, `auth_self`, so the caller's password as in ADR-040, never an administrator's),
+     not by a box TorqOS Settings draws: the application never holds the password. The broker asks polkit
+     for the caller's process; the terminal keeps PAM as today (`torq-approve`), and faillock counts both.
+     ADR-040's "Not: polkit" stands for the server; on a desktop session polkit is the dialog's way in.
+     The dialog's text is the broker's prompt, the same as torqcli's. Open, before code: whether a graphical
+     session's requests then refuse a password in the request outright, so a password phished by a lookalike
+     window cannot be replayed over the socket (the trusted-path problem is not solved by any dialog;
+     SECURITY-MODEL says so); and polkit's PAM service set to count as `torq-approve` does.
+  6. **The agent's view of the desktop goes through COSMIC's portal** (`xdg-desktop-portal-cosmic`:
+     ScreenCast, Screenshot, RemoteDesktop where it is complete), granted by the person per session in the
+     portal's own dialog and ledgered as a grant like session trust (ADR-042 7). Not the compositor's
+     privileged protocols handed to the agent's account. What the portal lacks today (remote input first) is
+     checked before M5 relies on it, and upstreamed rather than bypassed.
+- **Consequences:** `modules/desktop.nix` is rewritten for COSMIC (niri, tuigreet, Quickshell, foot and
+  fuzzel go); KNOWN-GAPS 7 (niri's stock config) is moot. New code: `settings/` (TorqOS Settings), the
+  cosmic-settings patch, the polkit action and the broker's polkit check, the generated COSMIC words of the
+  tree. ADR-044's `torq-wire` becomes a prerequisite of M4. The desktop's weight is COSMIC's (more than niri,
+  well under GNOME), in the configuration, not the base (ADR-032). The VM test boots to a COSMIC session;
+  smoothness is judged on real hardware (.37), not in a VM. COSMIC's pace is the risk: TorqOS follows the
+  version nixpkgs pins, and a COSMIC upgrade is a TorqOS release's change, tested like one.
+- **Not:** a second desktop, now; TorqOS Settings as a privileged program or a D-Bus service; replacing
+  COSMIC Settings (it stays for what is the person's); a password entered in a window TorqOS draws.
+
+## ADR-046 — Real hardware: firmware on metal, Wi-Fi in the base, a reference laptop
+
+**Status:** accepted, 2026-11-08 (the owner: "use this laptop to target for desktop for now"). Amends ADR-031
+(what the installer writes) and ADR-019's "no reference hardware" for one machine, as a target, not a product.
+**Context:** The owner's laptop is an ASUS Zenbook S 16 (UM5606WA): AMD Ryzen AI 9 365 (Strix Point) with
+Radeon 880M, a Micron NVMe disk, MediaTek MT7925 Wi-Fi 7 and Bluetooth, four Cirrus CS35L56 amplifiers
+beside an ALC294 codec, an ELAN touchscreen with a stylus, an ASUS I2C touchpad, light and proximity sensors
+(`amd_sfh`), an XDNA NPU, Thunderbolt/USB4, **no Ethernet**. Pop!_OS 24.04 runs it on kernel 7.2.15; the
+inventory (2026-11-08) found nothing out of tree. TorqOS installed on it today would have no network: the
+base does not turn on `hardware.enableRedistributableFirmware` (so no Wi-Fi firmware, and NixOS's detected
+hardware file leaves CPU microcode off with it), and the base has networkd but nothing that joins Wi-Fi.
+- **Decision:**
+  1. **Firmware on real hardware.** The installer's hardware file (ADR-031 5) sets
+     `hardware.enableRedistributableFirmware = true` (linux-firmware, sof-firmware, wireless-regdb; the
+     microcode follows). The image and VMs stay without it (thin, ADR-032); `set hardware
+     enableRedistributableFirmware` stays the setting either way.
+  2. **Wi-Fi in the base, through iwd.** Where the installer finds a wireless interface
+     (`/sys/class/net/*/wireless`) the hardware file turns on `networking.wireless.iwd`, with networkd as
+     now; `iwctl` joins a network. The networks and their passphrases are iwd's state (`/var/lib/iwd`),
+     never the repository's (the fence). On a desktop, NetworkManager uses iwd as its backend
+     (`networking.networkmanager.wifi.backend = "iwd"`): one Wi-Fi stack, the same saved networks.
+     Joining Wi-Fi is a step of first-boot setup (ADR-047), so a machine without Ethernet is online
+     before anything needs the network.
+  3. **Hardware profiles, chosen by the machine's own name.** `hardware/<vendor>-<model>.nix` in TorqOS,
+     selected by the installer from DMI (`/sys/class/dmi/id/sys_vendor`, `product_name`) and named in the
+     hardware file, so it stays this machine's and never travels with a repository (ADR-036). A profile
+     holds what detection does not find, split by face: the base's part (anything a CLI install needs)
+     and the desktop's (`lib.mkIf config.torq.desktop.enable`). The first one is the Zenbook S 16:
+     - base: firmware (1), iwd (2), `amd_pstate` active, `amd_pmc` (s2idle), the SD reader, the kernel (4);
+     - desktop: amdgpu with Mesa and VA-API, PipeWire and the CS35L56 amplifiers' ASUS tuning files
+       (linux-firmware's `cirrus/`; without them the speakers are thin or silent), `hardware.bluetooth`,
+       `hardware.sensor.iio` (iio-sensor-proxy, for the light sensor), `services.hardware.bolt`,
+       power-profiles-daemon (COSMIC's module turns it on), UPower.
+     Battery charge limits and the ASUS keys' extras (`asus_armoury`) are tree settings later; the NPU
+     (`amdxdna`) loads and is noted for the doctor's local model (ADR-042), not used yet.
+  4. **The kernel stays NixOS's default (6.18 LTS)** until the laptop shows otherwise. It supports all of
+     the above; the owner's working system is on 7.2, which is not long-term and leaves nixpkgs when it
+     ends. If Wi-Fi, the amplifiers or suspend misbehave on 6.18, the profile follows nixpkgs' newest
+     line (`linuxPackages_latest`), never a pinned short-lived version.
+  5. **Before any of it is called done**, checked: first-boot setup and its build need no network
+     (evaluation is offline by design, `modules/setup.nix`; the build is not yet measured — KNOWN-GAPS),
+     or Wi-Fi comes first; and TorqOS installed on the laptop itself (the owner's choice of disk: the
+     installer takes whole disks only, ADR-031).
+- **Consequences:** `HARDWARE.md` names the laptop. The installer gains DMI and wireless detection and
+  writes three more lines; the ISO already carries the firmware. A VM test can check the hardware file
+  the installer writes for a fake DMI and a fake wireless interface; that the laptop works is checked on
+  the laptop. TorqOS still runs wherever NixOS runs: a machine without a profile gets detection and
+  firmware, as any NixOS install.
+- **Not:** profiles for hardware nobody has tried; a vendor kernel; proprietary drivers in the base.
+- **Amended (2026-11-09): firmware was already on.** On real hardware nixos-generate-config imports
+  `not-detected.nix`, which sets `hardware.enableRedistributableFirmware = mkDefault true` (and the CPU's
+  microcode follows it); nothing in TorqOS turns it off. So 1 needs no code: the installer's hardware file
+  already carries it, and only a VM goes without. What was missing is Wi-Fi (2): the installer now finds a
+  Wi-Fi device — a wireless interface, or a PCI device of the wireless class before its firmware is up —
+  and its hardware file turns on iwd (`cli/src/install.rs` `found`). The firmware and iwd are not in the
+  image's closure: ADR-048 5's carried build closure must hold them.
+
+## ADR-047 — The install: one console UI, and recipes — anyone's setup as a starting point
+
+**Status:** accepted, 2026-11-08 (the owner). Before M4: it serves CLI and desktop installs alike. Amends
+ADR-031 (the installer's console) and ADR-036 (setup's "fresh or from a repository?").
+**Context:** The installer (ADR-031) and first-boot setup ask their questions a line at a time. The
+owner wants an install like Ubuntu Server's: a full-screen console UI, the same on a server and a
+laptop. And an idea of the owner's: TorqOS machines are already config repositories, so a person's
+**entire setup can be shared as a git repository** — someone makes a good COSMIC setup for a Zenbook,
+publishes the repo, and anyone can start from it. Install CLI-only, point at a desktop repository, get a
+perfect starting base; then thousands of others. TorqOS has the pieces: a configuration is a repo
+(ADR-036), `load` / `save` (S5), the hardware file that never travels, `show | compare`, the ledger. What
+it lacks is a way to take *someone else's* repository, which is untrusted, where adopt takes the owner's own.
+- **Decision:**
+  1. **One console UI, two stages.** A full-screen text UI (Rust, `ratatui` over `crossterm`, in torqcli
+     with the rest of setup) that works on an 80×25 Linux console in sixteen colours and over a serial
+     line, with the TorqOS palette mapped to the console's colours. The two stages stay where ADR-031
+     put them, looking like one install:
+     - **the installer** (the ISO, no network, nobody logs in): the disk, its confirmation, writing and
+       checking;
+     - **first-boot setup** (the installed machine): the network first (Ethernet found, or Wi-Fi joined
+       through iwd, ADR-046), then the machine's name, time zone, the person and their password, SSH,
+       and **the starting point** (3). A summary to confirm, then the build, with its progress.
+     The line-at-a-time setup stays for a terminal that cannot draw the UI, and as the tests' way in.
+     **An answers file** (`torq-setup.json` on the stick or beside the image: every question's answer,
+     the password as its hash) installs unattended, as Ubuntu's autoinstall does: for fleets, and for the
+     VM tests, which then test the same code paths a person uses.
+  2. **A recipe is a TorqOS configuration repository someone shares.** No new format: the same repo a
+     machine already is, public, plus a `recipe.json` at its root — its name, a description, its author,
+     the TorqOS versions it was made for, the hardware it was made on (DMI names, as ADR-046's
+     profiles; a hint, not a requirement), and optionally a signing key. Publishing one is `torq recipe
+     publish`: a copy of the machine's configuration without what is the machine's own (3c), for the
+     person to push where they like.
+  3. **Starting from a recipe.** Setup's starting point is one of: *TorqOS only* (the CLI machine);
+     *TorqOS Desktop* (the official COSMIC recipe, ADR-045, carried by each release and signed by the
+     release key, ADR-028); *a recipe at a URL*; or *my own repository* (adopt, ADR-036, unchanged).
+     The same is a command later, on a machine already installed: `request system recipe <url>`.
+     A recipe is **someone else's configuration, run as root on this machine**, and is taken as that:
+     a. **Copied, not adopted.** The machine keeps its own repository and ledger; the recipe's commit
+        becomes a change of this machine's, its ledger entry naming where it came from (the URL, the
+        commit, a signature if it had one). Not its remote, its ledger, its deploy key.
+     b. **Pinned to a commit**, fetched read-only over HTTPS or SSH (no `ext::` or local transports, as
+        `url_ok`), shown as `show | compare` and a plain summary before anything is applied: what it
+        installs, which services it runs, which Nix files it attaches (any NixOS configuration — said
+        so), what it changes about the network, boot, the console and the display.
+     c. **What is never taken from a recipe:** this machine's hardware file (ADR-036), its name, time zone,
+        users and passwords, **SSH keys** (a recipe's author's key on your machine is a door), the
+        remote and its credential, backup settings, agent trust and grants, and Nix settings that trust
+        another binary cache or key (a cache's key is root on every machine that trusts it) — refused
+        unless the person turns that one on themselves, by name. A recipe's user settings are written for
+        a stand-in person (`users/@person/`) and become the person's own folder.
+     d. **Approved as any system change**: the person's password, and `commit confirmed` when it touches
+        the network, SSH, boot, the console or the display, so a recipe that breaks the machine undoes
+        itself. Its text is untrusted: a proposal the agent makes from a recipe is tainted (ADR-042).
+     e. **Following a recipe** is a choice, not a default: `request system recipe update` fetches the
+        recipe's newer commit and puts the difference in the candidate, as `request system pull` does
+        (ADR-036). Never applied unasked; never by the agent or a timer.
+  4. **Finding recipes is git's, not TorqOS's.** Any URL works. The releases repository keeps a short,
+     reviewed list (`recipes.json`, added to by pull request), shown by `torq recipe list` and offered in
+     setup; beyond it, a topic (`torqos-recipe`) on the forges. No TorqOS service, no account, no ranking
+     run by TorqOS (ADR-039).
+  5. **One recipe at a time, for now.** Recipes on top of recipes (a Zenbook's tuning under someone's
+     desktop) are a later ADR. Hardware is not a recipe's job: it is the profile's (ADR-046), so a desktop
+     recipe made on one machine works on another.
+- **Consequences:** a milestone before M4 (ROADMAP "M3.5 — The install"): the console UI, the network step,
+  the answers file, recipes. torqcli takes two dependencies (`ratatui`, `crossterm`; ADR-039's review of
+  each). ADR-034's "`torqos-desktop` loaded with `load override`" becomes the official recipe, and ROADMAP
+  M4's "releases carry the desktop configuration" is how it is carried. VM tests: an unattended install
+  from an answers file; a recipe whose SSH key, remote and cache are refused while its packages are
+  taken; a recipe that cuts the network reverting itself; a recipe update shown, not applied.
+- **Not:** a recipe store, accounts or ratings; a recipe that installs without the person seeing what it
+  does; recipes that carry secrets (the fence refuses them in any repository); a graphical installer (the
+  desktop's installs use the same console UI; one installer to keep correct).
+
+## ADR-048 — The installer: erase, alongside, free space or a partition; no network from stick to login
+
+**Status:** accepted, 2026-11-09 (the owner: "dual boot or multi boot or a wipe, just like any other installer";
+"install work without any networking"; our own console UI on proven tools rather than a ported installer).
+Amends ADR-031 ("whole disks only") and builds on ADR-047's console UI. It was first meant for
+TorqOS alongside Pop!_OS on the owner's Zenbook (ADR-046); the owner then chose to erase that disk.
+**Context:** No installer does this for NixOS from a console. Calamares (graphical, Qt) is the one mature
+installer with erase / alongside / replace / manual, and NixOS has extensions for it, but it needs a graphical
+live ISO (ours is ~1.9 GiB of GitHub's 2 GiB a file), cannot run on a server's console or a serial line,
+installs with `nixos-install` instead of the tested image, and is reported unreliable on NixOS. The Rust
+console installers for NixOS (nixos-wizard, others) partition whole disks only. What every installer
+underneath uses is available to us: systemd-repart (already TorqOS's), the file systems' own resize tools,
+systemd-boot. Two facts of TorqOS's own: the image is written byte for byte, so every install has the same
+file-system UUIDs (harmless across machines, dangerous beside another system on one disk: btrfs
+mistakes devices with the same UUID); and first-boot setup's build is untested offline (`tests/image.nix`
+prebuilds it), so on real hardware it may fetch build tools from the network.
+- **Decision:**
+  1. **Four ways to install, chosen in the console UI:**
+     - **Erase the disk** — as today (ADR-031): the image, byte for byte, read back.
+     - **Install alongside** — shrink one existing partition and install into the space it frees.
+     - **Use free space** — install into unpartitioned space already on a disk.
+     - **Replace a partition** — erase one chosen partition (and only it) and install there.
+     A manual mode (any layout, by hand) is later; until then, one made by hand beforehand is "free space".
+  2. **The image's parts, not only the whole.** The build makes, beside the whole disk, its parts: the
+     boot files, the record's file system and the root's (btrfs), each with its SHA-256. For every mode
+     but erase the installer has systemd-repart **add** three partitions into the free space — a boot
+     partition of TorqOS's own (XBOOTLDR, 1 GiB, vfat: the kernels and initrds), the record (1 GiB, ext4,
+     TorqOS's type) and the root (the rest; at least 20 GiB) — copying the parts into them
+     (`CopyBlocks=`), and then reads them back. repart never moves, shrinks or deletes a partition it did
+     not make; that is why it is the tool. Then each new file system gets **new UUIDs** (`btrfstune -m`,
+     `tune2fs -U`, a new vfat serial), in erase mode too, and the hardware file names file systems by
+     UUID, never by label (another system may have an `ESP` or `nixos`). The root grows into its
+     partition at first boot as now.
+  3. **Shrinking**, before repart, of one partition at the end that frees space: **NTFS** (`ntfsresize`;
+     refused while Windows is hibernated or "fast startup" left it dirty, or BitLocker is on — the UI says
+     how to turn each off in Windows), **ext4** (`e2fsck -f`, then `resize2fs`, unmounted), **btrfs**
+     (`btrfs filesystem resize`), then the partition's end in the table. Each tool's own dry run first
+     (`ntfsresize --no-action`, the minimum `resize2fs -P` reports) with room to spare on top; the file
+     system is checked again after. **Refused, with the reason:** LUKS, LVM, RAID, unknown file systems,
+     a partition anything is mounted from. Encrypted Pop!_OS (LUKS + LVM) and the like: shrink it from
+     that system first, then use free space. Before any shrink: a warning to back up, and on a laptop
+     mains power or the battery above half (a power cut mid-resize loses the partition).
+  4. **Booting beside others.** systemd-boot goes onto the disk's **existing EFI system partition**
+     (`bootctl install`, mounted at `/efi`); TorqOS's kernels go on its own boot partition
+     (`boot.loader.systemd-boot.xbootldrMountPoint = "/boot"`), so a small ESP (Windows makes 100 MiB)
+     is enough. systemd-boot lists Windows (`EFI/Microsoft`) and other systemd-boot systems (Pop!_OS's
+     entries) by itself; for other loaders the installer finds on the ESP (`EFI/<distribution>/
+     {shimx64,grubx64}.efi`) it writes an entry each (`loader/entries/torq-other-<name>.conf`). TorqOS's
+     `loader.conf` shows the menu (5 s), TorqOS first; the UEFI boot order puts systemd-boot first and
+     keeps every other entry. Erase mode keeps its own ESP as now.
+  5. **No network from the stick to the first login.** The installer has none (ADR-031). First-boot setup
+     builds change #1 from the disk alone: the image carries **the build closure of a first
+     configuration** — the inputs of every derivation that setup's answers can change (the host name, the
+     user, the hardware file with firmware and iwd on or off, the hardware profiles of ADR-046), computed
+     at build time from sample answers and checked in CI. A VM test without a network runs setup and
+     **really builds** change #1, nothing prebuilt. If a machine's answers need what is not carried, setup
+     says what and offers Wi-Fi (ADR-046) before the build, never a silent fetch.
+  6. **Safety as now, for every mode:** nothing is written before the summary is confirmed, typing the
+     disk's or partition's name; what will happen to each existing partition said in words ("shrunk to
+     380 GiB", "untouched", "erased"); refused while the battery is low; on a failure after writing began,
+     what was added is removed and what was shrunk is said, never left silently half done.
+- **Tests:** VM tests with a disk that already holds other systems — an ESP with Windows' boot manager as
+  a file and a GRUB, an NTFS partition (`mkntfs`), an ext4 one with files, free space: for each mode, the
+  bytes of every partition not chosen are unchanged (hashed before and after), a shrunk file system checks
+  clean with its files intact, TorqOS boots and its menu lists the others. Refusals (LUKS, LVM, dirty NTFS,
+  too little space) each a test. The offline build (5) its own test.
+- **The unmerged `m4-plan` branch** (2026-11-07, ADR-050–052 there, never accepted) is not taken: it planned
+  niri, Windows erased and no hardware profiles, which ADR-045–048 decide otherwise. Its laptop checklist
+  and the Zenbook's known issues are kept, in HARDWARE.md.
+- **Not:** a graphical installer; resizing encrypted, LVM or RAID volumes; moving a partition's start;
+  BIOS (non-UEFI) machines; installing over another TorqOS beside it (one per disk, for now).
+- **Amended (2026-11-09, the owner: "I do not want the COSMIC in the ISO"): the ISO is the CLI machine
+  only.** What is carried for 5 is the build closure of a *CLI* first configuration — the base, firmware,
+  iwd, the hardware profiles' base parts — never the desktop. So the offline path ends at a working CLI
+  machine on the network. **TorqOS Desktop and every recipe come over the network, after it**: setup offers
+  ADR-047 3's "TorqOS Desktop" and "a recipe at a URL" only once the machine is online (Ethernet, or the
+  Wi-Fi joined in setup's network step), applied after change #1 as change #2; offline, setup finishes as
+  a CLI machine and says how to add a desktop later (`request system recipe torqos-desktop`). A profile's
+  desktop part (ADR-046 3) comes with the desktop, from the network. The ISO's size stays what the CLI
+  needs, well under GitHub's 2 GiB a file.
+- **Amended (2026-11-09, the owner: "the install is the CLI only, then the installer can ask if the user
+  wants the UI; if so it can pull the official recipe from the torqos-releases repo").** The question is
+  asked once, in the installer's first screens: *a CLI machine, or with the TorqOS Desktop?* The answer is
+  written beside the hardware file (`/var/lib/torq/install/answers.json`), so the person is not asked twice.
+  The installer itself stays offline (ADR-031); with the desktop chosen, setup's network step is required,
+  not skippable. Once online after change #1 (the CLI machine), setup fetches **the official recipe from
+  the torqos-releases repository** — the same repository and the same check every machine already uses
+  for updates (ADR-028: a signed release commit, verified against the release signers), at the commit of
+  this machine's own TorqOS version, so desktop and base match — shows what it adds, and applies it as
+  change #2 (ADR-047 3: the person's password, `commit confirmed` for the display). If the network fails
+  there, the machine is a working CLI machine and says `request system recipe torqos-desktop` adds it later.

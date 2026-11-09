@@ -22,10 +22,10 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `show services` | the services the configuration turns on, and how SSH is protected |
 | `show users` | people with an account, who is logged in, and their groups |
 | `request system password [<user>]` | change a password (kept outside the configuration) |
-| `request system update [all]` | load the newest signed TorqOS release (`all`: and nixpkgs) into the candidate; <code>show &#124; compare</code> names its version beside the running one, and says when it is older (a downgrade) |
+| `request system update [all]` | load the newest signed TorqOS release (`all`: and nixpkgs) into the candidate; <code>show &#124; compare</code> names its version beside the running one, and says when it is older (a downgrade). At a terminal, when the software is the candidate's only change, it asks `Install it now? [y/N]`: yes installs it (your password, as for any system change); no keeps it for `configure; commit`. With other uncommitted changes, from configuration mode, or in a `-c` script, it only loads. Run as one command (`torqcli request system update`, also from a shell script) at a terminal it asks; to never be asked, use `-c` or give it input that is not a terminal (`< /dev/null`) |
 | `request system backup key <backup>` | give a backup's key, its passphrase (kept outside the configuration) |
 | `request system restore <backup> [<snapshot>] <path>` | put a path back from a backup, what is there set aside |
-| `request system software rollback <n>` | load configuration `<n>`'s software into the candidate (a downgrade) |
+| `request system software rollback <n>` | load configuration `<n>`'s software into the candidate (a downgrade); offered for install as an update is |
 | `request system revert <change>` | undo one recorded change (`#85` or `85`) |
 | `request system apply <n>` | apply a proposal of the agent's, after showing what it does (says why, if its session read untrusted text; one that could cut you off is applied as a commit confirmed) |
 | `request system agent trust <minutes>` | for up to 60 minutes, the agent's untainted proposals in your own folder apply without asking (asks your password) |
@@ -44,7 +44,7 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `show` | the candidate, from where you are |
 | <code>show &#124; compare</code> | what a commit would change (<code>show &#124; compare rollback &lt;n&gt;</code>: against configuration `<n>`) |
 | `commit` | apply the candidate (asks first) |
-| `commit check` | build without switching |
+| `commit check` | check the candidate as it will be built, without switching; a `commit` of the same changes right after uses this check instead of repeating it |
 | `commit confirmed [<minutes>]` | apply, and roll back by itself unless confirmed (1–1440, default 10) |
 | `commit at <time>` | approve now, apply then: `HH:MM` (today, or tomorrow if it has passed), `"YYYY-MM-DD HH:MM"`, or RFC 3339; within 30 days, one at a time |
 | `commit comment "<text>"` | commit with a note |
@@ -70,6 +70,12 @@ After any `show`:
 | <code>&#124; display diff</code> | a comparison as the raw diff of the files |
 | <code>&#124; grep</code>, <code>&#124; wc</code>, <code>&#124; head</code>, <code>&#124; tail</code>, <code>&#124; sort</code>, <code>&#124; uniq</code>, <code>&#124; cut</code>, <code>&#124; tr</code> | the Linux tools, with their usual options |
 | <code>&#124; no-more</code> | no pager |
+
+After `commit` (any of its forms), `request system update` and `request system software rollback <n>`:
+
+| Pipe | Does |
+|---|---|
+| <code>&#124; display detail</code> | each step as it happens and how long it took (checking, reading SSH, proposing, the build and switch), with Nix's and the broker's own output on screen instead of the progress line |
 
 ## From your shell
 

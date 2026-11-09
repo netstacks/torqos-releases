@@ -99,7 +99,20 @@
         let system = lib.removePrefix "installer-" name; in
         self.lib.mkSystem {
           inherit system;
-          modules = [ ./hosts/installer { torq.installer.payload = payload nixpkgs.legacyPackages.${system}; } ];
+          modules = [
+            ./hosts/installer
+            {
+              torq.installer.payload = payload nixpkgs.legacyPackages.${system};
+              # What a first boot builds from (ADR-048 5). x86_64 only: the first configurations are
+              # x86 machines (an AMD and an Intel CPU, their microcode); an arm64 first boot still fetches.
+              torq.installer.firstBuild = lib.optionals (system == "x86_64-linux") (import ./hosts/installer/first-build.nix {
+                inherit lib;
+                pkgs = nixpkgs.legacyPackages.${system};
+                inherit (self.lib) mkSystem;
+                fixtures = ./hosts/image/first-build;
+              }).carried;
+            }
+          ];
         });
 
       # ── Template for the per-machine config repo the broker manages ─────────

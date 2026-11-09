@@ -20,6 +20,15 @@ in
       default = null;
       description = "The TorqOS image as the installer carries it (`image.raw.zst`, its `size` and `sha256`), set by the flake.";
     };
+    firstBuild = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      description = ''
+        What a first boot builds from (ADR-048 5, hosts/installer/first-build.nix), set by the flake: carried in
+        the ISO's store, and copied by `torq install` onto the disk it installs, so first-boot setup builds
+        change #1 with no network.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -39,6 +48,9 @@ in
       "torq/installer/file-systems.nix".source = ../hosts/installer/file-systems.nix;
       # The installer's own medium, by its label: never offered, even copied to RAM and unmounted.
       "torq/installer/volume".text = config.isoImage.volumeID;
+      # The first build's store paths, and their registration for the new disk's Nix database
+      # (`store-paths`, `registration`): `torq install` copies what the disk lacks, setup registers it.
+      "torq/installer/first-build".source = pkgs.closureInfo { rootPaths = cfg.firstBuild; };
     };
 
     # Nothing on the machine's disks is started: an LVM volume group or RAID array an earlier

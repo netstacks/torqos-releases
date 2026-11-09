@@ -546,12 +546,14 @@ mod tests {
     fn requests_for_the_software() {
         let s = schema();
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["agent", "apply", "backup", "ledger", "password", "pull", "remote", "repair", "restore", "revert", "snapshot", "software", "update"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update"), "")), ["<[Enter]>", "all"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update"), "")), ["<[Enter]>", "all", "|"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update |"), "")), ["display"], "its steps shown, nothing to filter");
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update | display"), "")), ["detail"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system revert"), "")), ["<change>"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system ledger"), "")), ["<[Enter]>", "<count>", "|"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system software"), "")), ["rollback"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run request system software rollback"), "")), ["<number>"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update all"), "")), ["<[Enter]>"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update all"), "")), ["<[Enter]>", "|"]);
         assert!(choices(&s, Mode::Operational, &w("request system revert"), "").iter().all(|c| c.word != "<[Enter]>"), "a change number is missing");
     }
 
@@ -591,7 +593,8 @@ mod tests {
         assert_eq!(c(o, "show system commit"), ["<[Enter]>", "|"]);
         assert_eq!(c(o, "show services"), ["<[Enter]>", "|"]);
         assert!(!enter(o, "show"), "show alone is not a command");
-        assert_eq!(c(k, "commit"), ["<[Enter]>", "and-quit", "at", "check", "comment", "confirmed"]);
+        assert_eq!(c(k, "commit"), ["<[Enter]>", "and-quit", "at", "check", "comment", "confirmed", "|"]);
+        assert_eq!(c(k, "commit check |"), ["display"]);
         assert_eq!(c(k, "rollback"), ["<[Enter]>", "<number>"]);
         assert!(enter(k, "show") && c(k, "show").last().is_some_and(|x| x == "|"));
         // Pipes after pipes: each whole show takes another; a filter's own options are its own.

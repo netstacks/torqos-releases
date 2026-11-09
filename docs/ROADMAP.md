@@ -189,21 +189,55 @@ the sysadmin's audit trail; a laptop's is what makes the agent's access safe.
 - [x] Ledger hardening carried over: N3 (a torn append), M3 (password change in one transaction),
       the `Ledger-Entry` trailer cross-check.
 
-### M4 — The desktop as a configuration (ADR-034, ADR-037, ADR-038)
-Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. Can run alongside M3.
+### M3.5 — The install: one console UI, real hardware, recipes (ADR-046, ADR-047, ADR-048)
+Before M4: it serves CLI and desktop installs alike. The owner's laptop (HARDWARE.md) is the target.
 
-- [ ] **`torqos-desktop`**: niri, a terminal, a launcher, the portal, Flatpak on; `modules/desktop.nix`
-      brought back as its module set (KNOWN-GAPS 7: a TorqOS niri config). Loaded with `load
-      override` on an image machine, or adopted at setup (M3). A VM test that it boots to a session.
-- [ ] **Applications by rung** (ADR-037): `users <name> flatpaks` reconciled at switch; the design
+- [ ] **Real hardware** (ADR-046): the installer's hardware file turns on redistributable firmware and,
+      where it finds a wireless interface, iwd; hardware profiles chosen by DMI (`hardware/`), the
+      Zenbook S 16 first, split base / desktop. A VM test of the file written for a fake DMI and Wi-Fi.
+- [x] **No network from stick to login** (ADR-048 5; built 2026-11-09, `tests/installer.nix`): the ISO carries
+      what a first boot builds from (`hosts/installer/first-build.nix`: 362 paths, ~64 MiB beyond its store);
+      `torq install` copies what the disk lacks, setup registers it; a VM with no network card builds
+      change #1. x86_64 only (KNOWN-GAPS 6zu).
+- [ ] **The installer's ways** (ADR-048 1–4, 6): the image's parts beside the whole; erase, alongside
+      (NTFS, ext4, btrfs shrunk), free space, a partition; new UUIDs every install, file systems by UUID;
+      systemd-boot on the existing ESP with TorqOS's own XBOOTLDR, other systems in the menu. VM tests
+      on a disk holding other systems, each refusal a test.
+- [ ] **The console UI** (ADR-047 1): `ratatui` over `crossterm` in torqcli, 80×25 and serial; the
+      installer's disk steps, setup's network (Ethernet, or Wi-Fi through iwd), identity, SSH and
+      starting point, a summary, the build's progress. The line-at-a-time setup kept as the fallback.
+- [ ] **The answers file** (`torq-setup.json`): an unattended install; the VM tests install through it.
+- [ ] **Recipes** (ADR-047 2–4): `recipe.json`; setup's starting point (TorqOS only, TorqOS Desktop,
+      a recipe at a URL, my own repository); `request system recipe <url>`, `… recipe update`,
+      `torq recipe publish`, `torq recipe list`; what is never taken refused (SSH keys, remote, users,
+      caches' keys …). VM tests for each refusal, a recipe reverting itself, an update shown not applied.
+- [ ] **TorqOS installed on the laptop itself**, erasing its disk (Pop!_OS goes), CLI only first; then TorqOS Desktop from setup.
+
+### M4 — The desktop as a configuration (ADR-034, ADR-037, ADR-038, ADR-045)
+Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. COSMIC, and only COSMIC
+(ADR-045). Needs `torq-wire` (ADR-044) first.
+
+- [ ] **`torqos-desktop`**: COSMIC and cosmic-greeter through NixOS's modules, its portal, Flatpak on;
+      `modules/desktop.nix` rewritten as its module set (niri, tuigreet, Quickshell, foot, fuzzel go).
+      Loaded with `load override` on an image machine, or adopted at setup (M3). A VM test that it
+      boots to a COSMIC session; smoothness judged on real hardware (.37).
+- [ ] **TorqOS Settings** (`settings/`, libcosmic; ADR-045 2): the tree, the candidate, commit,
+      history, rollback, pending proposals, alarms, backups — a client of the broker's socket only,
+      its words the broker's. A VM test that each action it offers is the torqcli request it names.
+- [ ] **COSMIC Settings wrapped** (ADR-045 3): the pages that change what the tree owns (time zone,
+      host name, users, …) hand the change to TorqOS Settings as a proposal; a patch in the overlay.
+- [ ] **The person's COSMIC settings** (ADR-045 4): tree defaults, drift in `show | compare`,
+      `request users <name> desktop save`; the tree's COSMIC words generated from cosmic-config's keys.
+- [ ] **Applications by rung** (ADR-037): `users <name> flatpaks` reconciled at switch (only what it names); the COSMIC Store per user, its installs shown in `show | compare` and kept with `… flatpaks keep` (ADR-037 amended); the design
       for a person's own builds in the tree (`users <name> projects`), user tier; what TorqOS refuses
       (`curl | sh`, self-updaters) said where it can see it.
 - [ ] **Data declared** (ADR-038): `services syncthing` and a sync mount as tree settings; the
       backup (`services restic backups`) with its key outside the repo and `request system restore`
       (built 2026-11-07: `request system backup key`, `show system backups`, `tests/backup.nix`; KNOWN-GAPS 6zm);
       the restore step in setup's from-a-repository path.
-- [ ] **Approval as a dialog**: a system-tier commit on a desktop asks in a window, with the
-      owner's password; the same prompt text torqcli prints.
+- [ ] **Approval as a dialog** (ADR-045 5): a system-tier commit on a desktop asks through polkit and
+      COSMIC's agent (`org.torqos.approve`, `auth_self`), with the person's password; the same prompt
+      text torqcli prints. Its two open questions settled first.
 - [ ] **Releases carry the desktop configuration** as a second artifact, versioned with TorqOS.
 
 ### M5 — The agent (AI-LAYER.md)
@@ -228,8 +262,9 @@ acceptance tests, each a VM test.
       tier, never tainted.
 - [ ] **Build me an application**: the agent writes and builds in the person's home, installs via
       rung 3 (ADR-037), tests, undoes.
-- [ ] **Watch the desktop**: screenshot and input through the compositor's protocols, in the
-      person's session; the agent's tooling, not the broker's.
+- [ ] **Watch the desktop**: screenshot and input through COSMIC's portal (ADR-045 6), granted per
+      session and ledgered; remote input checked first. In the person's session; the agent's
+      tooling, not the broker's.
 
 ## After 0.3.0: first in the next cycle
 

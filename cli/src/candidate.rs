@@ -253,6 +253,9 @@ pub struct Candidate {
     /// The release of TorqOS whose signature was checked when software was loaded, with the version
     /// it holds (audit A3): `show | compare` names TorqOS by it while the lock is at that commit.
     pub release: Option<Release>,
+    /// `commit check`'s result for these changes on this base, for `commit` to use (session.rs
+    /// `Checked`): kept by its key, so any change makes it another key, and a commit evaluates again.
+    pub checked: Option<crate::session::Checked>,
 }
 
 /// A release of TorqOS checked by its signature: its commit and the version it holds.
@@ -272,7 +275,7 @@ impl Candidate {
         let config = schema.load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
         let settings = crate::settings::load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
         let attached = crate::attach::load(files.get(crate::attach::FILE).map(Vec::as_slice))?;
-        Ok(Candidate { base, config, lock: None, settings, attached, nix: BTreeMap::new(), source: None, release: None })
+        Ok(Candidate { base, config, lock: None, settings, attached, nix: BTreeMap::new(), source: None, release: None, checked: None })
     }
 
     /// Where a user keeps their candidate: their own state directory, never shared.
@@ -351,6 +354,9 @@ impl Candidate {
             _ => bail!("{}: its software source is not what torqcli writes; `rollback 0` starts a new candidate", path.display()),
         };
         // (Kept only as torqcli writes it: a commit, and a version in the form shown.)
+        // A check's result that does not read as torqcli writes it is no result: `commit` evaluates
+        // again. (An older torqcli drops it, as unknown: the same.)
+        let checked = serde_json::from_value(v["checked"].clone()).ok().flatten();
         let release = match &v["release"] {
             serde_json::Value::Null => None,
             serde_json::Value::Object(r) => match (r.get("rev").and_then(|x| x.as_str()), r.get("version").and_then(|x| x.as_str())) {
@@ -361,7 +367,7 @@ impl Candidate {
             },
             _ => bail!("{}: its release is not what torqcli writes; `rollback 0` starts a new candidate", path.display()),
         };
-        Ok(Some(Candidate { base, config, lock, settings, attached, nix, source, release }))
+        Ok(Some(Candidate { base, config, lock, settings, attached, nix, source, release, checked }))
     }
 
     /// Save it atomically, readable by its owner only, in a folder only its owner can write: anyone
@@ -371,7 +377,7 @@ impl Candidate {
         private_dir(dir)?;
         let files: serde_json::Map<String, serde_json::Value> =
             self.config.files.iter().map(|(p, d)| (p.clone(), d.render().into())).collect();
-        let body = serde_json::to_vec_pretty(&serde_json::json!({ "version": 6, "base": self.base, "files": files, "lock": self.lock, "settings": self.settings, "attached": self.attached, "nix": self.nix, "source": self.source, "release": self.release.as_ref().map(|r| serde_json::json!({ "rev": r.rev, "version": r.version.number, "exact": r.version.exact })) }))?;
+        let body = serde_json::to_vec_pretty(&serde_json::json!({ "version": 6, "base": self.base, "files": files, "lock": self.lock, "settings": self.settings, "attached": self.attached, "nix": self.nix, "source": self.source, "release": self.release.as_ref().map(|r| serde_json::json!({ "rev": r.rev, "version": r.version.number, "exact": r.version.exact })), "checked": self.checked }))?;
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?; // created 0600
         tmp.write_all(&body)?;
         tmp.as_file().sync_all()?;
@@ -665,7 +671,7 @@ mod review_tests {
         let state = tempfile::tempdir().unwrap();
         let p = state.path().join("torq/candidate.json");
         let release = Release { rev: "0123456789abcdef0123456789abcdef01234567".into(), version: crate::release::Version { number: "0.3.0-rc1".into(), exact: true } };
-        let c = Candidate { base: "x".into(), config: Config::default(), lock: None, settings: Default::default(), attached: Default::default(), nix: Default::default(), source: None, release: Some(release.clone()) };
+        let c = Candidate { base: "x".into(), config: Config::default(), lock: None, settings: Default::default(), attached: Default::default(), nix: Default::default(), source: None, release: Some(release.clone()), checked: None };
         c.save(&p).unwrap();
         assert_eq!(Candidate::load(&p, &schema()).unwrap().unwrap().release, Some(release));
         let text = fs::read_to_string(&p).unwrap();
@@ -680,7 +686,7 @@ mod review_tests {
         use std::os::unix::fs::PermissionsExt;
         let state = tempfile::tempdir().unwrap();
         let dir = state.path().join("torq");
-        let c = Candidate { base: "x".into(), config: Config::default(), lock: None, settings: Default::default(), attached: Default::default(), nix: Default::default(), source: None, release: None };
+        let c = Candidate { base: "x".into(), config: Config::default(), lock: None, settings: Default::default(), attached: Default::default(), nix: Default::default(), source: None, release: None, checked: None };
         c.save(&dir.join("candidate.json")).unwrap();
         assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700, "created private");
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();

@@ -47,7 +47,8 @@ Four layers, bottom up. Each lists what we **reuse** and what we **build**.
 A configuration is a config repo loaded on the base. The base does not know which face it wears.
 
 - **A server's:** the machine as code, in git, driven by torqcli; rebuilt anywhere from its repo.
-- **`torqos-desktop`:** the compositor (niri), a terminal, the agent, a few applications — a
+- **`torqos-desktop`:** COSMIC, the only desktop TorqOS builds (ADR-045), with TorqOS Settings
+  (torqcli in a window, a client of the broker's socket), the agent, a few applications — a
   configuration like any other, with the same gate, ledger and rollback. `modules/desktop.nix` is
   its module set.
 - **Applications** by rung (ADR-037): nixpkgs in the tree; Flatpak declared in the tree; a person's

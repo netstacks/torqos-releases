@@ -27,7 +27,19 @@ let
   payload = import ../hosts/installer/payload.nix { inherit pkgs; image = image.config.system.build.torqDisk; };
   installer = self.lib.mkSystem {
     inherit system;
-    modules = [ ../hosts/installer { torq.installer.payload = payload; } instrumented ];
+    modules = [
+      ../hosts/installer
+      {
+        torq.installer.payload = payload;
+        # What a first boot builds from (ADR-048 5), as the flake's installer carries it.
+        torq.installer.firstBuild = (import ../hosts/installer/first-build.nix {
+          inherit lib pkgs;
+          inherit (self.lib) mkSystem;
+          fixtures = ../hosts/image/first-build;
+        }).carried;
+      }
+      instrumented
+    ];
   };
   iso = "${installer.config.system.build.isoImage}/iso/${installer.config.image.fileName}";
 
@@ -249,6 +261,24 @@ pkgs.testers.runNixOSTest {
         )
         installed.succeed("grep -q 'path:/nix/store/' /tmp/cfg/flake.nix && grep -q 'system = \"${system}\"' /tmp/cfg/flake.nix")
         installed.succeed("nix eval --offline --raw /tmp/cfg#nixosConfigurations.torq.config.system.build.toplevel.drvPath")
+
+    with subtest("change #1 builds from the disk alone: what the installer carried, registered, and no network"):
+        # ADR-048 5. The installer copied what the first build needs into this disk's store and left
+        # its registration beside the hardware file; setup loads it (setup.rs `register_carried`), as
+        # here. This machine is a VM, none of the first configurations the carried set was computed
+        # from: what it differs in is built, from what was carried. The VM has no network card at all.
+        installed.succeed("test -s /var/lib/torq/install/first-build.registration")
+        installed.succeed("nix-store --load-db < /var/lib/torq/install/first-build.registration")
+        installed.fail("getent hosts cache.nixos.org")
+        out = installed.succeed(
+            "nix build --no-link --print-out-paths --option connect-timeout 5"
+            " /tmp/cfg#nixosConfigurations.torq.config.system.build.toplevel 2>&1",
+            timeout=2400,
+        )
+        print(out)
+        system = out.strip().splitlines()[-1]
+        assert re.fullmatch(r"/nix/store/[a-z0-9]{32}-nixos-system-.*", system), out
+        installed.succeed(f"test -x {system}/bin/switch-to-configuration")
         installed.shutdown()
   '';
 }
