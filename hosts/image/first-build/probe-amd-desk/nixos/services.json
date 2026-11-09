@@ -1,0 +1,8 @@
+{
+  "openssh": {
+    "enable": true,
+    "settings": {
+      "PasswordAuthentication": true
+    }
+  }
+}

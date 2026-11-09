@@ -6,6 +6,10 @@
   imports = [ ./hardware-configuration.nix ./disk.nix ];
   torq.setup.enable = true;
   networking.hostName = "torq";
+  # Setup joins Wi-Fi on this, the image's own boot (ADR-048, amended: network first): iwd, as an installed
+  # machine with Wi-Fi has (cli/src/install.rs `found`). Its saved networks are this disk's, so the installed
+  # system rejoins by itself. A few MB.
+  networking.wireless.iwd.enable = true;
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
 }

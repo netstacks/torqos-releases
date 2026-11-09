@@ -275,8 +275,8 @@ fn read_meta(name: &str) -> Result<String> {
 
 fn welcome() -> String {
     match std::fs::read_to_string(crate::setup::BANNER) {
-        Ok(banner) => format!("{}\n\n{WELCOME}", banner.trim_end()),
-        Err(_) => WELCOME.to_string(),
+        Ok(banner) => format!("{}\n  TorqOS {}\n\n{WELCOME}", banner.trim_end(), env!("CARGO_PKG_VERSION")),
+        Err(_) => format!("TorqOS {}\n\n{WELCOME}", env!("CARGO_PKG_VERSION")),
     }
 }
 

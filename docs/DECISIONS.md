@@ -1790,3 +1790,20 @@ prebuilds it), so on real hardware it may fetch build tools from the network.
   this machine's own TorqOS version, so desktop and base match — shows what it adds, and applies it as
   change #2 (ADR-047 3: the person's password, `commit confirmed` for the display). If the network fails
   there, the machine is a working CLI machine and says `request system recipe torqos-desktop` adds it later.
+- **Amended (2026-11-09, the owner, after the first real install: "the sequence is odd — it asks for a
+  repository before the system even has a network connection"): network first.** The first real install
+  (the Zenbook, 0.3.1) showed three faults of order: setup asked *new machine or from a repository?* while
+  offline; the first boot runs the image's own system, which has no firmware and no Wi-Fi software, so Wi-Fi
+  and graphics stayed dead after setup until a restart; and joining Wi-Fi meant typing `iwctl` by hand.
+  Setup's order is now, as Ubuntu Server's:
+  1. **Welcome**, with the version.
+  2. **The network.** A cable that is up is said and used. Otherwise, with a Wi-Fi device, setup brings it up
+     on the image's own boot — the kernel pointed at the firmware the installer carried (5), the device's
+     driver probed again — lists the networks it sees, and joins the one chosen with its passphrase (iwd,
+     which the image now has too: a few MB; its networks are iwd's state, on this disk, so the installed
+     system rejoins by itself). Or **continue without a network**: the install is whole offline (5).
+  3. **The starting point**, the choices that need the network offered only when it is up: a new machine;
+     from my repository (ADR-036); TorqOS Desktop and a recipe (ADR-047 3) when built.
+  4. The answers, the summary; the build (offline-capable, 5).
+  5. **A restart** into the installed system, automatic, so every driver loads with its firmware and the
+     console comes up on the real system.

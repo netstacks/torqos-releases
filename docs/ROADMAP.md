@@ -211,7 +211,11 @@ Before M4: it serves CLI and desktop installs alike. The owner's laptop (HARDWAR
       a recipe at a URL, my own repository); `request system recipe <url>`, `… recipe update`,
       `torq recipe publish`, `torq recipe list`; what is never taken refused (SSH keys, remote, users,
       caches' keys …). VM tests for each refusal, a recipe reverting itself, an update shown not applied.
-- [ ] **TorqOS installed on the laptop itself**, erasing its disk (Pop!_OS goes), CLI only first; then TorqOS Desktop from setup.
+- [x] **TorqOS installed on the laptop itself** (2026-11-09, three rounds, erasing its disk): CLI, offline first build, Wi-Fi joined in
+      setup, the automatic restart; GPU, Wi-Fi, Bluetooth, the speakers' ASUS tuning up (HARDWARE.md). TorqOS Desktop next (M4).
+- [x] **Setup, network first** (ADR-048 amended; built 2026-11-09): the network step (a cable, or Wi-Fi brought up on the
+      image's boot from the carried firmware and joined with iwd), the repository offered only online, the restart
+      on real hardware from the broker's unit, the failure's cause on screen, the version shown.
 
 ### M4 — The desktop as a configuration (ADR-034, ADR-037, ADR-038, ADR-045)
 Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. COSMIC, and only COSMIC

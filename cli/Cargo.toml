@@ -1,6 +1,6 @@
 [package]
 name = "torq"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "TorqOS command line (unprivileged): changes the system by proposing diffs to torq-broker"
 license = "Apache-2.0"

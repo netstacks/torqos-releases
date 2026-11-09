@@ -166,6 +166,10 @@ pub fn run() -> Result<()> {
         bail!("this machine is already set up (its history: {LEDGER})");
     }
     let repo = Path::new(REPO);
+    // The network first (ADR-048, amended): what follows offers what needs it only when it is there.
+    println!("\n{}\n", welcome());
+    let online = crate::network::step(&welcome)?;
+    let mut first = true;
     loop {
         // Anything a setup cut short left: gone, to start clean. That includes Nix's caches of the
         // broker's build (HOME=/root): Nix writes them without waiting for the disk, so a power cut
@@ -173,16 +177,24 @@ pub fn run() -> Result<()> {
         // build would fail on them. Before change #1 nothing else on the image uses them.
         let _ = std::fs::remove_dir_all(repo);
         let _ = std::fs::remove_dir_all(BUILD_CACHE);
-        println!("\n{}\n", welcome());
+        if !std::mem::take(&mut first) {
+            println!("\n{}\n", welcome());
+        }
         const HOW: &str = "How should this machine start?\n  1  as a new machine\n  2  from a repository: become the machine it holds";
-        println!("{HOW}");
+        if online {
+            println!("\n{HOW}");
+        } else {
+            println!("\nOffline, so a new machine: starting from your own repository needs the network (connect one and restart setup).");
+        }
         // Shown again with the question, if the console is taken over (`asked`).
         let heading = || format!("{}\n\n{HOW}", welcome());
-        let adopting = until(|| line_under(&heading, "Start", "1"), |c| match c {
-            "1" => Ok(false),
-            "2" => Ok(true),
-            _ => bail!("1 or 2"),
-        })?;
+        // Starting from a repository needs the network; offline, a new machine is the one way.
+        let adopting = online
+            && until(|| line_under(&heading, "Start", "1"), |c| match c {
+                "1" => Ok(false),
+                "2" => Ok(true),
+                _ => bail!("1 or 2"),
+            })?;
         let (user, done, what) = if adopting {
             match adopt_questions()? {
                 None => continue,
@@ -203,9 +215,16 @@ pub fn run() -> Result<()> {
         };
         match done {
             Ok(()) => {
+                let sbin = "/run/current-system/sw/bin";
+                // On real hardware the broker's unit restarts the machine (`broker_run`); if setup is still here to
+                // see it, it says so.
+                if metal() {
+                    println!("\n{what}. Restarting into it; then log in as {user}.\n");
+                    return Ok(());
+                }
                 println!("\n{what}. Log in as {user}.\n");
                 // The console's login prompt, now that there is someone to log in.
-                let _ = std::process::Command::new("/run/current-system/sw/bin/systemctl").args(["start", "--no-block", "getty@tty1.service"]).status();
+                let _ = std::process::Command::new(format!("{sbin}/systemctl")).args(["start", "--no-block", "getty@tty1.service"]).status();
                 return Ok(());
             }
             Err(e) => {
@@ -347,14 +366,14 @@ fn adopt(a: &Adopting) -> Result<()> {
     let ok = {
         let _p = crate::run::Progress::start("Building this machine's system and switching to it");
         std::process::Command::new(SYSTEMD_RUN)
-            .args(["--wait", "--collect", "--quiet", &format!("--unit={BROKER_UNIT}"), "--property=StandardOutput=journal", "--property=StandardError=journal", BROKER, "adopt", "--url", &a.url, "--own", "/run/torq-adopt", "--head", &a.head, "--tip", &a.tip, "--user", &a.user])
+            .args(broker_run(&["adopt", "--url", &a.url, "--own", "/run/torq-adopt", "--head", &a.head, "--tip", &a.tip, "--user", &a.user], metal()))
             .status()
             .context("running the broker")?
             .success()
     };
     if !ok {
-        let log = std::process::Command::new(JOURNALCTL).args(["-u", BROKER_UNIT, "-o", "cat", "-n", "12", "--no-pager"]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-        bail!("the repository was not adopted:\n{}", log.trim_end().lines().map(crate::history::clean).collect::<Vec<_>>().join("\n"));
+        let log = broker_log();
+        bail!("the repository was not adopted:\n{}", cause(&log).lines().map(crate::history::clean).collect::<Vec<_>>().join("\n"));
     }
     Ok(())
 }
@@ -435,16 +454,67 @@ fn apply(a: &Answers) -> Result<()> {
     let ok = {
         let _p = crate::run::Progress::start("Building this machine's system and switching to it");
         std::process::Command::new(SYSTEMD_RUN)
-            .args(["--wait", "--collect", "--quiet", &format!("--unit={BROKER_UNIT}"), "--property=StandardOutput=journal", "--property=StandardError=journal", BROKER, "setup"])
+            .args(broker_run(&["setup"], metal()))
             .status()
             .context("running the broker")?
             .success()
     };
     if !ok {
-        let log = std::process::Command::new(JOURNALCTL).args(["-u", BROKER_UNIT, "-o", "cat", "-n", "12", "--no-pager"]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-        bail!("the new configuration did not build:\n{}", log.trim_end());
+        let log = broker_log();
+        bail!("the new configuration did not build:\n{}", cause(&log));
     }
     Ok(())
+}
+
+/// Whether this is real hardware (`systemd-detect-virt` finds no virtual machine or container).
+fn metal() -> bool {
+    std::process::Command::new("/run/current-system/sw/bin/systemd-detect-virt").arg("--quiet").status().is_ok_and(|s| !s.success())
+}
+
+/// systemd-run's arguments for the broker's setup or adoption (`args`), as a unit of its own: the switch
+/// to the new system starts the console's login prompt, which stops setup's unit, and the broker finishes
+/// regardless. On real hardware (`metal`) that unit then restarts the machine into what it built (ADR-048,
+/// amended): the image's boot had no firmware, so drivers that wanted it (graphics, Wi-Fi) gave up, and only
+/// a new boot loads them. Setup itself cannot: by then the switch has stopped it.
+fn broker_run(args: &[&str], metal: bool) -> Vec<String> {
+    let mut v: Vec<String> = ["--wait", "--collect", "--quiet", &format!("--unit={BROKER_UNIT}"), "--property=StandardOutput=journal", "--property=StandardError=journal"].iter().map(|s| s.to_string()).collect();
+    if metal {
+        v.extend(["/run/current-system/sw/bin/sh".to_string(), "-c".to_string(), RESTART_AFTER.to_string(), BROKER.to_string()]);
+    } else {
+        v.push(BROKER.to_string());
+    }
+    v.extend(args.iter().map(|s| s.to_string()));
+    v
+}
+
+/// The broker (`$0`, its arguments `$@`), then, if it succeeded, a restart: what the console says, a few
+/// seconds to read it, and the restart. The broker's own exit status otherwise.
+const RESTART_AFTER: &str = "\"$0\" \"$@\" || exit; echo 'TorqOS is set up: restarting into it.' > /dev/console; sleep 5; exec /run/current-system/sw/bin/systemctl reboot";
+
+/// The broker's log of this setup (its unit's journal): enough of it to hold the cause, which Nix
+/// prints before its summary, not after.
+fn broker_log() -> String {
+    std::process::Command::new(JOURNALCTL)
+        .args(["-u", BROKER_UNIT, "-o", "cat", "-n", "400", "--no-pager"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// What to show of a failed build's log: from the first error on (which derivation failed, and the
+/// last lines of its own log, which Nix prints with it), at most `CAUSE_LINES`; with no error line,
+/// the log's end.
+fn cause(log: &str) -> String {
+    const CAUSE_LINES: usize = 24;
+    let lines: Vec<&str> = log.trim_end().lines().collect();
+    let from = lines.iter().position(|l| l.trim_start().starts_with("error:")).unwrap_or(lines.len().saturating_sub(12));
+    let shown = &lines[from..lines.len().min(from + CAUSE_LINES)];
+    let more = lines.len() - from - shown.len();
+    let mut out = shown.join("\n");
+    if more > 0 {
+        out.push_str(&format!("\n({more} more lines: journalctl -u {BROKER_UNIT})"));
+    }
+    out
 }
 
 /// What the installer copied onto this disk for the first build (ADR-048 5, install.rs `carry`): its
@@ -504,8 +574,8 @@ fn secret(question: &str) -> Result<String> {
 /// The welcome, under TorqOS's wordmark when the system has one.
 fn welcome() -> String {
     match std::fs::read_to_string(BANNER) {
-        Ok(banner) => format!("{}\n\n{WELCOME}", banner.trim_end()),
-        Err(_) => WELCOME.to_string(),
+        Ok(banner) => format!("{}\n  TorqOS {}\n\n{WELCOME}", banner.trim_end(), env!("CARGO_PKG_VERSION")),
+        Err(_) => format!("TorqOS {}\n\n{WELCOME}", env!("CARGO_PKG_VERSION")),
     }
 }
 
@@ -662,6 +732,27 @@ mod first_configurations {
   hardware.cpu.amd.updateMicrocode = lib.mkDefault config.hardware.enableRedistributableFirmware;\n\
 }\n";
 
+    /// A KVM guest, as nixos-generate-config writes one (the installer test's machine is one).
+    const QEMU: &str = "# Do not modify this file!  It was generated by 'nixos-generate-config'\n\
+# and may be overwritten by future invocations.  Please make changes\n\
+# to /etc/nixos/configuration.nix instead.\n\
+{ config, lib, pkgs, modulesPath, ... }:\n\
+\n\
+{\n\
+  imports =\n\
+    [ (modulesPath + \"/profiles/qemu-guest.nix\")\n\
+    ];\n\
+\n\
+  boot.initrd.availableKernelModules = [ \"ahci\" \"xhci_pci\" \"virtio_pci\" \"virtio_scsi\" \"sr_mod\" \"virtio_blk\" ];\n\
+  boot.initrd.kernelModules = [ ];\n\
+  boot.kernelModules = [ \"kvm-amd\" ];\n\
+  boot.extraModulePackages = [ ];\n\
+\n\
+  networking.useDHCP = lib.mkDefault true;\n\
+\n\
+  nixpkgs.hostPlatform = lib.mkDefault \"x86_64-linux\";\n\
+}\n";
+
     const INTEL: &str = "# Do not modify this file!  It was generated by 'nixos-generate-config'\n\
 # and may be overwritten by future invocations.  Please make changes\n\
 # to /etc/nixos/configuration.nix instead.\n\
@@ -694,19 +785,33 @@ mod first_configurations {
         let file_systems = std::fs::read_to_string(root.join("hosts/installer/file-systems.nix")).unwrap();
         let write = std::env::var_os("TORQ_WRITE_FIXTURES").is_some();
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGtorqfirstbuildfixturekeyonlyxxxxxxxxxxxx owner@laptop";
-        // Two kinds of machine, two machines of each kind: within a kind, everything that is each machine's
-        // own differs (names, the time zone, the key, the drivers detected); the kind (CPU, Wi-Fi, SSH) does
-        // not. What differs within a kind is built at a first boot; the rest is carried built.
+        // Three kinds of machine, two of each: within a kind, everything that is each machine's own differs
+        // (names, the time zone, the key, the drivers detected); the kind does not. Between them, every
+        // answer setup offers is had by some kind: AMD and Intel, Wi-Fi and none, SSH not at all, by key,
+        // by password (which brings sshguard). What differs within a kind is built at a first boot; the rest
+        // is carried built. Probes (`probe-*`) are machines no kind is — the owner's Zenbook as setup made
+        // it, other mixes, a VM — which checks.first-build-offline proves build from what is carried.
         let amd2 = AMD.replace("\"nvme\" \"xhci_pci\" \"thunderbolt\" \"usb_storage\" \"sd_mod\" \"sdhci_pci\"", "\"nvme\" \"xhci_pci\" \"usbhid\" \"uas\" \"sd_mod\"");
         let intel2 = INTEL.replace("\"xhci_pci\" \"ahci\" \"usbhid\" \"usb_storage\" \"sd_mod\"", "\"vmd\" \"xhci_pci\" \"ahci\" \"nvme\" \"usb_storage\" \"sd_mod\" \"rtsx_pci_sdmmc\"");
-        assert!(amd2 != AMD && intel2 != INTEL, "the second of each kind has other drivers");
+        let intel3 = INTEL.replace("\"xhci_pci\" \"ahci\" \"usbhid\" \"usb_storage\" \"sd_mod\"", "\"xhci_pci\" \"thunderbolt\" \"nvme\" \"usb_storage\" \"sd_mod\"");
+        let intel4 = INTEL.replace("\"xhci_pci\" \"ahci\" \"usbhid\" \"usb_storage\" \"sd_mod\"", "\"xhci_pci\" \"nvme\" \"usbhid\" \"sdhci_pci\"");
+        assert!(amd2 != AMD && intel2 != INTEL && intel3 != INTEL && intel4 != INTEL, "each machine of a kind has its own drivers");
         let key2 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGtorqfirstbuildfixturekeytwoxxxxxxxxxxxxxx carol@desk";
         let ans = |host: &str, zone: &str, user: &str, remote: Remote, key: Option<&str>| Answers { host: host.into(), zone: zone.into(), user: user.into(), hash: "$6$x$y".into(), remote, key: key.map(String::from) };
+        let wifi = || Found { wireless: true };
+        let none = || Found { wireless: false };
         let cases = [
-            ("amd-wifi-1", AMD.to_string(), Found { wireless: true }, ans("laptop", "Europe/Berlin", "alice", Remote::Key, Some(key))),
-            ("amd-wifi-2", amd2, Found { wireless: true }, ans("zen-16", "America/Chicago", "carol", Remote::Key, Some(key2))),
-            ("intel-1", INTEL.to_string(), Found { wireless: false }, ans("desk-2", "UTC", "bob", Remote::No, None)),
-            ("intel-2", intel2, Found { wireless: false }, ans("office", "Asia/Tokyo", "dave", Remote::No, None)),
+            ("amd-wifi-1", AMD.to_string(), wifi(), ans("laptop", "Europe/Berlin", "alice", Remote::Key, Some(key))),
+            ("amd-wifi-2", amd2, wifi(), ans("zen-16", "America/Chicago", "carol", Remote::Key, Some(key2))),
+            ("intel-1", INTEL.to_string(), none(), ans("desk-2", "UTC", "bob", Remote::No, None)),
+            ("intel-2", intel2, none(), ans("office", "Asia/Tokyo", "dave", Remote::No, None)),
+            ("intel-wifi-pw-1", intel3, wifi(), ans("thinkpad", "Europe/London", "erin", Remote::Password, None)),
+            ("intel-wifi-pw-2", intel4, wifi(), ans("xps-13", "Australia/Sydney", "frank", Remote::Both, Some(key))),
+            // Probes: what a person really answers.
+            ("probe-zenbook", AMD.to_string(), wifi(), ans("torqlaptop", "UTC", "cwdavis", Remote::Password, None)),
+            ("probe-amd-desk", AMD.replace("\"thunderbolt\" ", ""), none(), ans("tower", "America/New_York", "gina", Remote::Both, Some(key2))),
+            ("probe-intel-laptop", INTEL.to_string(), wifi(), ans("notebook", "UTC", "hal", Remote::Key, Some(key))),
+            ("probe-vm", QEMU.to_string(), none(), ans("server-1", "UTC", "ops", Remote::Password, None)),
         ];
         let mut stale = vec![];
         for (name, detected, found, a) in cases {
@@ -730,5 +835,49 @@ mod first_configurations {
             }
         }
         assert!(stale.is_empty(), "hosts/image/first-build/ is not what setup writes; run TORQ_WRITE_FIXTURES=1 cargo test first_configurations: {stale:?}");
+    }
+}
+
+#[cfg(test)]
+mod cause_of_a_failure {
+    use super::cause;
+
+    /// A failed build shows its first error and what follows it — the derivation and its own log —
+    /// not the summary Nix ends with; without an error line, the log's end.
+    #[test]
+    fn the_first_error_and_what_follows() {
+        let mut log: Vec<String> = (0..50).map(|i| format!("building something {i}")).collect();
+        log.push("error: builder for '/nix/store/x-sshguard-2.5.1.drv' failed with exit code 1;".into());
+        log.push("       last 10 log lines:".into());
+        log.push("       > configure: error: no C compiler".into());
+        log.extend((0..40).map(|i| format!("error: Cannot build ... {i}")));
+        let shown = cause(&log.join("\n"));
+        assert!(shown.starts_with("error: builder for '/nix/store/x-sshguard-2.5.1.drv'"), "{shown}");
+        assert!(shown.contains("no C compiler"), "{shown}");
+        assert!(shown.lines().count() <= 25 && shown.ends_with("more lines: journalctl -u torq-setup-broker)"), "{shown}");
+        let quiet: String = (0..30).map(|i| format!("line {i}\n")).collect();
+        assert_eq!(cause(&quiet).lines().next(), Some("line 18"), "no error: the last 12");
+    }
+}
+
+#[cfg(test)]
+mod restart_after_setup {
+    use super::*;
+
+    /// On real hardware the broker's unit restarts the machine after a setup that succeeded, never after one
+    /// that failed (its status kept); in a VM the broker runs alone.
+    #[test]
+    fn the_broker_unit_restarts_only_real_hardware_and_only_on_success() {
+        let vm = broker_run(&["setup"], false);
+        assert_eq!(&vm[vm.len() - 2..], [BROKER, "setup"]);
+        assert!(!vm.iter().any(|a| a.contains("reboot")));
+        let metal = broker_run(&["adopt", "--url", "u"], true);
+        let at = metal.iter().position(|a| a == "-c").unwrap();
+        assert_eq!(metal[at + 1], RESTART_AFTER);
+        assert_eq!(&metal[at + 2..], [BROKER, "adopt", "--url", "u"], "the broker is $0, its arguments $@");
+        assert!(metal.iter().any(|a| a == &format!("--unit={BROKER_UNIT}")));
+        // A failed broker: its status, and no restart (nothing after `|| exit` runs).
+        let st = std::process::Command::new("sh").args(["-c", RESTART_AFTER, "false"]).status().unwrap();
+        assert_eq!(st.code(), Some(1));
     }
 }

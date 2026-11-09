@@ -203,6 +203,14 @@
       } // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
         # The ISO installer (ADR-031): installed and booted on x86_64 only; aarch64's ISO is built, not run.
         installer = import ./tests/installer.nix { inherit pkgs self; };
+        # A first boot needs no network (ADR-048 5): machines none of the first configurations are — the
+        # owner's Zenbook as setup made it, other mixes of answers, a VM — build change #1 from the image
+        # and what the installer carries, nothing downloaded. No VM: Nix's own plan, read from the .drv files.
+        first-build-offline = (import ./hosts/installer/first-build.nix {
+          inherit lib pkgs;
+          inherit (self.lib) mkSystem;
+          fixtures = ./hosts/image/first-build;
+        }).check self.nixosConfigurations.image-x86_64-linux.config.system.build.toplevel;
         # Thin, kept so (ADR-032): a new machine's own system — the image's, what everyone installs —
         # stays within its budget. Lowered as TorqOS sheds what it does not need, never raised to
         # make a change fit without saying why in docs/DECISIONS.md. x86_64's; aarch64's is CI's.

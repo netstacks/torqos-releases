@@ -819,8 +819,11 @@ Its §5 lists claims without a test.
    - **Evaluating the x86 installer needs an x86 builder:** the carried set is read from the .drv files
      at build time and imported (`hosts/installer/first-build.nix`). CI and the dev host are x86_64; an
      arm64 machine evaluating `nixosConfigurations.installer-x86_64-linux` would need a remote builder.
-   - **Covered by its samples, proved on one machine:** what differs between two kinds of machine (AMD
-     with Wi-Fi and SSH by key; Intel with neither) and two machines of each. A machine whose hardware
+   - **Covered by its samples, proved by probes:** three kinds of machine give every answer setup offers (CPU, Wi-Fi, SSH
+     not at all, by key, by password); `checks.first-build-offline` proves machines none of them is (the owner's Zenbook
+     as setup made it, other mixes, a VM) need nothing downloaded. The first real install found password SSH uncovered
+     (sshguard): that is why. Still:
+     a machine whose hardware
      brings what none of them has (an out-of-tree driver, `boot.extraModulePackages`) needs the
      network at its first build; setup does not yet say so before it starts (ADR-048 5's message).
      The VM test builds change #1 for a machine none of the samples is (a VM, no firmware): 23

@@ -41,6 +41,7 @@ mod nixerr;
 mod setup;
 mod install;
 mod evalcache;
+mod network;
 
 use anyhow::{bail, Context, Result};
 
