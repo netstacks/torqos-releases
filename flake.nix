@@ -3,6 +3,9 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    # COSMIC alone, newer than the release's (ADR-045, amended): the desktop's packages, its NixOS modules
+    # and Mesa come from here; the rest of the system from `nixpkgs`.
+    nixpkgs-cosmic.url = "github:NixOS/nixpkgs/nixos-unstable";
     # TODO(M4): lanzaboote for owner-key Secure Boot + measured boot.
     # lanzaboote = {
     #   url = "github:nix-community/lanzaboote";
@@ -10,7 +13,7 @@
     # };
   };
 
-  outputs = { self, nixpkgs, ... }:
+  outputs = { self, nixpkgs, nixpkgs-cosmic, ... }:
     let
       lib = nixpkgs.lib;
       linuxSystems = [ "x86_64-linux" "aarch64-linux" ];
@@ -39,6 +42,8 @@
         torq = pkgs.callPackage ./cli/package.nix { };
         # The agent (ADR-042): doctor mode, run as torq-agent.
         torq-agent = pkgs.callPackage ./agent/package.nix { };
+        # The secrets daemon (ADR-052): a secret used, never read.
+        torq-secrets = pkgs.callPackage ./secrets/package.nix { };
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
       })) (forSystems linuxSystems (pkgs: {
         # The TorqOS image (docs/INSTALL.md): a disk to download and boot; first-boot setup on its
@@ -46,6 +51,8 @@
         # takes. `nix build .#image`: a qcow2, compressed (a download a third the size or less; UTM,
         # QEMU and Proxmox run it as it is). `nix build .#image-vmdk`: the same disk for VMware ESXi
         # (a sparse VMDK, which `vmkfstools -i` makes the host's own disk).
+        # TorqOS Settings (ADR-045 2): from the nixpkgs the desktop's COSMIC comes from.
+        torq-settings = nixpkgs-cosmic.legacyPackages.${pkgs.stdenv.hostPlatform.system}.callPackage ./settings/package.nix { };
         image = imageAs pkgs "qcow2" "-c -O qcow2";
         image-vmdk = imageAs pkgs "vmdk" "-O vmdk -o adapter_type=lsilogic";
         # The ISO installer (ADR-031): `nix build .#iso`, for a USB stick or disc; it installs the image
@@ -56,11 +63,16 @@
 
       # ── The distribution, as one NixOS module ────────────────────────────────
       nixosModules.default = { pkgs, lib, ... }: {
-        imports = [ ./modules ];
+        imports = [
+          ./modules
+        ];
+        torq.desktop.cosmicNixpkgs = nixpkgs-cosmic;
+        torq.desktop.settingsPackage = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-settings;
         torq.broker.package =
           lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
         torq.cli.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq;
         torq.agent.doctor.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-agent;
+        torq.secrets.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-secrets;
       };
 
       # Helper used by per-machine config repos (see templates/config).
@@ -124,6 +136,38 @@
       # ── Tests ────────────────────────────────────────────────────────────────
       checks = forSystems linuxSystems (pkgs: {
         broker = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
+        # The COSMIC modules TorqOS carries are nixpkgs-cosmic's, unchanged (ADR-045, amended).
+        cosmic-modules = pkgs.runCommand "torq-cosmic-modules" { } ''
+          cmp ${./modules/cosmic/cosmic.nix} ${nixpkgs-cosmic}/nixos/modules/services/desktop-managers/cosmic.nix
+          cmp ${./modules/cosmic/cosmic-greeter.nix} ${nixpkgs-cosmic}/nixos/modules/services/display-managers/cosmic-greeter.nix
+          touch $out
+        '';
+        # A desktop compiles COSMIC itself only where its owner turned that on (ADR-054): off, cosmic-comp is the
+        # very derivation NixOS's cache has; a custom feature without the gate does not evaluate; with both, the
+        # compositor is TorqOS's patched one.
+        cosmic-prebuilt = let
+          system = pkgs.stdenv.hostPlatform.system;
+          # A whole system (the dev VM's), so the only assertion that can fail is the one under test.
+          desktop = settings: self.lib.mkSystem { inherit system; modules = [ ./hosts/dev-vm { torq.desktop = { enable = true; } // settings; } ]; };
+          upstream = nixpkgs-cosmic.legacyPackages.${system}.cosmic-comp.drvPath;
+          drv = settings: (desktop settings).pkgs.cosmic-comp.drvPath;
+          evaluates = settings: (builtins.tryEval (desktop settings).config.system.build.toplevel.drvPath).success;
+        in
+          assert drv { } == upstream;
+          assert drv { customCompile = true; } == upstream;
+          assert drv { customCompile = true; touchpadGestures = true; } != upstream;
+          assert evaluates { customCompile = true; touchpadGestures = true; };
+          assert !(evaluates { touchpadGestures = true; });
+          pkgs.runCommand "torq-cosmic-prebuilt" { } "touch $out";
+        # torq-wire's own tests (ADR-044): the bytes on the socket, pinned. The ledger's fixtures are the broker's tests.
+        wire = pkgs.rustPlatform.buildRustPackage {
+          pname = "torq-wire";
+          version = (lib.importTOML ./wire/Cargo.toml).package.version;
+          src = lib.cleanSource ./wire;
+          cargoLock.lockFile = ./wire/Cargo.lock;
+          # A library: nothing to install, its tests are the point.
+          installPhase = "touch $out";
+        };
         trust-loop = import ./tests/trust-loop.nix { inherit pkgs self; };
         socket = import ./tests/socket.nix { inherit pkgs self; };
         commit-at = import ./tests/commit-at.nix { inherit pkgs self; };
@@ -142,6 +186,9 @@
         tree = import ./tests/tree.nix { inherit pkgs self; };
         accounts = import ./tests/accounts.nix { inherit pkgs self; };
         ssh = import ./tests/ssh.nix { inherit pkgs self; };
+        desktop = import ./tests/desktop.nix { inherit pkgs self; };
+        tunnels = import ./tests/tunnels.nix { inherit pkgs self; };
+        secrets = import ./tests/secrets.nix { inherit pkgs self; };
         image = import ./tests/image.nix { inherit pkgs self; };
         # Nothing nixpkgs marks unfree in what TorqOS distributes (ADR-039), for every platform it
         # releases (evaluation only, so x86_64's CI checks aarch64's too). nixpkgs refuses to
@@ -201,7 +248,7 @@
             echo "Nothing lets an unfree package into the image or the ISO, ${lib.concatStringsSep " or " linuxSystems} (ADR-039); each of ${toString (lib.length planted)} ways planted is caught." > $out
           '';
       } // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
-        # The ISO installer (ADR-031): installed and booted on x86_64 only; aarch64's ISO is built, not run.
+        # The ISO installer (ADR-031): installed and booted on x86_64 only. aarch64's is neither built nor run, here or in CI (ADR-030).
         installer = import ./tests/installer.nix { inherit pkgs self; };
         # A first boot needs no network (ADR-048 5): machines none of the first configurations are — the
         # owner's Zenbook as setup made it, other mixes of answers, a VM — build change #1 from the image
@@ -213,7 +260,7 @@
         }).check self.nixosConfigurations.image-x86_64-linux.config.system.build.toplevel;
         # Thin, kept so (ADR-032): a new machine's own system — the image's, what everyone installs —
         # stays within its budget. Lowered as TorqOS sheds what it does not need, never raised to
-        # make a change fit without saying why in docs/DECISIONS.md. x86_64's; aarch64's is CI's.
+        # make a change fit without saying why in docs/DECISIONS.md. x86_64's only: nothing builds aarch64 (ADR-030).
         size =
           let
             budget = 1280;

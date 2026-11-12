@@ -25,15 +25,15 @@ already made.
 
 ## Before you open a pull request
 
-Read `CLAUDE.md` (how the project works and its rules) and `docs/DECISIONS.md`. In short: no
+Read the [README](README.md), [docs/VISION.md](docs/VISION.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) first, then `docs/DECISIONS.md` for the reasons behind a design. (`CLAUDE.md` is written for AI coding sessions working in the repository, and holds the same rules.) In short: no
 `unsafe` and no dead code (the compiler forbids them); every security or reversibility claim has a
 test that would fail if it broke; `docs/` changes with the behaviour it describes.
 
 ## Releasing (maintainers)
 
 A release is a tag on `main`; `.github/workflows/release.yml` does the rest (ADR-028): it checks the
-tag is the source's version, runs every test, builds the images and the ISO for both architectures,
-and only then publishes the source to `netstacks/torqos-releases` (signed, tagged, `stable` moved)
+tag is the source's version, runs every test, builds the images and the ISO (x86_64 only: aarch64 is not built),
+and only then publishes the source to `torqosorg/torqos-releases` (signed, tagged, `stable` moved)
 and a GitHub Release with the files and their signed checksums.
 
 ```sh

@@ -220,7 +220,8 @@ mod tests {
         // Even listed: torq.* holds the agent's own limits.
         let l = limits(&["viper"], &["torq", "torq.agent", "services"]);
         assert!(refusal(&l, &[t("nixos/torq.json", Some(json!({})), Some(json!({"agent": {"mayPropose": {"settings": ["nix"]}}})))]).is_some());
-        for f in ["flake.nix", "flake.lock", "config-files.json", "hardware-configuration.nix", "nixos/x.nix", "nixos/sub/services.json", "nixos/.json", "secrets/x.json"] {
+        // The secrets' rules (ADR-052), the system's and a person's own, even one whose packages it may propose.
+        for f in ["flake.nix", "flake.lock", "config-files.json", "hardware-configuration.nix", "nixos/x.nix", "nixos/sub/services.json", "nixos/.json", "secrets/x.json", "secrets/system.json", "users/viper/secrets.json"] {
             assert!(refusal(&l, &[t(f, None, Some(json!({})))]).is_some(), "{f}");
         }
         // torq's own tree (system/*.json) by its own prefix.

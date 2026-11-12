@@ -1,6 +1,8 @@
 # Commands
 
-Every command can be abbreviated to a unique beginning, and `?` or `help` works anywhere.
+This page lists the commands of the `torqcli` prompt, and below them the `torq …` commands you run
+from your login shell. `?` or `help` at the prompt is always the complete and current list. Every
+command can be abbreviated to a unique beginning, and `?` or `help` works anywhere.
 
 ## Operational mode
 
@@ -18,6 +20,11 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `show interfaces [<interface>]` | network interfaces' state and addresses |
 | `show system storage` | disks' size and use, and the system versions kept |
 | `show system backups` | the declared backups: their snapshots and how each last ran |
+| `show system snapshots` | the snapshots of your data that this machine still has, each from before a change |
+| `show system proposals` | changes proposed and waiting for a person (the agent's) |
+| `show system remote` | where the configuration and ledger are pushed, and how the last push went (see [The remote](../guide/remote.md)) |
+| `show system desktop` | which of COSMIC's settings are saved in your configuration, and which are not yet (see [The desktop](../guide/desktop.md)) |
+| `show system secrets` | the secrets: whose they are, whether each has a value, and what each may be used for (never a value) |
 | `show packages <words>` | search this machine's packages (`*` marks installed ones) |
 | `show services` | the services the configuration turns on, and how SSH is protected |
 | `show users` | people with an account, who is logged in, and their groups |
@@ -30,6 +37,21 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `request system apply <n>` | apply a proposal of the agent's, after showing what it does (says why, if its session read untrusted text; one that could cut you off is applied as a commit confirmed) |
 | `request system agent trust <minutes>` | for up to 60 minutes, the agent's untainted proposals in your own folder apply without asking (asks your password) |
 | `request system agent trust revoke` | end that trust now |
+| `request system snapshot take` | take a snapshot of your data now (asks your password) |
+| `request system snapshot restore <n> <path>` | put a path back as it was before change `n` (asks your password) |
+| `request system snapshot delete <n>` | delete one snapshot; recorded first, and cannot be undone (asks your password) |
+| `request system pull` | load the configuration waiting on the remote into your candidate; nothing changes until you commit |
+| `request system remote key` | show this machine's key for the remote, to add to the repository as a deploy key |
+| `request system remote clear` | clear the remote's alarm after looking into it (recorded; raised again if still true) |
+| `request system ledger acknowledge` | say that you have looked into a disagreement between the ledger and the repository (recorded) |
+| `request system desktop save` | save your COSMIC settings into your configuration now |
+| `request system desktop saving automatic` or `manual` | when your desktop is saved: as you change it, or only when you ask |
+| `request system secret set <name>` | give a secret's value (typed, or `file <path>`): kept encrypted, outside the configuration, never in the ledger |
+| `request system secret allow <name> https <host>` or `ssh <host>` or `agent` | let a secret be used for that host (a token in an HTTPS header, or an SSH key), or by the agent, which uses it without reading it |
+| `request system secret disallow <name> …` | take a use back |
+| `request system secret approve <name> each-use`, `first-use` or `never` | when a person is asked before the agent uses it (a session that read untrusted text is always asked). The approval step itself is not built yet: until it is, the agent may use only a secret that asks for no approval, from an untainted session |
+| `request system secret show <name>` | print its value here (asks your password) |
+| `request system secret delete <name>` | delete its value and its rule |
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
 | `clear system commit` | cancel the commit scheduled with `commit at` (asks first; yours, or an administrator's with their password) |
 | <code>help [&lt;command&gt; &#124; &lt;words&gt;]</code> | the commands, one command, or a search of commands and settings |
@@ -44,7 +66,7 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `show` | the candidate, from where you are |
 | <code>show &#124; compare</code> | what a commit would change (<code>show &#124; compare rollback &lt;n&gt;</code>: against configuration `<n>`) |
 | `commit` | apply the candidate (asks first) |
-| `commit check` | check the candidate as it will be built, without switching; a `commit` of the same changes right after uses this check instead of repeating it |
+| `commit check` | evaluate the candidate as it would be built, to catch errors early; it does not build the system or switch to it. A `commit` of the same changes right after uses this check instead of repeating it |
 | `commit confirmed [<minutes>]` | apply, and roll back by itself unless confirmed (1–1440, default 10) |
 | `commit at <time>` | approve now, apply then: `HH:MM` (today, or tomorrow if it has passed), `"YYYY-MM-DD HH:MM"`, or RFC 3339; within 30 days, one at a time |
 | `commit comment "<text>"` | commit with a note |
@@ -86,3 +108,15 @@ After `commit` (any of its forms), `request system update` and `request system s
 | `torqcli -c "<commands>"` | run commands separated by `;`, in a private candidate |
 | `torqcli --help` | how `torqcli` is run |
 | `torqcli -v <command>` | on error, show every cause and where the full log is |
+
+`torq` and `torqcli` are the same program. These `torq` commands are run from the login shell, not
+typed at the `torqcli` prompt:
+
+| Command | Does |
+|---|---|
+| `torq doctor "<question>"` | ask the agent a question about the machine; it reads and explains, and proposes nothing (experimental; see [The agent](../guide/agent.md)) |
+| `torq agent propose "<ask>"` | as `doctor`, and the agent may propose one change |
+| `torq agent run [--share <dir>] [--] [<command>]` | run a program (Claude Code, say) as the agent's account, in a sandbox, sharing one directory |
+| `torq break-glass "<why>"` | in strict mode, the one way to a root shell: asks your password, records who and why, then opens it |
+| `torq setup` | first-boot setup (the image's console, as root, until change #1) |
+| `torq install` | the ISO installer (its console, as root) |

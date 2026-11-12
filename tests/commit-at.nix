@@ -128,17 +128,17 @@ pkgs.testers.runNixOSTest {
         assert head() == before and "c = 0" in setting(), setting()
         assert not [e for e in ledger() if e["kind"] == "applied" and e["data"].get("proposal") == p]
 
-    with subtest("a commit at whose configuration moved on is refused, on the record"):
+    with subtest("a commit at whose change would now do something else is refused, on the record (ADR-053)"):
         p = propose("{ a = 1; b = 0; c = 0; }", "{ a = 1; b = 1; c = 0; }", "b, gone stale")
         s = schedule(p, 50)
-        # Something else lands first: the scheduled change was prepared on what came before it.
+        # Something else lands first, in the same setting: the scheduled change would now do something else.
         o = propose("{ a = 1; b = 0; c = 0; }", "{ a = 2; b = 0; c = 0; }", "a again, now")
         code, v = ask("dev", {"args": ["--json", "apply", str(o)], "password": password})
         assert code == 0, (code, v)
         moved = head()
         machine.wait_until_succeeds(f"torq-broker --json log --brief | grep apply_refused | grep -q '\"scheduled\":{s['seq']}'", timeout=180)
         r = [e for e in ledger() if e["kind"] == "apply_refused" and e["data"].get("scheduled") == s["seq"]]
-        assert len(r) == 1 and "changed since it was scheduled" in r[0]["reason"], r
+        assert len(r) == 1 and "would now do something different" in r[0]["reason"], r
         assert head() == moved and "b = 0" in setting(), setting()
         assert scheduled() == []
         machine.succeed("torq-broker verify && torq-broker status")

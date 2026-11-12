@@ -455,6 +455,12 @@ in
       restartIfChanged = false;
       stopIfChanged = false;
       serviceConfig = {
+        # What a request ends with is its answer, sent over the socket: refused, busy or asked for a password is
+        # not a unit that failed. If it were, a status asked while a commit switches the system would count as
+        # a failed unit, and the switch would fail and take the commit back (seen on the laptop: change #20).
+        SuccessExitStatus = "1 2 3 75 77";
+        # A request may carry a password, a backup's key or a secret's value (ADR-052): no core of it, ever.
+        LimitCORE = 0;
         ExecStart = "${lib.getExe cfg.package} serve";
         StandardInput = "socket";
         StandardOutput = "socket";

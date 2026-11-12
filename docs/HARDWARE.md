@@ -1,14 +1,15 @@
 # Hardware
 
-TorqOS has no hardware of its own: it runs wherever NixOS runs (aarch64 and x86_64).
+TorqOS has no hardware of its own: it runs wherever NixOS runs. It is built and tested for x86_64 only; the flake still evaluates for aarch64, but nothing builds or tests it (ADR-030, amended).
 
 | Use | Machine |
 |---|---|
-| Dev | x86_64 VM on VMware ESXi (`torq5`): 8 vCPU, 64 GB, 1 TB, nested virtualisation on |
-| Tests | NixOS VM tests (`tests/`), QEMU with KVM on that host |
-| aarch64 | CI only, on GitHub's arm64 runners (ADR-030) |
+| Dev | the owner's laptop (the Zenbook below, running TorqOS), shared and throttled for heavy builds |
+| Full checks | "the check host": an x86_64 VM on VMware ESXi with nested virtualisation on (KVM) |
+| Tests | NixOS VM tests (`tests/`), QEMU with KVM, on the check host and in CI |
+| aarch64 | nothing builds or tests it; the v0.3.x releases have no aarch64 images |
 
-`torq5` was itself installed from a TorqOS release image (the x86_64 VMDK, 2026-11-02), so the dev
+The earlier dev host was itself installed from a TorqOS release image (the x86_64 VMDK, 2026-11-02), so the dev
 machine is a normal install: everything done to it goes through its own broker and ledger.
 
 ## The target laptop (ADR-046)
@@ -27,7 +28,7 @@ The desktop's target machine for now, the owner's: a target to make work, not re
 | Other | XDNA NPU (`amdxdna`, firmware `amdnpu/`), Thunderbolt/USB4, SD reader (`sdhci_pci`), UVC webcam |
 | Known good | Pop!_OS 24.04, kernel 7.2.15 (2026-11-08); nothing out of tree |
 
-Which of it the base carries and which the desktop: ADR-046 3. The profile is `hardware/asus-zenbook-s16-um5606wa.nix` (M3.5).
+Which of it the base carries and which the desktop: ADR-046 3. A per-model hardware profile (planned as `hardware/asus-zenbook-s16-um5606wa.nix`) is not built: there is no `hardware/` folder. The laptop was installed with the hardware file the installer detects (`nixos-generate-config`); making that file turn on redistributable firmware and iwd is an open M3.5 item.
 TorqOS takes its whole NVMe disk (the owner, 2026-11-09: Pop!_OS is wiped), with the installer's erase mode (ADR-048). Pop!_OS was LUKS + LVM over the whole disk, which ADR-048 does not shrink.
 
 ### Known for this model (community reports, not yet seen on this unit)
@@ -45,17 +46,17 @@ Sources: the Arch wiki's "ASUS Zenbook UM5606"; `github.com/BNieuwenhuizen/zenbo
 
 | Function | How to check | Status |
 |---|---|---|
-| Boots TorqOS, installed by erasing the disk | the installer, then the disk | — |
-| GPU accelerated (amdgpu, radeonsi, RADV) | `dmesg \| grep amdgpu`, `vulkaninfo --summary` | — |
+| Boots TorqOS, installed by erasing the disk | the installer, then the disk | installed 2026-11-09, three rounds (ROADMAP M3.5) |
+| GPU accelerated (amdgpu, radeonsi, RADV) | `dmesg \| grep amdgpu`, `vulkaninfo --summary` | GPU "up", 2026-11-09 (ROADMAP M3.5); acceleration not separately recorded |
 | The panel at its native mode, 120 Hz; scale | COSMIC's display settings | — |
 | Brightness keys (OLED) | `/sys/class/backlight`, the keys | — |
 | No freezes from panel self-refresh | a day of use | — |
 | Touchscreen, pen, touchpad gestures | `libinput debug-events`, the session | — |
 | Keyboard, Fn keys, keyboard light | the keys; `/sys/class/leds` | — |
-| Speakers full range, microphones, headphone jack | `speaker-test -c 2`, `arecord` | — |
+| Speakers full range, microphones, headphone jack | `speaker-test -c 2`, `arecord` | speakers' ASUS tuning "up", 2026-11-09; microphones and jack not recorded |
 | Webcam | `v4l2-ctl --list-devices` | — |
-| Wi-Fi from setup on, no cable; after suspend | setup joins; suspend, resume, `ping` | — |
-| Bluetooth, and after suspend | `bluetoothctl` | — |
+| Wi-Fi from setup on, no cable; after suspend | setup joins; suspend, resume, `ping` | joined in setup, 2026-11-09; after suspend not recorded |
+| Bluetooth, and after suspend | `bluetoothctl` | Bluetooth "up", 2026-11-09; after suspend not recorded |
 | Suspend (s2idle), the lid, drain per hour | close the lid 10 min | — |
 | Battery, charge limit | `upower -d`, `charge_control_end_threshold` | — |
 | Power profiles | `powerprofilesctl` | — |

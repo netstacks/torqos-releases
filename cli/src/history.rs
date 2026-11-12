@@ -200,10 +200,24 @@ pub fn later_conflicts(entries: &[Entry], applied: u64) -> Vec<u64> {
         .collect()
 }
 
+/// Whether a commit confirmed that was not confirmed took change `seq` back.
+fn rolled_back(entries: &[Entry], seq: u64) -> bool {
+    entries.iter().any(|e| e.kind == "rolled_back" && e.data["applied"].as_u64() == Some(seq))
+}
+
+/// The proposals not yet applied or failed: waiting for a person (the agent's among them).
+pub fn waiting_proposals(entries: &[Entry]) -> Vec<&Entry> {
+    entries
+        .iter()
+        .filter(|e| e.kind == "proposal")
+        .filter(|p| !entries.iter().any(|e| matches!(e.kind.as_str(), "applied" | "apply_failed") && e.data["proposal"].as_u64() == Some(p.seq)))
+        .collect()
+}
+
 /// The latest change that took effect (applied, undone, repaired), in the log's words.
 pub fn last_change(entries: &[Entry]) -> Option<String> {
     let e = entries.iter().rev().find(|e| matches!(e.kind.as_str(), "applied" | "reverted" | "repaired"))?;
-    Some(describe(entries, e).1)
+    Some(one_line(&describe(entries, e).1, 300))
 }
 
 /// One change as a log line: its symbol and what happened, in words.
@@ -222,6 +236,7 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
         }
         "interrupted" => ("⚠", format!("Interrupted: {}", reason_of(entries, e.data["target"].as_u64()).unwrap_or("a change"))),
         "init" => ("·", "TorqOS set up".to_string()),
+        "rolled_back" => ("↶", clean(&e.reason)),
         "repaired" if e.data["restored"] == false => ("✗", "Tried to return the machine to its history".to_string()),
         "repaired" => ("✓", "Returned the machine to its history".to_string()),
         "break_glass" => ("⚠", format!("Root shell opened: {}", clean(&e.reason))),
@@ -239,8 +254,13 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
         "disagreement_acknowledged" => ("✓", clean(&e.reason)),
         "password" => ("✓", clean(&e.reason)),
         "password_failed" => ("✗", clean(&e.reason)),
+        // A secret (ADR-052): a value shown is worth noticing, as a root shell is.
+        "secret_set" | "secret_deleted" => ("✓", clean(&e.reason)),
+        "secret_shown" => ("⚠", clean(&e.reason)),
+        "secret_set_failed" => ("✗", clean(&e.reason)),
         "proposal" => ("·", format!("Proposed, not applied: {}", e.reason)),
-        other => ("·", other.to_string()),
+        other if e.reason.is_empty() => ("·", other.to_string()),
+        _ => ("·", clean(&e.reason)),
     }
 }
 
@@ -257,53 +277,85 @@ pub fn asked_by<'a>(entries: &'a [Entry], e: &'a Entry) -> &'a str {
     pointed.and_then(|s| entries.iter().find(|x| x.seq == s)).map_or(e.actor.as_str(), |x| x.actor.as_str())
 }
 
-/// The last `limit` changes, oldest first, grouped by day in local time (docs/CLI-DESIGN.md).
-/// A proposal that was applied (or failed) is folded into its result. Who made a change is shown
-/// whenever it was not the user — the agent, say — and a change from a session that read
-/// untrusted content is marked: the log is where a person audits the machine.
-pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock) -> String {
+/// One line of the history, as `show system ledger` prints it and TorqOS Settings shows it (ADR-045 2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row {
+    /// Its day, in local time: "Today", "Yesterday", or the date.
+    pub day: String,
+    /// Its time, local, `HH:MM`.
+    pub time: String,
+    /// ✓ done, ✗ failed or refused, ⚠ look at it, ↶ undone, ↺ restored, · anything else.
+    pub symbol: &'static str,
+    /// Its change number (`request system revert #85`).
+    pub seq: u64,
+    /// Who made it: the person who approved it, else who asked; empty for the user's own.
+    pub who: String,
+    /// It changed the machine and can be undone (`request system revert`).
+    pub undoable: bool,
+    /// Made by a session that read untrusted content.
+    pub tainted: bool,
+    /// What happened, in words.
+    pub text: String,
+}
+
+/// The last `limit` changes, oldest first, in local time. A proposal that was applied (or failed) is
+/// folded into its result. Who made a change is said whenever it was not the user — the agent, say — and
+/// a change from a session that read untrusted content is marked: the log is where a person audits the
+/// machine.
+pub fn rows(entries: &[Entry], limit: usize, clock: &Clock) -> Vec<Row> {
     let shown: Vec<&Entry> = entries.iter().filter(|e| !(e.kind == "proposal" && settled(entries, e.seq))).collect();
     let today = (clock.now + clock.offset).div_euclid(86_400);
-    use crate::ui::{Col, Table};
-    // One line per entry, cut to the window if need be: what an entry says cannot look like another
-    // entry. Who made it in its own column, never cut.
-    let mut t = Table::new(&[Col::Left(""), Col::Left(""), Col::Right(""), Col::Left(""), Col::Text("")]).indent(4).lines(1);
-    let mut day = None;
-    for e in &shown[shown.len().saturating_sub(limit)..] {
-        let local = parse_ts(&e.ts).map(|t| t + clock.offset);
-        let this_day = local.map(|t| t.div_euclid(86_400));
-        if this_day != day {
-            day = this_day;
-            let label = match this_day {
+    shown[shown.len().saturating_sub(limit)..]
+        .iter()
+        .map(|e| {
+            let local = parse_ts(&e.ts).map(|t| t + clock.offset);
+            let day = match local.map(|t| t.div_euclid(86_400)) {
                 Some(d) if d == today => "Today".to_string(),
                 Some(d) if d == today - 1 => "Yesterday".to_string(),
                 Some(d) => crate::pkg::ymd((d * 86_400) as u64),
                 None => "Unknown date".to_string(),
             };
-            t.line(format!("  {}", ui.bold(&label)));
+            let time = local.map(|t| format!("{:02}:{:02}", t.rem_euclid(86_400) / 3600, t.rem_euclid(3600) / 60)).unwrap_or_else(|| "--:--".into());
+            let (symbol, text) = describe(entries, e);
+            // Who made it: the person who approved it, else who asked (an agent, the broker on its own).
+            let who = match (&e.approved_by, asked_by(entries, e)) {
+                (Some(p), _) => one_line(p, 16),
+                (None, "user" | "") => String::new(),
+                (None, a) => format!("asked by {}", one_line(a, 16)),
+            };
+            Row { day, time, symbol, seq: e.seq, who, undoable: e.kind == "applied" && undone_by(entries, e.seq).is_none() && !rolled_back(entries, e.seq), tainted: e.tainted, text: one_line(&text, usize::MAX) }
+        })
+        .collect()
+}
+
+/// `rows`, as the terminal shows them: grouped by day (docs/CLI-DESIGN.md), one line each.
+pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock) -> String {
+    use crate::ui::{Col, Table};
+    // One line per entry, cut to the window if need be: what an entry says cannot look like another
+    // entry. Who made it in its own column, never cut.
+    let mut t = Table::new(&[Col::Left(""), Col::Left(""), Col::Right(""), Col::Left(""), Col::Text("")]).indent(4).lines(1);
+    let rows = rows(entries, limit, clock);
+    let mut day = None;
+    for r in &rows {
+        if day != Some(&r.day) {
+            day = Some(&r.day);
+            t.line(format!("  {}", ui.bold(&r.day)));
         }
-        let time = local.map(|t| format!("{:02}:{:02}", t.rem_euclid(86_400) / 3600, t.rem_euclid(3600) / 60)).unwrap_or_else(|| "--:--".into());
-        let (symbol, text) = describe(entries, e);
-        // Who made it: the person who approved it, else who asked (an agent, the broker on its own).
-        let mut who = match (&e.approved_by, asked_by(entries, e)) {
-            (Some(p), _) => one_line(p, 16),
-            (None, "user" | "") => String::new(),
-            (None, a) => format!("asked by {}", one_line(a, 16)),
-        };
-        if e.tainted {
+        let mut who = r.who.clone();
+        if r.tainted {
             who.push_str(" ⚠ tainted");
         }
-        let symbol = match symbol {
-            "✓" => ui.green(symbol),
-            "✗" => ui.red(symbol),
-            "⚠" => ui.yellow(symbol),
+        let symbol = match r.symbol {
+            "✓" => ui.green(r.symbol),
+            "✗" => ui.red(r.symbol),
+            "⚠" => ui.yellow(r.symbol),
             s => s.to_string(),
         };
         // Its change number, as everywhere (`request system revert #85`).
-        t.row(vec![time, symbol, format!("#{}", e.seq), who.trim_start().to_string(), one_line(&text, usize::MAX)]);
+        t.row(vec![r.time.clone(), symbol, format!("#{}", r.seq), who.trim_start().to_string(), r.text.clone()]);
     }
     let mut out = t.render(ui);
-    if shown.is_empty() {
+    if rows.is_empty() {
         out.push_str("  Nothing has changed yet.\n");
     } else {
         out.push_str(&format!("\n{}\n", ui.dim(&ui.line("  ", "To undo one change: request system revert <change> (its number, like #85)."))));
@@ -455,4 +507,24 @@ mod tests {
         assert!(out.contains("#11  asked by agent  Interrupted: Install y") && !out.contains("Proposed, not applied"), "{out}");
     }
 
+}
+
+#[cfg(test)]
+mod row_tests {
+    use super::*;
+
+    #[test]
+    fn a_change_taken_back_is_said_and_offers_no_undo() {
+        let e = parse(concat!(
+            r#"{"seq":1,"ts":"2026-10-30T12:00:00Z","kind":"applied","actor":"user","tier":"system","reason":"One","data":{}}"#, "\n",
+            r#"{"seq":2,"ts":"2026-10-30T12:01:00Z","kind":"rolled_back","actor":"broker","tier":"system","reason":"Change #1 rolled back: not confirmed","data":{"applied":1}}"#, "\n",
+            r#"{"seq":3,"ts":"2026-10-30T12:02:00Z","kind":"applied","actor":"user","tier":"system","reason":"Two","data":{}}"#, "\n",
+            r#"{"seq":4,"ts":"2026-10-30T12:03:00Z","kind":"backup_key","actor":"user","tier":"system","reason":"Key given","data":{}}"#,
+        )).unwrap();
+        let r = rows(&e, 10, &Clock { now: 0, offset: 0 });
+        assert!(!r[0].undoable, "rolled back already");
+        assert_eq!((r[1].symbol, r[1].text.as_str()), ("↶", "Change #1 rolled back: not confirmed"));
+        assert!(r[2].undoable);
+        assert_eq!(r[3].text, "Key given", "what it says, not its kind");
+    }
 }

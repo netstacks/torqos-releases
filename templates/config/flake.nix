@@ -8,7 +8,7 @@
   inputs = {
     # The TorqOS distribution. While developing TorqOS itself, point this at your checkout
     # instead, e.g. "path:/home/<you>/torq". Bumping it is itself a broker-approved commit.
-    torq.url = "github:netstacks/torqos";
+    torq.url = "github:torqosorg/torqos";
     nixpkgs.follows = "torq/nixpkgs";
   };
 

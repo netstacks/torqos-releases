@@ -1,0 +1,194 @@
+diff --git a/src/input/actions.rs b/src/input/actions.rs
+index 6015ff8..c32841c 100644
+--- a/src/input/actions.rs
++++ b/src/input/actions.rs
+@@ -142,6 +142,22 @@ impl State {
+                     &mut self.common.workspace_state.update(),
+                 );
+             }
++            // The same commands as their keyboard shortcuts: the system actions' configuration.
++            SwipeAction::WorkspaceOverview => {
++                self.spawn_system_action(shortcuts::action::System::WorkspaceOverview)
++            }
++            SwipeAction::WindowSwitcher => {
++                self.spawn_system_action(shortcuts::action::System::WindowSwitcher)
++            }
++            SwipeAction::AppLibrary => {
++                self.spawn_system_action(shortcuts::action::System::AppLibrary)
++            }
++        }
++    }
++
++    fn spawn_system_action(&mut self, system: shortcuts::action::System) {
++        if let Some(command) = self.common.config.system_actions.get(&system).cloned() {
++            self.spawn_command(command);
+         }
+     }
+ 
+diff --git a/src/input/gestures/mod.rs b/src/input/gestures/mod.rs
+index 6c9c2f3..e361ce1 100644
+--- a/src/input/gestures/mod.rs
++++ b/src/input/gestures/mod.rs
+@@ -16,6 +16,12 @@ pub struct SwipeEvent {
+ pub enum SwipeAction {
+     NextWorkspace,
+     PrevWorkspace,
++    /// Three fingers up: the workspace overview; down, with it open, closes it (it toggles).
++    WorkspaceOverview,
++    /// Three fingers down: the window switcher.
++    WindowSwitcher,
++    /// Four fingers pinched in: the app library (it toggles).
++    AppLibrary,
+ }
+ 
+ #[derive(Debug, Clone)]
+diff --git a/src/input/mod.rs b/src/input/mod.rs
+index d51dd8a..bb30e8e 100644
+--- a/src/input/mod.rs
++++ b/src/input/mod.rs
+@@ -97,6 +97,9 @@ pub mod actions;
+ pub mod gestures;
+ pub mod tablet_emu;
+ 
++/// A four-finger pinch opens the app library once the fingers are this close, relative to the start.
++const PINCH_IN_SCALE: f64 = 0.75;
++
+ /// Identifies the input backend instance an event came from, used to disambiguate device ids
+ /// (which are only unique within a single backend instance, see
+ /// [`smithay::backend::input::Device::id`]).
+@@ -1206,7 +1209,11 @@ impl State {
+                     .cloned();
+                 if let Some(seat) = maybe_seat {
+                     self.common.idle_notifier_state.notify_activity(&seat);
+-                    if event.fingers() >= 3 && !workspace_overview_is_open(&seat.active_output()) {
++                    // Three fingers even with the overview open: swiping down closes it.
++                    if event.fingers() == 3
++                        || (event.fingers() > 3
++                            && !workspace_overview_is_open(&seat.active_output()))
++                    {
+                         self.common.gesture_state = Some(GestureState::new(event.fingers()));
+                     } else {
+                         let serial = SERIAL_COUNTER.next_serial();
+@@ -1248,7 +1255,22 @@ impl State {
+                                 natural_scroll = natural;
+                             }
+                             activate_action = match gesture_state.fingers {
+-                                3 => None, // TODO: 3 finger gestures
++                                // Up and down only: four fingers left and right switch workspaces.
++                                // Fingers moving up is up, whatever the scroll direction.
++                                3 => {
++                                    let overview_open =
++                                        workspace_overview_is_open(&seat.active_output());
++                                    match gesture_state.direction {
++                                        Some(Direction::Up) if !overview_open => {
++                                            Some(SwipeAction::WorkspaceOverview)
++                                        }
++                                        Some(Direction::Down) if overview_open => {
++                                            Some(SwipeAction::WorkspaceOverview)
++                                        }
++                                        Some(Direction::Down) => Some(SwipeAction::WindowSwitcher),
++                                        _ => None,
++                                    }
++                                }
+                                 4 => {
+                                     if self.common.config.cosmic_conf.workspaces.workspace_layout
+                                         == WorkspaceLayout::Horizontal
+@@ -1378,16 +1400,21 @@ impl State {
+                     .cloned();
+                 if let Some(seat) = maybe_seat {
+                     self.common.idle_notifier_state.notify_activity(&seat);
+-                    let serial = SERIAL_COUNTER.next_serial();
+-                    let pointer = seat.get_pointer().unwrap();
+-                    pointer.gesture_pinch_begin(
+-                        self,
+-                        &GesturePinchBeginEvent {
+-                            serial,
+-                            time: event.time(),
+-                            fingers: event.fingers(),
+-                        },
+-                    );
++                    // Four fingers are the compositor's (the app library); fewer, an app's (zoom).
++                    if event.fingers() == 4 && !workspace_overview_is_open(&seat.active_output()) {
++                        self.common.gesture_state = Some(GestureState::new(event.fingers()));
++                    } else {
++                        let serial = SERIAL_COUNTER.next_serial();
++                        let pointer = seat.get_pointer().unwrap();
++                        pointer.gesture_pinch_begin(
++                            self,
++                            &GesturePinchBeginEvent {
++                                serial,
++                                time: event.time(),
++                                fingers: event.fingers(),
++                            },
++                        );
++                    }
+                 }
+             }
+             InputEvent::GesturePinchUpdate { event, .. } => {
+@@ -1400,16 +1427,25 @@ impl State {
+                     .cloned();
+                 if let Some(seat) = maybe_seat {
+                     self.common.idle_notifier_state.notify_activity(&seat);
+-                    let pointer = seat.get_pointer().unwrap();
+-                    pointer.gesture_pinch_update(
+-                        self,
+-                        &GesturePinchUpdateEvent {
+-                            time: event.time(),
+-                            delta: event.delta(),
+-                            scale: event.scale(),
+-                            rotation: event.rotation(),
+-                        },
+-                    );
++                    if let Some(ref mut gesture_state) = self.common.gesture_state {
++                        // Once per pinch, when the fingers have closed to three quarters of
++                        // where they started: a deliberate pinch, not fingers settling.
++                        if gesture_state.action.is_none() && event.scale() < PINCH_IN_SCALE {
++                            gesture_state.action = Some(SwipeAction::AppLibrary);
++                            self.handle_swipe_action(SwipeAction::AppLibrary, &seat);
++                        }
++                    } else {
++                        let pointer = seat.get_pointer().unwrap();
++                        pointer.gesture_pinch_update(
++                            self,
++                            &GesturePinchUpdateEvent {
++                                time: event.time(),
++                                delta: event.delta(),
++                                scale: event.scale(),
++                                rotation: event.rotation(),
++                            },
++                        );
++                    }
+                 }
+             }
+             InputEvent::GesturePinchEnd { event, .. } => {
+@@ -1422,16 +1458,20 @@ impl State {
+                     .cloned();
+                 if let Some(seat) = maybe_seat {
+                     self.common.idle_notifier_state.notify_activity(&seat);
+-                    let serial = SERIAL_COUNTER.next_serial();
+-                    let pointer = seat.get_pointer().unwrap();
+-                    pointer.gesture_pinch_end(
+-                        self,
+-                        &GesturePinchEndEvent {
+-                            serial,
+-                            time: event.time(),
+-                            cancelled: event.cancelled(),
+-                        },
+-                    );
++                    if self.common.gesture_state.is_some() {
++                        self.common.gesture_state = None;
++                    } else {
++                        let serial = SERIAL_COUNTER.next_serial();
++                        let pointer = seat.get_pointer().unwrap();
++                        pointer.gesture_pinch_end(
++                            self,
++                            &GesturePinchEndEvent {
++                                serial,
++                                time: event.time(),
++                                cancelled: event.cancelled(),
++                            },
++                        );
++                    }
+                 }
+             }
+             InputEvent::GestureHoldBegin { event, .. } => {

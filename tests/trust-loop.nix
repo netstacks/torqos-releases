@@ -187,6 +187,13 @@ pkgs.testers.runNixOSTest {
         out = machine.fail("su - dev -c 'torqcli -c \"configure; no system time-zone\"' 2>&1")
         assert "'no' is not a word here" in out, out
 
+    with subtest("--candidate works on the person's own draft, as TorqOS Settings' terminal does; a plain script keeps its own"):
+        machine.succeed("su - dev -c 'torqcli --candidate -c \"configure; set system time-zone Asia/Tokyo\"'")
+        machine.succeed("su - dev -c 'torqcli --candidate -c \"configure; show | compare\"' | grep -q Tokyo")
+        machine.fail("su - dev -c 'torqcli -c \"configure; show | compare\"' | grep -q Tokyo")
+        machine.succeed("su - dev -c 'torqcli --candidate -c \"configure; rollback 0\"'")
+        machine.fail("su - dev -c 'torqcli --candidate -c \"configure; show | compare\"' | grep -q Tokyo")
+
     with subtest("torqcli filters: the real tools, in a sandbox that reaches nothing"):
         import shlex
         def dev_sh(cmd):

@@ -80,10 +80,16 @@ exec unshare --mount --propagation private -- bash -euo pipefail -c '
       --setenv TERM "${TERM:-dumb}" \
       --chdir "${share:-/var/lib/torq-agent}" \
       -- "$@" || rc=$?
-  # Everything the agent started is gone (its own process namespace): nothing races this. A set-id
-  # file the agent left in the folder would run as the agent outside the sandbox, later.
+  # A set-id file the agent left in the folder would run as the agent outside the sandbox, later: its bits
+  # are taken off. As the agent, not as root: the files are owned by the agent, and an owner may change
+  # them. The folder belongs to the person, who could swap a folder in it for a link while this runs,
+  # after find looks at a file and before chmod, which goes by the path again. As root, chmod would then
+  # take the bits off whatever the link led to (the wrapper of sudo, say). As the agent, a link can lead
+  # it only to what the agent could change anyway (the review of 2026-11-11, KNOWN-GAPS 6zz).
   if [ -n "$share" ]; then
-    found=$(find "$share" -xdev -user torq-agent -perm /6000 -type f -print -exec chmod ug-s {} + 2>/dev/null || true)
+    found=$(setpriv --reuid torq-agent --regid torq-agent --init-groups --no-new-privs \
+      --inh-caps=-all --bounding-set=-all -- \
+      find "$share" -xdev -user torq-agent -perm /6000 -type f -print -exec chmod ug-s {} + 2>/dev/null || true)
     [ -z "$found" ] || echo "torq agent run: set-id bits taken off what the agent left: $found" >&2
   fi
   exit "$rc"

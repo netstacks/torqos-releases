@@ -215,6 +215,7 @@ impl Schema {
         }
         let (ok, form) = match n.ty.as_deref() {
             Some("package") => (package_name_ok(value), "a nixpkgs name: letters, digits, - _ and . between names"),
+            Some("flatpak") => (flatpak_id_ok(value), "an application's id, like org.mozilla.firefox"),
             Some("host-name") => (host_name_ok(value), "letters, digits and -, at most 63, not starting or ending with -"),
             Some("user-name") => (user_name_ok(value), "small letters, digits, _ and -, starting with a letter or _"),
             // A value with no closed set and no type: still one plain word.
@@ -375,6 +376,7 @@ impl Schema {
                 let n = self.node(key);
                 let shaped = match n.ty.as_deref() {
                     Some("package") => package_name_ok(v),
+                    Some("flatpak") => flatpak_id_ok(v),
                     Some("host-name") => host_name_ok(v),
                     Some("user-name") => user_name_ok(v),
                     _ => !v.is_empty() && !v.chars().any(|c| c.is_whitespace() || c.is_control()),
@@ -806,7 +808,7 @@ mod tests {
         assert!(err(s.set(&mut c, &w("system packages"))).contains("needs a value"));
         assert!(err(s.set(&mut c, &w("system packages [ htop"))).contains("missing ']'"));
         let e = err(s.set(&mut c, &w("users dev")));
-        assert!(e.contains("incomplete; one of: packages"), "{e}");
+        assert!(e.contains("incomplete; one of: flatpaks, packages"), "{e}");
         assert_eq!(c, Config::default(), "nothing invalid was written");
     }
 
@@ -1065,5 +1067,13 @@ mod tests {
 /// (`users/<name>/packages.json`, as the broker's allow-list): the files
 /// that can never change how the system runs (SSH, say).
 pub fn is_user_data(path: &str) -> bool {
-    matches!(path.split('/').collect::<Vec<_>>().as_slice(), ["users", name, "packages.json"] if !name.is_empty())
+    matches!(path.split('/').collect::<Vec<_>>().as_slice(), ["users", name, "packages.json" | "flatpaks.json"] if !name.is_empty())
+}
+
+/// A Flatpak application's id, as the broker takes one (broker/src/policy.rs): at least three dot-separated
+/// parts of letters, digits, - and _.
+pub fn flatpak_id_ok(id: &str) -> bool {
+    let part = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let parts: Vec<&str> = id.split('.').collect();
+    id.len() <= 255 && parts.len() >= 3 && parts.iter().all(|p| part(p)) && !id.starts_with('-')
 }

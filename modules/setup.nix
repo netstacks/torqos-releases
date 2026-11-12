@@ -11,18 +11,21 @@ let
   # The image's own TorqOS, pinned in the new config repo: its source in the store, locked by hash,
   # and the nixpkgs TorqOS itself is locked to — so evaluating the machine needs no network.
   src = cfg.source;
-  lock = builtins.toJSON {
+  # Every input TorqOS's flake takes, locked as TorqOS locks it (nixpkgs, nixpkgs-cosmic since ADR-045's
+  # amendment): one missing and the flake cannot even be called ("called without required argument").
+  torqLock = lib.importJSON "${src.outPath}/flake.lock";
+  torqInputs = torqLock.nodes.${torqLock.root}.inputs;
+  lock = assert lib.all builtins.isString (lib.attrValues torqInputs); builtins.toJSON {
     version = 7;
     root = "root";
     nodes = {
       root.inputs = { torq = "torq"; nixpkgs = [ "torq" "nixpkgs" ]; };
       torq = {
-        inputs.nixpkgs = "nixpkgs";
+        inputs = torqInputs;
         locked = { type = "path"; path = "${src.outPath}"; narHash = src.narHash; lastModified = src.lastModified or 0; };
         original = { type = "path"; path = "${src.outPath}"; };
       };
-      nixpkgs = (lib.importJSON "${src.outPath}/flake.lock").nodes.nixpkgs;
-    };
+    } // lib.genAttrs (lib.attrValues torqInputs) (n: torqLock.nodes.${n});
   };
 in
 {

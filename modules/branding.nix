@@ -12,7 +12,7 @@ let
   version = config.torq.cli.package.version;
   nixos = config.system.nixos.release;
   # The public repository: each release's source, its images, and where to report a problem.
-  repo = "https://github.com/netstacks/torqos-releases";
+  repo = "https://github.com/torqosorg/torqos-releases";
   share = "${config.torq.branding.package}/share/torqos";
   # agetty reads `\` in /etc/issue as the start of an escape (`\n` the host name, `\l` the
   # terminal): the wordmark's own backslashes, doubled, are drawn as they are. The lockup — the

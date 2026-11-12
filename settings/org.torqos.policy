@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN" "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- A system change, approved on the desktop (ADR-045 5): the broker asks; the person's own password, every time. -->
+<policyconfig>
+  <vendor>TorqOS</vendor>
+  <action id="org.torqos.approve">
+    <description>Approve a change to this machine</description>
+    <message>Approve this change to the machine</message>
+    <icon_name>torqos</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

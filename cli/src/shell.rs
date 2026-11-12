@@ -12,14 +12,16 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 /// The schema of the running system (modules/schema.nix).
-const SCHEMA: &str = "/etc/torq/schema.json";
+pub(crate) const SCHEMA: &str = "/etc/torq/schema.json";
 /// Every NixOS setting of the running system (modules/nixos-schema.nix): the tree's paths.
-const NIXOS_SCHEMA: &str = "/etc/torq/nixos-schema.json";
+pub(crate) const NIXOS_SCHEMA: &str = "/etc/torq/nixos-schema.json";
 
-struct Real<'a> {
+pub(crate) struct Real<'a> {
     cli: &'a Cli,
     /// `| display detail`: steps and Nix's and the broker's output shown as they come (no spinner).
     detail: std::cell::Cell<bool>,
+    /// Who answers what a command asks a person: in TorqOS Settings, its dialog (None: the terminal).
+    asker: Option<Box<dyn Fn(&str) -> crate::session::Answer + 'a>>,
 }
 
 impl Real<'_> {
@@ -99,20 +101,9 @@ impl Real<'_> {
     }
 
 
-    /// The broker's status as `show system alarms` reports it — without colour (the shell cleans its
-    /// output, which would show colour codes as text), naming the shell's own commands.
+    /// The broker's status as `show system alarms` reports it (`crate::status_report`).
     fn status_report(&self, fit: Option<usize>) -> Result<(serde_json::Value, crate::status::Report)> {
-        let log = run::start_log()?;
-        let v = match run::broker_status(broker(self.cli, &["status"])?, &log)? {
-            Ok(v) => v,
-            Err(why) => bail!("couldn't check this machine: {why}"),
-        };
-        let last = crate::read_ledger(self.cli).ok().and_then(|l| history::last_change(&l));
-        let ui = crate::ui::Ui::plain_at(fit);
-        let mut report = crate::status::render(&v, last.as_deref(), &self.cli.repo.display().to_string(), &ui);
-        let sshd = std::fs::read_to_string("/etc/ssh/sshd_config").ok();
-        report.text.push_str(&crate::status::notes(sshd.as_deref(), &ui));
-        Ok((v, report))
+        crate::status_report(self.cli, fit, run::start_log()?)
     }
 }
 
@@ -126,7 +117,25 @@ fn done(o: run::Outcome, what: &str) -> Result<serde_json::Value> {
     }
 }
 
+impl<'a> Real<'a> {
+    /// The machine, as TorqOS Settings' sessions use it too (app.rs).
+    pub(crate) fn new(cli: &'a Cli) -> Self {
+        Real { cli, detail: std::cell::Cell::new(false), asker: None }
+    }
+
+    /// The machine, its questions answered by `asker`.
+    pub(crate) fn asking(cli: &'a Cli, asker: Box<dyn Fn(&str) -> crate::session::Answer + 'a>) -> Self {
+        Real { cli, detail: std::cell::Cell::new(false), asker: Some(asker) }
+    }
+}
+
 impl Machine for Real<'_> {
+    fn needs(&self) -> Option<String> {
+        let session = crate::app::session_recorded();
+        let needs = crate::app::needs(std::path::Path::new("/run/booted-system"), std::path::Path::new("/run/current-system"), session.as_deref());
+        needs.line().or_else(|| needs.note())
+    }
+
     fn evaluate(&self, base: &str, files: &[(String, Option<String>)]) -> Result<Evaluated> {
         let (_scratch, copy) = self.changed_copy(base, files)?;
         let log = run::start_log()?;
@@ -326,6 +335,113 @@ impl Machine for Real<'_> {
         Ok(out)
     }
 
+    fn secret_value(&self, name: &str, user: Option<&str>, act: &crate::secrets::Act, me: &str) -> Result<String> {
+        use crate::secrets::Act;
+        let whose = user.map_or_else(|| format!("the system's secret {name}"), |u| format!("{u}'s secret {name}"));
+        let mut args: Vec<String> = vec![format!("secret-{}", act.verb()), "--name".into(), name.into()];
+        if let Some(u) = user {
+            args.extend(["--user".into(), u.into()]);
+        }
+        let log = run::start_log()?;
+        let command = format!("request system secret {} {name}", act.verb());
+        match act {
+            Act::Set | Act::SetFile(_) => {
+                // Non-dumpable while it is held, as a password is (ADR-040).
+                rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).context("protecting the value")?;
+                let value = if let Act::SetFile(path) = act {
+                    // Read as the person: a file of theirs (an SSH key), no larger than the broker keeps.
+                    use std::io::Read as _;
+                    let mut s = String::new();
+                    std::io::Read::take(fs::File::open(path).with_context(|| format!("reading {path}"))?, crate::secrets::VALUE_MAX as u64 + 1).read_to_string(&mut s).with_context(|| format!("reading {path} (text: an SSH key, a token)"))?;
+                    if s.len() > crate::secrets::VALUE_MAX {
+                        bail!("not changed: {path} is larger than a secret is (16 KiB)");
+                    }
+                    s
+                } else {
+                    if !std::io::stdin().is_terminal() {
+                        bail!("a secret is typed at a terminal: `{command}` there (or `… file <path>`)");
+                    }
+                    let typed = |q: &str| -> Result<String> {
+                        print!("{q}: ");
+                        std::io::stdout().flush()?;
+                        let _hidden = Echo::set(false);
+                        let mut s = String::new();
+                        std::io::stdin().lock().read_line(&mut s)?;
+                        println!();
+                        Ok(s.trim_end_matches(['\n', '\r']).to_string())
+                    };
+                    let value = typed(&format!("Value of {whose} (not shown as you type)"))?;
+                    if typed("Again")? != value {
+                        bail!("not changed: the two differ");
+                    }
+                    value
+                };
+                if value.trim().is_empty() {
+                    bail!("not changed: no value");
+                }
+                // In memory only, never on a disk (a killed torqcli would leave it there), and gone when this is.
+                let scratch = crate::memory_scratch_dir()?;
+                let file = scratch.path().join("value");
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?.write_all(value.as_bytes())?;
+                }
+                // As the broker reads it run directly (root's torqcli); over the socket, sent as the request's own.
+                args.extend(["--value-file".into(), file.to_string_lossy().into_owned(), "--approved-by".into(), me.into()]);
+                let a: Vec<&str> = args.iter().map(String::as_str).collect();
+                let v = done(run::broker_json(broker(self.cli, &a)?, &log)?, &command)?;
+                Ok(format!(
+                    "The value of {whose} is kept (ledger #{}): encrypted, root's alone, outside the configuration. What it may be used for: request system secret allow {name} ….\n",
+                    v["seq"].as_u64().unwrap_or(0)
+                ))
+            }
+            Act::Show => {
+                args.extend(["--approved-by".into(), me.into()]);
+                let a: Vec<&str> = args.iter().map(String::as_str).collect();
+                let v = done(run::broker_json(broker(self.cli, &a)?, &log)?, &command)?;
+                Ok(format!("{}\n", v["value"].as_str().unwrap_or_default()))
+            }
+            Act::Delete => {
+                args.extend(["--approved-by".into(), me.into()]);
+                let a: Vec<&str> = args.iter().map(String::as_str).collect();
+                let v = done(run::broker_json(broker(self.cli, &a)?, &log)?, &command)?;
+                Ok(format!("The value of {whose} is deleted (ledger #{}).\n", v["seq"].as_u64().unwrap_or(0)))
+            }
+            _ => bail!("not a value's request"),
+        }
+    }
+
+    fn known_host_keys(&self, host: &str) -> Result<Vec<String>> {
+        // ssh-keygen finds the host's lines in the person's own known_hosts, hashed or not; each is written back
+        // as the host in the clear, its type and key. A marked line (@revoked, @cert-authority) is not a key to trust.
+        let out = std::process::Command::new("ssh-keygen").args(["-F", host]).stderr(std::process::Stdio::null()).output().context("running ssh-keygen (OpenSSH)")?;
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with('@'))
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split_whitespace().collect();
+                (f.len() >= 3).then(|| format!("{host} {} {}", f[1], f[2]))
+            })
+            .filter(|l| torq_wire::secrets::known_ok(l, &[host.to_string()]))
+            .collect())
+    }
+
+    fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["secrets"])?, &log)?, "show system secrets")?;
+        Ok(v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|k| {
+                let name = k["name"].as_str()?.to_string();
+                match &k["owner"] {
+                    serde_json::Value::String(s) if s == "system" => Some((None, name)),
+                    o => Some((Some(o["person"].as_str()?.to_string()), name)),
+                }
+            })
+            .collect())
+    }
+
     fn backup_key(&self, name: &str, me: &str) -> Result<String> {
         if !std::io::stdin().is_terminal() {
             bail!("a key is typed at a terminal: `request system backup key {name}` there");
@@ -409,7 +525,7 @@ impl Machine for Real<'_> {
 
     fn proposals(&self, fit: Option<usize>) -> Result<String> {
         let entries = crate::read_ledger(self.cli)?;
-        let waiting = waiting_proposals(&entries);
+        let waiting = history::waiting_proposals(&entries);
         if waiting.is_empty() {
             return Ok("No proposals are waiting.\n".into());
         }
@@ -433,7 +549,7 @@ impl Machine for Real<'_> {
 
     fn apply_proposal(&self, seq: u64, me: &str) -> Result<String> {
         let entries = crate::read_ledger(self.cli)?;
-        if !waiting_proposals(&entries).iter().any(|e| e.seq == seq) {
+        if !history::waiting_proposals(&entries).iter().any(|e| e.seq == seq) {
             bail!("#{seq} is not a proposal waiting to be applied (show system proposals lists them)");
         }
         let log = run::start_log()?;
@@ -909,6 +1025,9 @@ impl Machine for Real<'_> {
         fs::read_to_string("/etc/os-release").ok().and_then(|t| crate::release::os_release_version(&t))
     }
     fn ask(&self, question: &str) -> crate::session::Answer {
+        if let Some(asker) = &self.asker {
+            return asker(question);
+        }
         ask_person(question)
     }
     fn read_terminal(&self, max: usize) -> Result<String> {
@@ -1004,13 +1123,6 @@ fn writes_never_go_through_a_link() {
 
 /// The proposals no one has applied (or tried to): what `show system proposals` lists and
 /// `request system apply` takes.
-fn waiting_proposals(entries: &[history::Entry]) -> Vec<&history::Entry> {
-    entries
-        .iter()
-        .filter(|e| e.kind == "proposal")
-        .filter(|p| !entries.iter().any(|e| matches!(e.kind.as_str(), "applied" | "apply_failed") && e.data["proposal"].as_u64() == Some(p.seq)))
-        .collect()
-}
 /// `propose`'s arguments. Every value given as `--name=value`: a reason or comment that starts with
 /// `-` (any change of an existing value does: "-   host-name two; …") must not read as an option.
 fn propose_args(diff: &str, base: &str, reason: &str) -> Vec<String> {
@@ -1170,6 +1282,9 @@ enum Invocation {
     Interactive,
     /// `--help`: how torqcli is run, on standard output.
     Help,
+    /// `--candidate -c "<command>; …"`: a script on the person's own saved candidate, as the shell's, kept when
+    /// it ends: how TorqOS Settings hands a commit of the draft to a terminal (ADR-045 2).
+    Draft(String),
     /// `-c "<command>; <command>…"`.
     Script(String),
     /// `torqcli <command>`: one operational command, its words as the calling shell split them (one
@@ -1179,7 +1294,7 @@ enum Invocation {
 
 /// How torqcli is run, named as it was (`torq` or `torqcli`).
 fn usage(name: &str) -> String {
-    format!("usage: {name} [--verbose] [-c \"<command>; <command>…\" | <command>]")
+    format!("usage: {name} [--verbose] [[--candidate] -c \"<command>; <command>…\" | <command>]")
 }
 
 /// The name torqcli was run by (`torq`, `torqcli`).
@@ -1228,7 +1343,7 @@ fn describe(e: &anyhow::Error) -> String {
 /// Whether a run may ask a person what a command offers to go on with (Session::asks): the shell, or
 /// one command, with standard input and output a terminal — never a script (`-c`), whatever it runs at.
 fn asks(run: &Invocation, stdin_terminal: bool, stdout_terminal: bool) -> bool {
-    !matches!(run, Invocation::Script(_)) && stdin_terminal && stdout_terminal
+    !matches!(run, Invocation::Script(_) | Invocation::Draft(_)) && stdin_terminal && stdout_terminal
 }
 
 #[cfg(test)]
@@ -1242,11 +1357,24 @@ fn a_script_is_never_asked() {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn a_script_on_the_persons_candidate_is_asked_for_by_name() {
+    let a = |x: &[&str]| parse_args("torqcli", &x.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    assert_eq!(a(&["--candidate", "-c", "configure; commit"]).unwrap(), Invocation::Draft("configure; commit".into()));
+    assert_eq!(a(&["-c", "configure; commit", "--candidate"]).unwrap(), Invocation::Draft("configure; commit".into()), "in either order");
+    assert_eq!(a(&["-c", "configure; commit"]).unwrap(), Invocation::Script("configure; commit".into()), "without it, a script's candidate stays its own");
+    assert!(a(&["--candidate"]).is_err(), "it goes with -c");
+    assert!(a(&["--candidate", "show", "version"]).is_err(), "it goes with -c");
+    assert!(!asks(&Invocation::Draft("commit".into()), true, true), "a script is never asked to go on");
+}
+
 /// The command line (`name`: as torqcli was run). A refusal says why, then how torqcli is run.
 fn parse_args(name: &str, args: &[String]) -> Result<Invocation> {
     // (One line, as every message: the usage after the reason.)
     let refuse = |why: String| anyhow::anyhow!("{why}; {}", usage(name));
     let mut run = Invocation::Interactive;
+    let mut on_candidate = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1257,8 +1385,9 @@ fn parse_args(name: &str, args: &[String]) -> Result<Invocation> {
                 run = Invocation::Script(line.clone());
             }
             "-c" => return Err(refuse("-c once: every command in one -c, separated by ;".into())),
+            "--candidate" => on_candidate = true,
             "-h" | "--help" => return Ok(Invocation::Help),
-            o if o.starts_with('-') => return Err(refuse(format!("'{o}' is not an option of {name} (--verbose, -c, --help)"))),
+            o if o.starts_with('-') => return Err(refuse(format!("'{o}' is not an option of {name} (--verbose, -c, --candidate, --help)"))),
             _ if run == Invocation::Interactive => {
                 let rest: Vec<String> = std::iter::once(a).chain(it).cloned().collect();
                 let w = if rest.len() == 1 { crate::session::words(&rest[0])? } else { rest };
@@ -1268,12 +1397,19 @@ fn parse_args(name: &str, args: &[String]) -> Result<Invocation> {
                 if w.is_empty() {
                     return Err(refuse("an empty command".into()));
                 }
+                if on_candidate {
+                    return Err(refuse("--candidate goes with -c".into()));
+                }
                 return Ok(Invocation::Command(w));
             }
             _ => return Err(refuse(format!("'{a}' after -c's commands: every command goes in -c, separated by ;"))),
         }
     }
-    Ok(run)
+    match run {
+        Invocation::Script(line) if on_candidate => Ok(Invocation::Draft(line)),
+        _ if on_candidate => Err(refuse("--candidate goes with -c".into())),
+        run => Ok(run),
+    }
 }
 
 #[cfg(test)]
@@ -1305,7 +1441,7 @@ fn a_command_on_the_command_line() {
         (&["-c"][..], "-c needs the commands to run, as in -c \"show system alarms\"; usage: torq [--verbose]"),
         (&["-c", "x", "-c", "y"], "-c once: every command in one -c, separated by ;"),
         (&["-c", "x", "show"], "'show' after -c's commands: every command goes in -c"),
-        (&["-x"], "'-x' is not an option of torq (--verbose, -c, --help)"),
+        (&["-x"], "'-x' is not an option of torq (--verbose, -c, --candidate, --help)"),
         (&[""], "an empty command"),
     ] {
         let e = format!("{:#}", a(bad).unwrap_err());
@@ -1385,22 +1521,30 @@ fn run_shell(args: &[String]) -> Result<i32> {
     check_repo(&cli)?;
     let schema = Schema::parse(&fs::read_to_string(SCHEMA).with_context(|| format!("reading {SCHEMA} (is this TorqOS?)"))?)?;
     let tree = crate::nixos::Tree::parse(&fs::read_to_string(NIXOS_SCHEMA).with_context(|| format!("reading {NIXOS_SCHEMA} (is this TorqOS, from S1 on?)"))?)?;
-    let machine = Real { cli: &cli, detail: std::cell::Cell::new(false) };
+    let machine = Real { cli: &cli, detail: std::cell::Cell::new(false), asker: None };
     let who = me()?;
     // Only the interactive shell keeps a candidate between runs; a script's is its own.
-    let saved = if run == Invocation::Interactive { Some(Candidate::default_path()?) } else { None };
+    let saved = if matches!(run, Invocation::Interactive | Invocation::Draft(_)) { Some(Candidate::default_path()?) } else { None };
     let mut s = Session::new(schema, tree, Repo::new(&cli.repo), saved, &machine, &who);
+    s.follow_schemas(Path::new(SCHEMA), Path::new(NIXOS_SCHEMA));
     s.screen = || crate::ui::columns(false);
     s.cache = crate::evalcache::Cache::personal();
     // Offered to go on (install what an update loaded) only where a person is at a terminal: never a
     // script, which must not stop on a question it was not written to answer.
     s.asks = asks(&run, std::io::stdin().is_terminal(), std::io::stdout().is_terminal());
+    #[derive(Clone, Copy)]
+    enum RunKind {
+        Draft,
+        Other,
+    }
+    let run_kind = if matches!(run, Invocation::Draft(_)) { RunKind::Draft } else { RunKind::Other };
     let fail = |line: &str, e: anyhow::Error| {
         say_error(&format!("{}: {}", history::one_line(line, 80), describe(&e)));
         Ok(1)
     };
     match run {
-        Invocation::Script(script) => {
+        Invocation::Script(script) | Invocation::Draft(script) => {
+            let keeps = matches!(run_kind, RunKind::Draft);
             let lines = script_lines(&script);
             for (i, line) in lines.iter().enumerate() {
                 match s.exec(line) {
@@ -1418,7 +1562,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
                 }
             }
             // A script's candidate is its own: what it changed and did not commit is gone. Say so.
-            if s.uncommitted().unwrap_or(false) {
+            if !keeps && s.uncommitted().unwrap_or(false) {
                 eprint!("{}", s.pending_note(crate::session::Pending::Discarded));
             }
             Ok(0)
@@ -1437,7 +1581,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
         Invocation::Interactive => {
             let history_cli = Cli { repo: cli.repo.clone(), broker: cli.broker.clone() };
             let history = crate::complete::Later::new(move || {
-                let real = Real { cli: &history_cli, detail: std::cell::Cell::new(false) };
+                let real = Real { cli: &history_cli, detail: std::cell::Cell::new(false), asker: None };
                 real.configurations(&Repo::new(&history_cli.repo), 30).map(|h| crate::session::configuration_lines(&h)).unwrap_or_default()
             });
             interactive(&mut s, history)
@@ -1594,6 +1738,7 @@ fn interactive(s: &mut Session, history: crate::complete::Later) -> Result<i32> 
     }
     let stdin = std::io::stdin();
     loop {
+        s.follow_schemas(Path::new(SCHEMA), Path::new(NIXOS_SCHEMA));
         let (above, p) = prompt(s, &user, &host);
         if let Some(a) = above {
             say(&format!("{a}\n"));
@@ -1712,7 +1857,7 @@ mod editor {
     #[derive(Clone)]
     struct Help {
         /// What `?` and Tab know: the schema and the NixOS tree (complete::Know borrows them).
-        know: Arc<(crate::tree::Schema, crate::nixos::Tree)>,
+        know: Arc<Mutex<Arc<(crate::tree::Schema, crate::nixos::Tree)>>>,
         /// Where the session is: mode, edit path (updated before each line is read).
         at: Arc<Mutex<complete::At>>,
     }
@@ -1732,7 +1877,8 @@ mod editor {
         fn choices(&self, before: &str) -> Option<(Vec<complete::Choice>, String)> {
             let (w, partial) = at_cursor(before)?;
             let at = self.at.lock().unwrap().clone();
-            let know = complete::Know { schema: &self.know.0, tree: &self.know.1 };
+            let knows = self.know.lock().unwrap().clone();
+            let know = complete::Know { schema: &knows.0, tree: &knows.1 };
             Some((complete::choices_at(&know, &at, &w, &partial), partial))
         }
     }
@@ -1767,7 +1913,8 @@ mod editor {
         fn handle(&self, _: &Event, _: RepeatCount, _: bool, ctx: &EventContext) -> Option<Cmd> {
             let (w, partial) = at_cursor(&ctx.line()[..ctx.pos()])?; // in quotes: a plain '?'
             let at = self.0.at.lock().unwrap().clone();
-            let know = complete::Know { schema: &self.0.know.0, tree: &self.0.know.1 };
+            let knows = self.0.know.lock().unwrap().clone();
+            let know = complete::Know { schema: &knows.0, tree: &knows.1 };
             let answer = complete::answer(&know, &at, &w, &partial, crate::ui::Ui::for_terminal(false).width());
             let text: String = answer.lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
             let text = crate::paint::paint(&text, &crate::ui::Ui::for_terminal(false));
@@ -1794,7 +1941,7 @@ mod editor {
         // stops the command's child — nix, the broker — and torqcli says so and stays, its terminal
         // put back by the Echo guard as the command returns.)
         let at = |s: &mut Session| complete::At { mode: s.mode, edit: s.edit_path().to_vec(), data: s.help_data(), configurations: history.clone(), files: s.nix_files(), interfaces: super::interfaces() };
-        let help = Help { know: Arc::new((s.schema.clone(), s.tree.clone())), at: Arc::new(Mutex::new(at(s))) };
+        let help = Help { know: Arc::new(Mutex::new(Arc::new((s.schema.clone(), s.tree.clone())))), at: Arc::new(Mutex::new(at(s))) };
         // Bracketed paste off: a paste arrives as typed, each line running at its newline as on a network
         // device (not held as one block until another Enter); the lines after the first were waiting
         // already, so they are one batch (below), and none is lost (rustyline's buffer-redux).
@@ -1811,6 +1958,10 @@ mod editor {
         // a question (or `load … terminal`) ended the batch being read.
         let (mut failed, mut after_question) = (0usize, false);
         loop {
+            // Updated since the last line: `?` and Tab know the new system's settings.
+            if s.follow_schemas(std::path::Path::new(super::SCHEMA), std::path::Path::new(super::NIXOS_SCHEMA)) {
+                *help.know.lock().unwrap() = Arc::new((s.schema.clone(), s.tree.clone()));
+            }
             *help.at.lock().unwrap() = at(s);
             let (above, p) = prompt(s, user, host);
             if let Some(a) = above {

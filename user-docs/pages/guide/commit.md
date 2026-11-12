@@ -13,7 +13,7 @@ Interactive sessions of the same user share one candidate. It survives leaving `
 | Command | Does |
 |---|---|
 | <code>show &#124; compare</code> | show what the commit would change |
-| `commit check` | build the new system without switching to it |
+| `commit check` | evaluate the new configuration, to catch errors early; it does not build the system or switch to it |
 | `commit` | show the change, ask, then apply it |
 | `commit comment "<text>"` | commit with a note, kept in the history |
 | `commit and-quit` | commit, then leave configuration mode |

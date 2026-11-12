@@ -463,6 +463,24 @@ impl Repo {
         self.with_proposal_index(diff_path, |env| self.git_env(env, &["diff", "--cached", "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "HEAD"]))
     }
 
+    /// A file of commit `rev` as a proposal's result is read (`proposed_files`): its mode, its size, and its
+    /// bytes when it is at most `max_bytes`; None when `rev` has none at `path`.
+    pub fn file_at(&self, rev: &str, path: &str, max_bytes: u64) -> Result<Option<ProposedFile>> {
+        revision(rev)?;
+        // "<mode> <type> <object>\t<path>\0", or nothing when there is none.
+        let entry = self.git(&["ls-tree", "-z", rev, "--", path])?;
+        let Some((meta, _)) = entry.split_once('\t') else {
+            return Ok(None);
+        };
+        let mut fields = meta.split(' ');
+        let (Some(mode), Some(_), Some(object)) = (fields.next(), fields.next(), fields.next()) else {
+            bail!("unexpected git ls-tree output for {path}: {entry:?}");
+        };
+        let size: u64 = self.git(&["cat-file", "-s", object])?.trim().parse().context("blob size")?;
+        let content = if size <= max_bytes { self.git_env_bytes(&[], &["cat-file", "blob", object])? } else { Vec::new() };
+        Ok(Some(ProposedFile { mode: mode.to_string(), size, content }))
+    }
+
     /// A file as HEAD has it: None when HEAD has none at `path`; refused when it is not a regular
     /// file or is larger than `max_bytes`.
     pub fn file_at_head(&self, path: &str, max_bytes: u64) -> Result<Option<Vec<u8>>> {

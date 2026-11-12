@@ -69,6 +69,7 @@ rec {
     [ "time" "timeZone" ]
     [ "environment" "systemPackages" ]
     [ "users" "users" "*" "packages" ]
+    [ "users" "users" "*" "flatpaks" ]
     [ "torq" "services" "enabled" ]
   ];
   keptElsewhere = path: builtins.any (pat:

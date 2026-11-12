@@ -652,6 +652,13 @@
       "kind": "container",
       "tier": "user"
     },
+    "users <name> flatpaks": {
+      "file": "users/<name>/flatpaks.json",
+      "help": "Apps installed for this person, from Flathub",
+      "kind": "leaf-list",
+      "tier": "user",
+      "type": "flatpak"
+    },
     "users <name> packages": {
       "file": "users/<name>/packages.json",
       "help": "Software installed for this person only",

@@ -46,6 +46,7 @@ fn propose_apply_revert() {
     assert_eq!(p.body.tier, "system");
 
     let a = b.apply(p.body.seq, "casey", false).unwrap();
+    assert!(a.body.data.get("rechecked_on").is_none(), "applied on its own base: no re-check to tell of");
     let cfg = b.repo.root().join("desktop.nix");
     assert!(fs::read_to_string(&cfg).unwrap().contains("true"));
 
@@ -1262,21 +1263,97 @@ fn proposal_based_on_a_stale_config_is_refused_at_propose() {
     assert!(err.contains("changed since"), "{err}");
 }
 
+/// ADR-053 (a): another change lands between my propose and my apply, in another file (a desktop saved
+/// meanwhile). Re-checked on the new head, the change does exactly what was shown: applied there, and
+/// the history says it was re-checked on a moved configuration.
 #[test]
-fn proposal_whose_base_moved_before_apply_is_refused() {
+fn proposal_whose_base_moved_by_another_file_applies_rechecked() {
     let (dir, b) = setup("true");
     let head = b.repo.head().unwrap();
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
     let mine = b.propose_on(Some(&head), &d, "Night light", Actor::User, false).unwrap();
-    // Another change lands between my propose and my apply; it touches a different file, so the
-    // diff would still apply — and that is exactly what must not happen silently.
     let t = write_diff(dir.path(), "theme.diff", THEME);
     let other = b.propose(&t, "someone else's change", Actor::User, false).unwrap();
     b.apply(other.body.seq, "alice", false).unwrap();
+    let moved = b.repo.head().unwrap();
+    assert_ne!(moved, head);
+
+    let a = b.apply(mine.body.seq, "casey", false).unwrap();
+    assert_eq!(a.body.data["rechecked_on"], serde_json::json!(moved), "the ledger says it was re-checked, and on what");
+    assert!(fs::read_to_string(b.repo.root().join("desktop.nix")).unwrap().contains("true"));
+    assert!(fs::read_to_string(b.repo.root().join("users/casey.nix")).unwrap().contains("light"), "the change in between kept");
+    assert_eq!(git(&b, &["rev-parse", "HEAD^"]).trim(), moved, "built on the current head");
+    b.ledger.verify().unwrap();
+}
+
+/// ADR-053 (c): the commit in between changed the same file. The diff still applies, to the same file
+/// and tier, but what it does there is no longer what was shown: refused, nothing applied.
+#[test]
+fn proposal_whose_file_changed_since_is_refused() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let mine = b.propose_on(Some(&head), &write_diff(dir.path(), "nl.diff", NIGHT_LIGHT), "Night light", Actor::User, false).unwrap();
+    // A line added below the one the change touches: git still applies it, at the same place.
+    let other = write_diff(dir.path(), "below.diff", "--- a/desktop.nix\n+++ b/desktop.nix\n@@ -1 +1,2 @@\n { nightLight = false; }\n+# the person's note\n");
+    let o = b.propose(&other, "a note", Actor::User, false).unwrap();
+    b.apply(o.body.seq, "alice", false).unwrap();
+    let moved = fs::read_to_string(b.repo.root().join("desktop.nix")).unwrap();
 
     let err = format!("{:#}", b.apply(mine.body.seq, "casey", false).unwrap_err());
-    assert!(err.contains("changed since"), "{err}");
+    assert!(err.contains("would now do something different from what was shown") && err.contains("prepare it again"), "{err}");
+    assert_eq!(fs::read_to_string(b.repo.root().join("desktop.nix")).unwrap(), moved, "nothing applied");
+    assert_eq!(kinds(&b).iter().filter(|k| *k == "applied").count(), 1, "only the note");
+}
+
+/// ADR-053 (d): re-checked and doing what its effect says, a proposal whose tier is not the one it was
+/// gated on (a ledger from elsewhere) is still refused: the re-check adds to H1's check, never replaces it.
+#[test]
+fn a_rechecked_proposal_is_still_held_to_its_tier_and_files() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    // The effect as the broker records it, from a real proposal of the same diff.
+    let real = b.propose_on(Some(&head), &write_diff(dir.path(), "nl.diff", NIGHT_LIGHT), "Night light", Actor::User, false).unwrap();
+    let said = |tier: &str, files: serde_json::Value| {
+        b.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: None,
+            kind: "proposal".into(),
+            tier: tier.into(),
+            tainted: false,
+            reason: "says it is someone's own".into(),
+            data: serde_json::json!({ "diff": NIGHT_LIGHT, "effect_sha256": real.body.data["effect_sha256"], "files": files, "base": head }),
+        }).unwrap().body.seq
+    };
+    let user_tier = said("user", serde_json::json!(["desktop.nix"]));
+    let other_files = said("system", serde_json::json!(["desktop.nix", "users/casey.nix"]));
+    let o = b.propose(&write_diff(dir.path(), "theme.diff", THEME), "theme", Actor::User, false).unwrap();
+    b.apply(o.body.seq, "alice", false).unwrap();
+    for p in [user_tier, other_files] {
+        let err = format!("{:#}", b.apply(p, "casey", false).unwrap_err());
+        assert!(err.contains("no longer does what it was judged on"), "{err}");
+    }
     assert!(fs::read_to_string(b.repo.root().join("desktop.nix")).unwrap().contains("false"), "nothing applied");
+    // The real one, with what it was gated on, lands.
+    assert!(b.apply(real.body.seq, "casey", false).unwrap().body.data["rechecked_on"].is_string());
+}
+
+/// ADR-053 (e): an agent's proposal, re-checked on a moved configuration, is judged by its list as the
+/// list is now — narrowed since, refused; as it was, applied.
+#[test]
+fn an_agents_rechecked_proposal_is_judged_by_its_list_on_the_new_head() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "htop.diff", &new_user_file("users/casey/packages.json", "[\"htop\"]"));
+    let p = b.propose_in(Some(&head), &d, "install htop", Actor::Agent, false, None).unwrap();
+    let o = b.propose(&write_diff(dir.path(), "nl.diff", NIGHT_LIGHT), "night", Actor::User, false).unwrap();
+    b.apply(o.body.seq, "casey", false).unwrap();
+    // The owner narrowed the agent's list meanwhile.
+    let narrowed = Broker::new(b.repo.root(), dir.path().join("state"), "true").with_agent_limits(&torq_broker::agent::Limits { users: vec![], settings: vec![] });
+    let err = format!("{:#}", narrowed.apply(p.body.seq, "casey", true).unwrap_err());
+    assert!(err.contains("the agent's limits no longer allow this"), "{err}");
+    assert!(!b.repo.root().join("users/casey/packages.json").exists());
+    let a = b.apply(p.body.seq, "casey", true).unwrap();
+    assert!(a.body.data["rechecked_on"].is_string() && b.repo.root().join("users/casey/packages.json").exists());
 }
 
 #[test]
@@ -2298,7 +2375,7 @@ fn the_agents_list_is_checked_again_at_apply() {
 
 /// The second review of ADR-041: a refusal before the ledger has begun is not entry #1 (setup
 /// would take it for a machine already set up); and the agent's waiting proposals are only those
-/// that can still land — once a person changes anything, the older ones no longer count.
+/// that can still land — once a person's change means they cannot, they no longer count.
 #[test]
 fn the_agents_record_never_blocks_setup_or_the_agent() {
     let (dir, repo) = config_dir();
@@ -2315,11 +2392,68 @@ fn the_agents_record_never_blocks_setup_or_the_agent() {
         b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
     }
     assert!(b.propose_on(Some(&head), &d, "one more", Actor::Agent, false).is_err());
-    // A person's change moves the configuration on: the twenty can no longer land, nor count.
+    // A person writes the same file: the twenty would now do something else, so they can no longer
+    // land (ADR-053's re-check), nor count.
+    let mine = write_diff(dir.path(), "m.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"vim\"]\n");
+    let p = b.propose(&mine, "mine", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    let now = write_diff(dir.path(), "n.diff", "--- a/users/casey/packages.json\n+++ b/users/casey/packages.json\n@@ -1 +1 @@\n-[\"vim\"]\n+[\"vim\", \"htop\"]\n");
+    b.propose_on(Some(&b.repo.head().unwrap()), &now, "htop, now", Actor::Agent, false).unwrap();
+}
+
+/// The review of the desktop line (2026-11-10): since ADR-053 an agent's proposal prepared on an older
+/// head still lands if it does the same there, so it still counts. Another file moving the head (the
+/// desktop's own save, every quarter of an hour) must not empty the count, or the agent could leave
+/// twenty more waiting each time — the burying ADR-041's limit is for.
+#[test]
+fn the_agents_waiting_proposals_still_count_when_another_file_moves_the_head() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    for i in 0..torq_broker::AGENT_WAITING_MAX {
+        b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
     let mine = write_diff(dir.path(), "m.diff", NIGHT_LIGHT);
     let p = b.propose(&mine, "mine", Actor::User, false).unwrap();
     b.apply(p.body.seq, "casey", false).unwrap();
-    b.propose_on(Some(&b.repo.head().unwrap()), &d, "htop, now", Actor::Agent, false).unwrap();
+    let moved = b.repo.head().unwrap();
+    assert_ne!(moved, head);
+    let e = format!("{:#}", b.propose_on(Some(&moved), &d, "twenty-first", Actor::Agent, false).unwrap_err());
+    assert!(e.contains("waiting for a person already"), "{e}");
+    // They still land: the count was right to hold them.
+    let first = b.ledger.read_all().unwrap().into_iter().find(|e| e.body.kind == "proposal" && e.body.actor == "agent").unwrap();
+    b.apply(first.body.seq, "casey", true).unwrap();
+}
+
+/// The review of that fix: the count judges as apply judges, so what apply would refuse frees a slot.
+/// The owner narrowing the agent's list, the one way a person has to turn the agent's proposals down,
+/// frees them all; a proposal whose diff is no longer kept here frees its own.
+#[test]
+fn the_agents_waiting_proposals_that_apply_would_refuse_do_not_count() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    for i in 0..torq_broker::AGENT_WAITING_MAX {
+        b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
+    assert!(b.propose_on(Some(&head), &d, "one more", Actor::Agent, false).is_err());
+    // One proposal's diff gone from the state directory: it cannot be applied, so one more may wait.
+    let first = b.ledger.read_all().unwrap().into_iter().find(|e| e.body.kind == "proposal" && e.body.actor == "agent").unwrap();
+    fs::remove_file(dir.path().join("state/proposals").join(first.body.data["diff_sha256"].as_str().unwrap())).ok();
+    let still = b.ledger.read_all().unwrap().into_iter().filter(|e| e.body.kind == "proposal" && e.body.actor == "agent").count();
+    // All twenty share one diff (the same text, kept once by its hash): gone for every one of them.
+    assert_eq!(still, torq_broker::AGENT_WAITING_MAX);
+    b.propose_on(Some(&head), &write_diff(dir.path(), "q.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"vim\"]\n"), "vim", Actor::Agent, false).unwrap();
+
+    // The owner narrows the list: none of the earlier ones could be applied now, nor count.
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    for i in 0..torq_broker::AGENT_WAITING_MAX {
+        b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
+    let b = b.with_agent_limits(&torq_broker::agent::Limits { users: vec![], settings: vec!["services.openssh".into()] });
+    let ssh = write_diff(dir.path(), "ssh.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}}\n");
+    b.propose_on(Some(&head), &ssh, "ssh", Actor::Agent, false).unwrap();
 }
 
 /// ADR-036, the review of adopt: what a repository must be for a new machine to adopt it. A staged
@@ -2796,6 +2930,31 @@ fn a_proposal_that_now_does_more_than_was_judged_is_refused() {
     b.ledger.verify().unwrap();
 }
 
+/// ADR-053 (b): the same diff, proposed with its base, as the socket requires. On the moved head its
+/// effect is not the one recorded (nothing to the other list then, its whole content now): refused by
+/// the re-check, before files and tier are even compared.
+#[test]
+fn the_audits_copy_with_a_base_is_refused_by_the_recheck() {
+    let (dir, repo) = config_dir();
+    let list = "[\n  \"hello\",\n  \"jq\",\n  \"tree\"\n]\n";
+    for who in ["dev", "sam"] {
+        fs::create_dir_all(repo.join("users").join(who)).unwrap();
+        fs::write(repo.join("users").join(who).join("packages.json"), list).unwrap();
+    }
+    let b = Broker::new(&repo, dir.path().join("state"), "true");
+    b.init().unwrap();
+    let crafted = write_diff(dir.path(), "crafted.diff", "diff --git a/users/dev/packages.json b/users/dev/packages.json\ndeleted file mode 100644\n--- a/users/dev/packages.json\n+++ /dev/null\n@@ -1,5 +0,0 @@\n-[\n-  \"hello\",\n-  \"jq\",\n-  \"tree\"\n-]\ndiff --git a/users/sam/packages.json b/users/dev/packages.json\nsimilarity index 100%\ncopy from users/sam/packages.json\ncopy to users/dev/packages.json\ndiff --git a/users/sam/packages.json b/users/sam/packages.json\n--- a/users/sam/packages.json\n+++ b/users/sam/packages.json\n@@ -4,2 +4,2 @@\n-  \"tree\"\n+  \"tmux\"\n ]\n");
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &crafted, "mine", Actor::User, false).unwrap();
+    assert_eq!(p.body.tier, "user");
+    let own = write_diff(dir.path(), "own.diff", "--- a/users/sam/packages.json\n+++ b/users/sam/packages.json\n@@ -2,3 +2,3 @@\n   \"hello\",\n-  \"jq\",\n+  \"vim\",\n   \"tree\"\n");
+    let o = b.propose(&own, "mine too", Actor::User, false).unwrap().body.seq;
+    b.apply(o, "sam", false).unwrap();
+    let e = format!("{:#}", b.apply(p.body.seq, "sam", false).unwrap_err());
+    assert!(e.contains("would now do something different from what was shown"), "{e}");
+    assert_eq!(fs::read_to_string(repo.join("users/dev/packages.json")).unwrap(), list, "the other person's list");
+    assert_eq!(kinds(&b).iter().filter(|k| *k == "applied").count(), 1, "only sam's own");
+}
+
 /// The audit of M3, M4 (and N19): a proposal's diff and effect are kept beside the ledger by their
 /// hash, so the ledger stays small; padding before a diff is refused; the agent's are smaller; and a
 /// diff changed where it is kept is refused at apply, not applied.
@@ -2830,8 +2989,8 @@ fn diffs_beside_the_ledger_and_no_padding() {
 /// audit of M3, M6).
 #[test]
 fn the_agents_limits_are_these_numbers() {
-    use torq_broker::{AGENT_MAX_DIFF, AGENT_REASON_MAX, AGENT_REFUSALS_AN_HOUR, AGENT_WAITING_MAX, MAX_DIFF};
-    assert_eq!((AGENT_REASON_MAX, AGENT_WAITING_MAX, AGENT_REFUSALS_AN_HOUR), (200, 20, 30));
+    use torq_broker::{AGENT_MAX_DIFF, AGENT_REASON_MAX, AGENT_REFUSALS_AN_HOUR, AGENT_WAITING_LOOK, AGENT_WAITING_MAX, MAX_DIFF};
+    assert_eq!((AGENT_REASON_MAX, AGENT_WAITING_MAX, AGENT_WAITING_LOOK, AGENT_REFUSALS_AN_HOUR), (200, 20, 100, 30));
     assert_eq!((MAX_DIFF, AGENT_MAX_DIFF), (4 << 20, 1 << 20));
 }
 
@@ -2991,19 +3150,44 @@ fn a_cancelled_commit_at_never_lands() {
     assert!(t.theme().contains("dark"));
 }
 
+/// ADR-053 (f): a commit at takes apply's re-check. The configuration moved on in another file: it lands,
+/// re-checked; in the same file, so that it would do something else: refused on the record.
 #[test]
-fn a_commit_at_gone_stale_is_refused_on_the_record() {
+fn a_commit_at_on_a_moved_configuration_is_rechecked() {
     let t = At::new();
     let p = t.propose("theme", THEME);
     let e = t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap();
-    // The configuration moves on meanwhile (another file: the diff would still apply).
+    // Another file: the change still does exactly what was shown.
     let other = t.propose("night", NIGHT_LIGHT);
     t.m.b.apply(other, "viper", false).unwrap();
+    let moved = t.m.b.repo.head().unwrap();
+    let a = t.s().run(e.body.data["timer"].as_u64().unwrap()).unwrap().expect("applied");
+    assert_eq!((a.body.kind.as_str(), a.body.data["scheduled"].as_u64()), ("applied", Some(e.body.seq)));
+    assert_eq!(a.body.data["rechecked_on"], serde_json::json!(moved));
+    assert!(t.theme().contains("light"));
+
+    // The same file, changed below the line it touches: it would now do something else.
+    let q = t.propose("night off", "--- a/desktop.nix\n+++ b/desktop.nix\n@@ -1 +1 @@\n-{ nightLight = true; }\n+{ nightLight = false; }\n");
+    let e = t.s().schedule(q, "casey", &At::in_seconds(30)).unwrap();
+    let note = t.propose("note", "--- a/desktop.nix\n+++ b/desktop.nix\n@@ -1 +1,2 @@\n { nightLight = true; }\n+# a note\n");
+    t.m.b.apply(note, "viper", false).unwrap();
     let r = t.s().run(e.body.data["timer"].as_u64().unwrap()).unwrap().expect("refused");
     assert_eq!((r.body.kind.as_str(), r.body.data["scheduled"].as_u64()), ("apply_refused", Some(e.body.seq)));
-    assert!(r.body.reason.contains("changed since it was scheduled"), "{}", r.body.reason);
-    assert!(t.theme().contains("dark"), "never applied on top of something else");
+    assert!(r.body.reason.contains("would now do something different"), "{}", r.body.reason);
+    assert!(fs::read_to_string(t.m.b.repo.root().join("desktop.nix")).unwrap().contains("nightLight = true"), "never applied");
     assert!(t.s().scheduled().unwrap().is_empty() && t.s().run(e.body.data["timer"].as_u64().unwrap()).unwrap().is_none());
+}
+
+/// Scheduling on a moved configuration takes the same re-check, at once: one that still does what was
+/// shown is scheduled, and its entry says it was re-checked.
+#[test]
+fn a_commit_at_scheduled_on_a_moved_configuration_is_rechecked() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let other = t.propose("night", NIGHT_LIGHT);
+    t.m.b.apply(other, "viper", false).unwrap();
+    let e = t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap();
+    assert_eq!(e.body.data["rechecked_on"], serde_json::json!(t.m.b.repo.head().unwrap()));
 }
 
 #[test]
@@ -3066,9 +3250,10 @@ fn a_commit_at_is_a_fresh_untainted_proposal_with_a_base() {
     let p = t.propose("theme2", THEME);
     let applied = t.m.b.apply(p, "casey", false).unwrap().body.seq;
     assert!(format!("{:#}", t.s().schedule(p, "casey", &At::in_seconds(60)).unwrap_err()).contains("already applied"));
-    let stale = t.propose("night", NIGHT_LIGHT);
+    // Made on the theme as applied, which the revert takes back: it would now do something else (ADR-053).
+    let stale = t.propose("blue", "--- a/users/casey.nix\n+++ b/users/casey.nix\n@@ -1 +1 @@\n-{ theme = \"light\"; }\n+{ theme = \"blue\"; }\n");
     t.m.b.revert(applied, "casey").unwrap();
-    assert!(format!("{:#}", t.s().schedule(stale, "casey", &At::in_seconds(60)).unwrap_err()).contains("changed since"));
+    assert!(format!("{:#}", t.s().schedule(stale, "casey", &At::in_seconds(60)).unwrap_err()).contains("would now do something different"));
     assert!(format!("{:#}", t.s().schedule(stale, "not a name!", &At::in_seconds(60)).unwrap_err()).contains("not a person's name"));
     let none = t.with(&t.m.b, "", "");
     let fresh = t.propose("night2", NIGHT_LIGHT);
@@ -3239,4 +3424,122 @@ fn a_schedules_refusal_does_not_hide_applys_own() {
     assert!(err.contains("no longer does what it was judged on"), "{err}");
     let own: Vec<_> = t.m.b.ledger.read_all().unwrap().into_iter().filter(|e| e.body.kind == "apply_refused" && e.body.data["proposal"] == p && e.body.data.get("scheduled").is_none()).collect();
     assert_eq!(own.len(), 1, "apply's own refusal is on the record");
+}
+
+/// A person's desktop, saved every few minutes, does not build and switch the machine: only the first save
+/// (which may make their folder, checked by the build) and anything else does.
+/// A person's saved desktop is COSMIC's own settings only: another program's (a weather applet's location)
+/// is refused, by whoever proposes it, so it never reaches a repository every account can read.
+#[test]
+fn a_saved_desktop_with_another_programs_settings_is_refused() {
+    let (cfg, b) = setup("true");
+    let before = b.ledger.read_all().unwrap().len();
+    let d = write_diff(
+        cfg.path(),
+        "tempest.diff",
+        "--- /dev/null\n+++ b/users/casey/desktop.json\n@@ -0,0 +1 @@\n+{\"cosmic\": {\"com.system76.CosmicPanel.Panel/v1/size\": \"M\", \"com.vintagetechie.CosmicExtAppletTempest/v1/latitude\": \"45.1\"}}\n",
+    );
+    let e = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Desktop: panel", Actor::User, false).unwrap_err();
+    assert!(format!("{e:#}").contains("COSMIC's own settings"), "{e:#}");
+    assert_eq!(b.ledger.read_all().unwrap().len(), before, "nothing recorded");
+    assert!(!b.repo.root().join("users/casey/desktop.json").exists());
+}
+
+/// A desktop saved by an older TorqOS, with another program's settings in it, cleaned by the next save: an undo
+/// of that save would put them back, so it is refused (an undo of a person's own change needs no approval, so it
+/// would otherwise be the way around the rule), and nothing is recorded.
+#[test]
+fn an_undo_cannot_put_another_programs_settings_back() {
+    let (dir, repo) = config_dir();
+    let old = "{\"cosmic\": {\"com.system76.CosmicPanel.Panel/v1/size\": \"M\", \"com.vintagetechie.CosmicExtAppletTempest/v1/latitude\": \"45.1\"}}\n";
+    fs::create_dir_all(repo.join("users/casey")).unwrap();
+    fs::write(repo.join("users/casey/desktop.json"), old).unwrap();
+    let b = Broker::new(&repo, dir.path().join("state"), "true");
+    b.init().unwrap();
+    let d = write_diff(
+        dir.path(),
+        "clean.diff",
+        &format!("--- a/users/casey/desktop.json\n+++ b/users/casey/desktop.json\n@@ -1 +1 @@\n-{}+{{\"cosmic\": {{\"com.system76.CosmicPanel.Panel/v1/size\": \"M\"}}}}\n", old),
+    );
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Desktop: other programs' settings taken out", Actor::User, false).unwrap();
+    let a = b.apply(p.body.seq, "casey", false).unwrap();
+    let (head, before) = (b.repo.head().unwrap(), kinds(&b));
+    let e = format!("{:#}", b.revert(a.body.seq, "casey").unwrap_err());
+    assert!(e.contains("this undo would put back what TorqOS no longer takes") && e.contains("COSMIC's own settings"), "{e}");
+    assert_eq!(b.repo.head().unwrap(), head, "the undo's commit is reset");
+    assert_eq!(kinds(&b), before, "nothing recorded");
+    assert!(!dir.path().join("state/pending.json").exists(), "nothing left in flight");
+    assert!(!git(&b, &["for-each-ref", "refs/torq/discarded/"]).is_empty(), "the undo's commit is kept for the audit");
+    assert!(!fs::read_to_string(repo.join("users/casey/desktop.json")).unwrap().contains("Tempest"));
+    // The broker is left as it was: another change goes through.
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Night light", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+}
+
+#[test]
+fn a_saved_desktop_builds_nothing_after_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let count = dir.path().join("builds");
+    let script = dir.path().join("rebuild");
+    fs::write(&script, format!("#!/bin/sh\necho built >> {}\n", count.display())).unwrap();
+    Command::new("chmod").arg("+x").arg(&script).status().unwrap();
+    let (cfg, b) = setup(script.to_str().unwrap());
+    let builds = || fs::read_to_string(&count).map(|t| t.lines().count()).unwrap_or(0);
+    let commit = |name: &str, body: &str| {
+        let d = write_diff(cfg.path(), name, body);
+        let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Desktop: panel", Actor::User, false).unwrap();
+        assert_eq!(p.body.tier, "user");
+        b.apply(p.body.seq, "casey", false).unwrap()
+    };
+    commit("1.diff", "--- /dev/null\n+++ b/users/casey/desktop.json\n@@ -0,0 +1 @@\n+{\"cosmic\": {\"com.system76.CosmicPanel.Panel/v1/size\": \"M\"}}\n");
+    let first = builds();
+    assert!(first >= 1, "the first save is built");
+    let a = commit(
+        "2.diff",
+        "--- a/users/casey/desktop.json\n+++ b/users/casey/desktop.json\n@@ -1 +1 @@\n-{\"cosmic\": {\"com.system76.CosmicPanel.Panel/v1/size\": \"M\"}}\n+{\"cosmic\": {\"com.system76.CosmicPanel.Panel/v1/size\": \"L\"}}\n",
+    );
+    assert_eq!(builds(), first, "a later save builds nothing");
+    b.revert(a.body.seq, "casey").unwrap();
+    assert_eq!(builds(), first, "nor does its undo");
+    assert!(fs::read_to_string(b.repo.root().join("users/casey/desktop.json")).unwrap().contains("\"M\""));
+    let d = write_diff(cfg.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Night light", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    assert!(builds() > first, "anything else is built");
+}
+
+/// ADR-052: a person's secrets' rules are changed by them alone, at the broker itself (sudo, as well as the socket):
+/// an administrator's approval applies, schedules and undoes no change to them. Each change builds nothing.
+#[test]
+fn a_persons_secrets_rules_are_theirs_alone_at_the_broker() {
+    let dir = tempfile::tempdir().unwrap();
+    let count = dir.path().join("builds");
+    let script = dir.path().join("rebuild");
+    fs::write(&script, format!("#!/bin/sh\necho built >> {}\n", count.display())).unwrap();
+    Command::new("chmod").arg("+x").arg(&script).status().unwrap();
+    let (cfg, b) = setup(script.to_str().unwrap());
+    let builds = || fs::read_to_string(&count).map(|t| t.lines().count()).unwrap_or(0);
+    let first = "{\"gh\": {\"kind\": \"token\", \"https\": {\"hosts\": [\"api.github.com\"]}}}";
+    let wider = "{\"gh\": {\"kind\": \"token\", \"https\": {\"hosts\": [\"api.github.com\"]}, \"actors\": [\"torq-agent\"]}}";
+    let propose = |name: &str, body: String| {
+        let d = write_diff(cfg.path(), name, &body);
+        b.propose_on(Some(&b.repo.head().unwrap()), &d, "Secret gh", Actor::User, false).unwrap()
+    };
+    let p = propose("1.diff", format!("--- /dev/null\n+++ b/users/alice/secrets.json\n@@ -0,0 +1 @@\n+{first}\n"));
+    let e = format!("{:#}", b.apply(p.body.seq, "casey", false).unwrap_err());
+    assert!(e.contains("theirs alone"), "{e}");
+    let applied = b.apply(p.body.seq, "alice", false).unwrap();
+    let built = builds();
+    let p = propose("2.diff", format!("--- a/users/alice/secrets.json\n+++ b/users/alice/secrets.json\n@@ -1 +1 @@\n-{first}\n+{wider}\n"));
+    assert!(b.apply(p.body.seq, "casey", false).is_err());
+    let second = b.apply(p.body.seq, "alice", false).unwrap();
+    assert_eq!(builds(), built, "a change of the rules builds nothing");
+    assert!(format!("{:#}", b.revert(second.body.seq, "casey").unwrap_err()).contains("theirs alone"));
+    assert!(format!("{:#}", b.revert(applied.body.seq, "casey").unwrap_err()).contains("theirs alone"));
+    b.revert(second.body.seq, "alice").unwrap();
+    assert_eq!(builds(), built, "nor does its undo");
+    // A name twice is no rules file: refused before it is proposed.
+    let d = write_diff(cfg.path(), "3.diff", &format!("--- a/users/alice/secrets.json\n+++ b/users/alice/secrets.json\n@@ -1 +1 @@\n-{first}\n+{{\"t\": {{\"kind\": \"token\"}}, \"t\": {{\"kind\": \"ssh-key\"}}}}\n"));
+    assert!(b.propose_on(Some(&b.repo.head().unwrap()), &d, "twice", Actor::User, false).is_err());
 }

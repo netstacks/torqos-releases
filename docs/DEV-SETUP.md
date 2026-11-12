@@ -1,25 +1,28 @@
 # Development setup
 
-TorqOS is developed on **`torq5`**, an x86_64 VM on a VMware ESXi server (ADR-030). Everything day
-to day happens there: the Rust crates, `nix flake check`, the VM tests and the images. **aarch64 is
-CI's** — GitHub's arm64 runners build both architectures and run the tests; there is no aarch64
-machine to develop on. (The earlier aarch64 UTM VM on an M4 Mac is retired; its instructions are in
-git history.)
+TorqOS is developed on **the owner's laptop** (hostname `torqlaptop`, user `cwdavis`, the repository
+at `~/torq`), which runs TorqOS itself. It is shared and throttled for heavy work: one job at a
+time, niced, and no fat LTO. Full `nix flake check` runs and the VM tests go to a second machine,
+**the check host**: an x86_64 VM on a VMware ESXi server (ADR-030) with nested virtualisation, so
+there is a `/dev/kvm`. **aarch64 is not built or tested anywhere** (ADR-030, amended): the flake still
+evaluates for it, CI's release builds x86_64 only, and there is no arm64 machine to develop on. (The
+earlier aarch64 UTM VM on an M4 Mac is retired; its instructions are in git history.)
 
-The dev machine is a **normal TorqOS install**, not a hand-built one: it was installed from a
-release image, so every change to it goes through its own broker and ledger. Dev mode and the local
-source are two ledgered, reversible commits on top — not a different kind of machine.
+A dev machine is a **normal TorqOS install**, not a hand-built one: installed from a release image,
+so every change to it goes through its own broker and ledger. Dev mode and the local source are two
+ledgered, reversible commits on top — not a different kind of machine. The sections below describe how
+to set such a machine up (the check host was done that way), then the everyday loop.
 
 ## The machine
 
-### 1. The ESXi VM
+### 1. The ESXi VM (the check host)
 
 | | |
 |---|---|
 | Firmware | UEFI |
 | CPU | 8 vCPU, **"Expose hardware assisted virtualization to the guest OS" on** |
-| Memory | 64 GB |
-| Disk | 1 TB (thin is fine) |
+| Memory | enough for the VM tests (the check host's own size is not fixed here) |
+| Disk | large (thin is fine): the Nix store and the images are big |
 | Network | one adapter, reachable by SSH |
 
 Nested virtualisation is the setting that matters: without it there is no `/dev/kvm` and every
@@ -48,7 +51,7 @@ bugs in it show up on the dev machine first.
 ### 3. Get the repo
 
 ```bash
-git clone https://github.com/netstacks/torqos.git ~/torq
+git clone https://github.com/torqosorg/torqos.git ~/torq
 ```
 
 `~/torq` whatever the repository is called: the docs, the `torq` input below and the commands in
@@ -66,7 +69,7 @@ so dev mode goes first.
 torqcli -c "configure; set torq dev enable true; show | compare; commit comment \"dev mode on (ADR-030)\""
 
 # b) Build TorqOS from the checkout instead of the signed releases repo.
-torqcli -c "configure; set system software torq source path:/home/viper/torq; show | compare; commit comment \"TorqOS from ~/torq\""
+torqcli -c "configure; set system software torq source path:/home/<you>/torq; show | compare; commit comment \"TorqOS from ~/torq\""
 ```
 
 After (b) the machine builds the **working tree** at `~/torq`, uncommitted changes included: a
@@ -75,7 +78,7 @@ becomes part of the system the broker ledgers — the change is recorded and rev
 source is not reproducible from the repository. Commit before shipping a change, and check
 `git status` first if you care which code you are running.
 
-This is also the trade: while its source is a path, `torq5` is no longer exercising the release
+This is also the trade: while its source is a path, the machine is no longer exercising the release
 path real machines take, so a release still has to be checked from a machine tracking `stable`
 (ADR-028).
 
@@ -115,6 +118,7 @@ cd ~/torq
 nix develop --command bash -c 'cd broker && cargo test'   # the broker's unit tests
 nix develop --command bash -c 'cd cli    && cargo test'   # torqcli's
 nix develop --command bash -c 'cd agent  && cargo test'   # the agent's doctor mode (a scripted model)
+nix develop --command bash -c 'cd wire   && cargo test'   # torq-wire, the words the three share (ADR-044)
 nix flake check                                           # evaluation, tree checks, VM tests
 nix build .#checks.x86_64-linux.trust-loop                # one VM test
 nix build .#checks.x86_64-linux.image                     # the image test: boot, setup, update
@@ -122,8 +126,8 @@ nix build .#image                                         # the qcow2; .#image-v
 nixfmt-rfc-style modules/*.nix                            # formatting
 ```
 
-`nix flake check` only covers this machine's architecture. aarch64 is checked by CI — assume
-nothing about it locally.
+`nix flake check` covers this machine's architecture; nothing checks aarch64 now, so assume
+nothing about it.
 
 ### Shipping a distribution change to this machine
 
@@ -218,8 +222,8 @@ commit
 torq doctor "why is my wifi flaky?"
 ```
 
-llama-server then runs on `/run/llama-cpp/llama.sock`; 64 GB here is enough for the models in
-question. The journal is off unless `set torq agent doctor journal true` (then every program run as
+llama-server then runs on `/run/llama-cpp/llama.sock`; the model must fit in memory. No real model has been tried with doctor mode yet;
+the tests use a scripted one. The journal is off unless `set torq agent doctor journal true` (then every program run as
 the agent reads it). A remote endpoint instead: `set torq agent doctor endpoint https://…/v1` —
 what the tools return, the configuration included, then leaves the machine — its key in a
 file outside the repo (`torq.agent.doctor.apiKeyFile`). The doctor's unit tests need no model:

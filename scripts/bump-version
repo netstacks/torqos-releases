@@ -47,7 +47,7 @@ pre=${BASH_REMATCH[2]}
 tag=v$new$pre
 
 cd "$(git rev-parse --show-toplevel)"
-crates=(cli broker agent)
+crates=(cli broker agent wire)
 cargo_files=("${crates[@]/%//Cargo.toml}" "${crates[@]/%//Cargo.lock}")
 
 # The version in a Cargo.toml's [package] section.
@@ -91,14 +91,15 @@ if [ "$old" = "$new" ]; then
   echo "TorqOS is already $new."
 else
   [ -z "$commit" ] || git diff --quiet HEAD -- "${cargo_files[@]}" \
-    || die "cli/, broker/ or agent/'s Cargo files have changes not committed: commit or drop them first."
+    || die "cli/, broker/, agent/ or wire/'s Cargo files have changes not committed: commit or drop them first."
   for c in "${crates[@]}"; do
     name=$(toml_name "$c/Cargo.toml")
     # [package]'s version line only, never a dependency's.
     awk -v v="$new" '/^\[/{p = ($0 == "[package]")} p && !done && /^version *=/ {print "version = \"" v "\""; done = 1; next} {print}' \
       "$c/Cargo.toml" > "$c/Cargo.toml.new" && mv "$c/Cargo.toml.new" "$c/Cargo.toml"
-    # The lock's entry for this crate itself: its version line, right after its name.
-    awk -v n="$name" -v v="$new" '$0 == "name = \"" n "\"" {print; f = 1; next} f && /^version = / {print "version = \"" v "\""; f = 0; next} {print}' \
+    # The lock's entries for this crate itself and for torq-wire (ADR-044), where it has one: each version
+    # line, right after its name.
+    awk -v n="$name" -v v="$new" '$0 == "name = \"" n "\"" || $0 == "name = \"torq-wire\"" {print; f = 1; next} f && /^version = / {print "version = \"" v "\""; f = 0; next} {print}' \
       "$c/Cargo.lock" > "$c/Cargo.lock.new" && mv "$c/Cargo.lock.new" "$c/Cargo.lock"
   done
 fi
@@ -107,7 +108,7 @@ fi
 bad=0
 for c in "${crates[@]}"; do
   name=$(toml_name "$c/Cargo.toml")
-  for got in "$(toml_version "$c/Cargo.toml")" "$(lock_version "$c/Cargo.lock" "$name")"; do
+  for got in "$(toml_version "$c/Cargo.toml")" "$(lock_version "$c/Cargo.lock" "$name")" $(lock_version "$c/Cargo.lock" torq-wire); do
     [ "$got" = "$new" ] || { echo "$c: found $got, not $new" >&2; bad=1; }
   done
 done
@@ -120,7 +121,7 @@ if [ $bad -ne 0 ]; then
   [ "$old" = "$new" ] || [ -z "$release" ] || git checkout -q -- "${cargo_files[@]}"
   exit 1
 fi
-[ "$old" = "$new" ] || echo "TorqOS is $new (was $old): cli and broker, their Cargo.toml and Cargo.lock, and their packages."
+[ "$old" = "$new" ] || echo "TorqOS is $new (was $old): cli, broker, agent and wire, their Cargo.toml and Cargo.lock, and their packages."
 
 bumped=
 if [ -n "$commit" ] && [ "$old" != "$new" ]; then
@@ -160,7 +161,7 @@ fi
 git tag -a "$tag" -m "TorqOS $tag"
 [ -z "$bumped" ] || git push -q origin main
 git push -q origin "$tag"
-repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo netstacks/torqos)
+repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo torqosorg/torqos)
 cat <<EOF
 Pushed $tag. The release workflow is running:
   gh run watch \$(gh run list --workflow release.yml --limit 1 --json databaseId -q '.[0].databaseId')

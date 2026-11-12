@@ -1,6 +1,6 @@
 # AI layer
 
-**Next (ADR-034): M5, on the account M3 makes (ADR-035) and the desktop configuration M4 makes.**
+**Status (2026-11-11): experimental. M5 (ADR-034) is built in part: the account (ADR-035, ADR-041), doctor mode, proposals and session trust (ADR-042) exist and are in v0.3.x. Doctor is off by default, no model ships, and no real model has ever been tried (the tests use a scripted endpoint). The resident agent, torq-mcp and ADR-051 are not on main: they are parked on branch `work/agents` until after 0.4.0-rc1.**
 Everything built so far (the broker as the only writer, actors, tiers, the ledger) was built so
 this could be added without a bypass. The agent is an *account*, `torq-agent`, whose identity the
 kernel vouches for (`SO_PEERCRED`) — never a flag the caller sets.
@@ -25,7 +25,7 @@ owner's shell does not have; in a terminal it is torqcli's prompt, the same text
 | Component | Privilege | Language | Role |
 |---|---|---|---|
 | `torq-agent` (`agent/`, `torq-doctor`) | unprivileged, sandboxed (`torq agent run`) | Rust | Talks to the model (OpenAI-compatible chat API), calls its read-only tools; later *proposes* changes (ADR-042) |
-| MCP tool servers | unprivileged, read-mostly | Rust | Typed access per subsystem |
+| MCP tool servers (`torq-mcp`) | unprivileged, read-mostly | Rust | Typed access per subsystem. Not built on main: planned, parked on `work/agents` |
 | `torq-broker` | privileged (root, minimal) | Rust | Only writer of the config repo; tiers, commits, rebuild, rollback, ledger |
 | Model runtime | unprivileged (DynamicUser) | llama.cpp (`llama-server`, a unix socket) | Local inference; or a remote endpoint as a setting (ADR-042) |
 | torqcli | the person's | Rust | Shows proposals, diffs and the ledger; a person approves at a terminal |
@@ -53,7 +53,7 @@ session where a proposal cites it: the proposal's entry carries the session and 
 A proposal names its session and is tainted as the broker's record says;
 one that names no session — any other program run as the agent — is tainted. `request system apply`
 says what the session read; session trust never covers a tainted proposal. The broker holds what it
-is told, and cannot see what a program reads: KNOWN-GAPS 6zq.
+is told, and cannot see what a program reads. So taint is reported by TorqOS's own doctor and held by the broker; a different program run as the agent (Claude Code under `torq agent run`, say) can open a session and simply not report, and its proposals then look untainted. Taint is a defence against a prompt injection reaching TorqOS's own doctor, not against a hostile program running as the agent. What bounds that is the rest of the design (trust is a person's own folder, at most 60 minutes, never the system tier): KNOWN-GAPS 6zq.
 
 ## Ledger format (v0)
 
@@ -75,9 +75,9 @@ person's `trust_granted`, `trust_revoked`, `trust_expired`
 - Genesis entry has `prev_hash` = 64 zeros.
 - `torq-broker verify` recomputes the chain and reports the first broken link.
 - Git commits carry a `Ledger-Entry: <seq>` trailer; the ledger stores the commit id → each
-  checks the other. TODO(M3): `verify` does not cross-check trailers yet, and cannot detect
-  truncation of the newest entries until the head hash is anchored.
-- Later (M3+): anchor the latest hash periodically (e.g. TPM NV index or an external witness).
+  checks the other: `status` does that cross-check (KNOWN-GAPS 2); `verify` alone does not, and cannot detect
+  truncation of the newest entries except against a remote copy of the ledger (ADR-036; built, off by default).
+- Built, opt-in: the ledger and configuration pushed to a remote after every change (ADR-036). Not built: anchoring in a TPM NV index or an external witness.
 
 ## Change lifecycle
 
@@ -85,10 +85,10 @@ person's `trust_granted`, `trust_revoked`, `trust_expired`
 2. Broker validates: diff applies cleanly, touches only allowed paths for its tier, tier ≤ allowed.
    Paths are what the diff actually changes (applied to a scratch index): both sides of a
    rename, raw names — so renames, deletions and quoted names cannot dodge the forbidden tier.
-3. Preview shown; approval collected (torqcli at a terminal; the broker takes `--approved-by`).
+3. Preview shown; approval collected (torqcli at a terminal, or the desktop's dialog). Who approves is the uid the kernel reports on the broker's socket, never a flag; `--approved-by` is taken only on the root recovery path (`sudo torq-broker`).
 4. `apply` — snapshot data (ADR-038), commit, build and switch, ledger append, push and anchor
    (ADR-036). (Signing on the machine is not the defence — ADR-035; the anchor is.)
-5. `rollback <seq|commit>` — `git revert`, rebuild, ledger append.
+5. `revert <seq>` (`request system revert` in torqcli) — a new commit that reverses one applied change, rebuild, ledger append. Going back to an earlier whole configuration is `rollback <n>` in torqcli, which loads it into the candidate to commit.
 
 ## Tool inventory
 

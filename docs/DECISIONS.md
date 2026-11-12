@@ -410,6 +410,13 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     date, not its version, and the machine does not refuse an older release by itself. The check
     is torqcli's, at update: a person who edits the lock by hand is past it (as they are past any
     check, being able to commit).
+- **Amended 2026-11-11 — the releases moved:** the owner moved both repositories to the `torqosorg`
+  organisation, and `torq.releases.url` names `torqosorg/torqos-releases`. Changed outright, because no
+  machine took TorqOS from the releases then (the two in use took it from a `path:` folder). Once machines
+  track the releases, a move must not be done this way: a release's signature is checked only for a lock
+  at *that* address (`broker/src/inputs.rs` `is_release`, torqcli's `release_commit`), so a machine still
+  locked at the old one would update unchecked. The old address has to stay a release address, signature
+  required, and `request system update` move the machine to the new one.
 
 ## ADR-029 — TorqOS names itself, as a NixOS derivative
 - **Context:** A TorqOS machine said it was NixOS everywhere it names itself: `/etc/os-release`
@@ -720,8 +727,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   continue unchanged — both faces want them. Nothing is deleted; the server face is the base the
   laptop face is loaded on.
 
-## ADR-035 — Closing the root gap: the account, the door, and the record (proposed)
-- **Status:** proposed, 2026-11-03; the plan for M3. The order below is the build order.
+## ADR-035 — Closing the root gap: the account, the door, and the record (built)
+- **Status:** proposed 2026-11-03 as the plan for M3; built (status updated 2026-11-11 from ROADMAP M3: the socket broker, the agent's account and the remote on 2026-11-05, strict mode and break-glass in the same milestone, whose audit is dated 2026-11-06), in v0.3.x. The order below was the build order.
 - **Context:** Root is root: no program can tell a person from an AI typing in a root shell, and
   TorqOS's model already says so (SECURITY-MODEL, "Root, the owner, and an AI the owner runs").
   Today every guarantee is *visibility*, not *enforcement*: the broker trusts `--actor` and
@@ -858,9 +865,10 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   its ledger (which would drive the boot's rollback, as root), or a size past reason. The console
   shows the commits and the host key's fingerprint to compare, and says what is being given: this
   configuration runs here as root, SSH on or off, who has keys, which Nix files it attaches.
+- **Amended (2026-11-09, the owner: "a nice UI for github login and config store repo setup"): setting a remote up from TorqOS Settings.** System → Backup signs in to GitHub by the device flow (TorqOS's OAuth app; a public client id, no secret), creates or finds a private repository (an existing public one is refused), loads `torq remote url` into the draft for the usual review and commit, then adds the machine's key to that one repository as a deploy key. The sign-in has GitHub's `repo` scope, the narrowest that can create a private repository: it stays in the window's memory, goes to curl on standard input, and is dropped when setup ends or the window closes. It remains valid at GitHub until revoked there (Settings, Applications): the device flow has no secret with which TorqOS could revoke it. What remains on the machine is what this ADR says: the deploy key. Any other Git server: paste an SSH address, copy the key. On GitHub's free plan a private repository has no branch protection, so a rewritten remote is detected (the alarm) but not prevented.
 
-## ADR-037 — Applications: a ladder, every rung declared (proposed)
-- **Status:** proposed, 2026-11-03; the design for M4's applications. Rung 3 needs its own small
+## ADR-037 — Applications: a ladder, every rung declared (part built)
+- **Status:** proposed, 2026-11-03; part built (status updated 2026-11-11 from ROADMAP M4): the Apps page, per person, remembered in `users <name> flatpaks` (2026-11-09, amended). Not built: `flatpaks` reconciled at switch, the COSMIC Store per user, rung 3 (a person's own builds in the tree), the refusals of `curl | sh` and self-updaters. Rung 3 needs its own small
   design before the agent builds anything.
 - **Context:** A desktop needs Firefox and LibreOffice, a vendor's proprietary application, and what
   the person or the agent builds. An installer that puts a binary somewhere and on PATH does not
@@ -905,6 +913,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     into `users <name> flatpaks`, user tier, so a machine rebuilt from its repository or a recipe
     (ADR-047) brings it back. Not kept, it stays the person's state, like a file in their home.
   - The agent installs nothing through the Store; its applications are rung 1 or 3, as above.
+- **Amended (2026-11-09, the owner: "start with per user"): on the desktop an application comes from Flathub, and nobody has to know it.** TorqOS Settings has an Apps page: search, Install, Open, Remove, per person and without a password. What is installed is remembered in `users <name> flatpaks` (a typed setting, user tier, `users/<name>/flatpaks.json`, on a candidate of its own, never the draft), so it is in the history, can be undone, and comes back on a rebuilt machine; the Store's installs are remembered the same way. Rung 1 stays for what the system depends on and for command-line tools (the page's Tools tab: `users <name> packages`). "managed" (a file of the person's) tells a removal by hand from a machine that has yet to install: `app::plan_apps`. A Flatpak records which application and where from, not its bytes: on a rebuild it arrives as it is then, which is right for applications and is why tools and the system stay pinned. Installing for everyone is not offered yet.
 
 ## ADR-038 — Data: what a rebuild does not bring back, and what TorqOS does about it
 - **Status:** proposed, 2026-11-03; local snapshots accepted and built 2026-11-06 (the owner: btrfs in
@@ -1173,9 +1182,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   model, tools or prompts (M5).
 
 ## ADR-042 — The agent's runtime: doctor mode, the model, the tool boundary
-- **Status:** proposed (2026-11-07); doctor mode (1–5) built on `work/w3`, its VM test written and
-  not yet run; Proposals (6) and Session trust (7) built on `work/w5` (2026-11-07), the taint held by
-  the broker, amended from their design as each says; `tests/agent-proposals.nix` written, not yet run. ROADMAP M5's first item,
+- **Status:** proposed (2026-11-07); built (status updated 2026-11-11 from ROADMAP M5): doctor mode (1–5) on `work/w3`, Proposals (6) and Session trust (7) on `work/w5`, all 2026-11-07, in v0.3.x, the taint held by the broker, amended from their design as each says; `tests/doctor.nix`, `tests/agent-proposals.nix` and `tests/commit-at.nix` ran green in the v0.3.2 release run (CI 42667820600). Experimental: doctor is off by default, no real model has been tried. ROADMAP M5's first item, building
   on ADR-005 (local by default), ADR-034, ADR-040 and ADR-041 (the account, `torq agent run`).
 - **Context:** M5 starts with doctor mode: "why is my wifi flaky?" — read logs, hardware and the
   configuration, explain, propose nothing. Four things had no answer yet: how TorqOS's own agent runs
@@ -1422,14 +1429,19 @@ configuration it was not prepared for.
   is not approved for another); so is one whose approver no longer has an account, is not a person's,
   or is no longer an administrator, unless the change is wholly their own folder (as the socket reads
   a caller). Its approver may cancel their own; anyone else's is an administrator's to cancel.
-- **One at a time**, refused rather than queued: two schedules prepared on one configuration cannot
-  both land (the first moves HEAD, so the second is stale by construction); refusing the second when
+- **One at a time**, refused rather than queued: of two schedules prepared on one configuration, the second
+  could land only if, on the HEAD the first made, it still did exactly what was shown (ADR-053: amended; it
+  was "stale by construction" before), which one of the same setting never does; refusing the second when
   it is made tells the person while they are there, instead of at night in the ledger.
 - **Not with `commit confirmed`:** nobody would be there to confirm it.
 
 ## ADR-044 — One vocabulary: a shared crate for the socket and the ledger, after 0.3.0
 
-**Status:** accepted, 2026-11-07; **deferred until after 0.3.0** (KNOWN-GAPS 6zp, ROADMAP "After 0.3.0").
+**Status:** accepted, 2026-11-07; deferred until after 0.3.0 (KNOWN-GAPS 6zp, ROADMAP "After 0.3.0"). **Steps 0 and 1
+built 2026-11-09** (`work/wire`): the fixtures (`wire/tests/fixtures/`, fifteen ledgers covering every kind the
+broker's tests write, one with a kind, tier and actor no torq knows; `broker/tests/ledger_fixtures.rs`), and the
+socket's types and exit codes in `wire/src/socket.rs`, taken by the broker and torqcli. The agent takes the crate
+in step 2, when it matches kinds. Step 2 next: TorqOS Settings (ADR-045 2) reads the ledger through it.
 **Context:** A code review found the wire protocol and the ledger's words written twice, by hand.
 `cli/src/run.rs` re-declares `Request`, `Frame`, `SOCKET` and `NEED_PASSWORD` from
 `broker/src/socket.rs` (and the exit codes 1, 2, 75, 77 as bare numbers); `cli/src/shell.rs`'s
@@ -1554,6 +1566,7 @@ more client. COSMIC has a polkit agent in its shell (`cosmic-osd`) and goes thro
      session's requests then refuse a password in the request outright, so a password phished by a lookalike
      window cannot be replayed over the socket (the trusted-path problem is not solved by any dialog;
      SECURITY-MODEL says so); and polkit's PAM service set to count as `torq-approve` does.
+     **Built 2026-11-09, both questions settled by the owner:** a caller on the desktop (in a graphical session, or among its user manager's applications, by logind's records and the process's cgroup: `socket::on_the_desktop`) is approved through `pkcheck` and COSMIC's agent, and a password sent in its request is refused; a text console, SSH and system services are as before. `polkit-1` uses `torq-approve`'s PAM stack and its sandboxed helper may write the count (`ReadWritePaths`), so wrong passwords in the dialog count toward the same lockout; its socket is people's only (0660, `users`), or the agent could spend the owner's tries. A caller whose process has gone or is not the peer's is refused, never taken for a terminal. The dialog leads with the broker's facts (change, tier, who, files) and shows the reason as the proposer's words. A yes or no a command asks is answered in TorqOS Settings, in the window; only typing a new secret or opening an editor still takes a terminal (`app::needs_terminal`). `tests/desktop.nix` drives the real dialog.
   6. **The agent's view of the desktop goes through COSMIC's portal** (`xdg-desktop-portal-cosmic`:
      ScreenCast, Screenshot, RemoteDesktop where it is complete), granted by the person per session in the
      portal's own dialog and ledgered as a grant like session trust (ADR-042 7). Not the compositor's
@@ -1568,7 +1581,31 @@ more client. COSMIC has a polkit agent in its shell (`cosmic-osd`) and goes thro
   version nixpkgs pins, and a COSMIC upgrade is a TorqOS release's change, tested like one.
 - **Not:** a second desktop, now; TorqOS Settings as a privileged program or a D-Bus service; replacing
   COSMIC Settings (it stays for what is the person's); a password entered in a window TorqOS draws.
+- **Amended (2026-11-09, the owner): COSMIC from nixos-unstable, not the release's nixpkgs.** On the
+  laptop the release's COSMIC (1.2.0, NixOS 26.05) was nine releases behind COSMIC's own (1.11.0, two
+  weeks apart each) and behind Pop!_OS, which the owner compared it with (transparency first). A NixOS
+  release keeps its COSMIC for six months; COSMIC is young and moves fast. So:
+  - **A second input, `nixpkgs-cosmic` (nixos-unstable), for the desktop alone.** From it: every
+    `cosmic-*` package, `xdg-desktop-portal-cosmic`, `pop-launcher` and `pop-icon-theme` (an overlay,
+    `modules/desktop.nix`); COSMIC's two NixOS modules, in place of the release's (carried in `modules/cosmic/`, so a CLI machine never needs this nixpkgs; `checks.cosmic-modules`, `scripts/bump-cosmic`), since a
+    newer COSMIC names packages and settings the older modules do not know; and **Mesa**, as the graphics
+    driver (`hardware.graphics.package`), because COSMIC's compositor and the driver it loads must be one
+    Mesa. Everything else, the base and a CLI machine whole, stays on the release's nixpkgs: with the desktop
+    off, nothing of the second input is used.
+  - **The weekly nixpkgs bump moves both**, and a COSMIC upgrade is still a TorqOS release's change, tested
+    like one (`checks.desktop`).
+  - The risk taken: programs of the release built against its Mesa (26.1) drive the newer one (26.2); most
+    go through libglvnd, which does not care. Watched on real hardware; if it breaks, the release's Mesa
+    comes back and COSMIC's packages are built against it.
+  - Unstable's COSMIC module sets `security.polkit.enablePkexecWrapper`, an option 26.05's polkit lacks
+    (it installs setuid pkexec with polkit always): declared for 26.05 only, as what it does, `false`
+    refused.
+  - When the release's nixpkgs carries a COSMIC as new as unstable's, the second input may go again.
+- **Amended (2026-11-09, the owner chose it over a tree): the configuration is areas and cards.** What is set, by area (Network, Services, …) on plain cards with switches and values in place, names read as words (`app::label`); "Add a setting" reaches everything NixOS has through the side panel. No raw tree.
+- **Amended (2026-11-09, the owner: "the app needs 1:1 for the CLI, within reason"): TorqOS Settings runs torqcli's own sessions.** Most of torqcli's work is in torqcli, not the broker (the tree, the candidate, compare), so a window that only spoke to the socket would have to write it again. `cli/` is a library as well as a program; `torq::app::Console` holds real `Session`s on worker threads, with the person's saved candidate, so the window, the terminal's shell and `torqcli --candidate -c` edit one draft (a change by one is seen by the next command of the others; a write over another's is refused, as between two shells). Every button is a command line; `everything_the_pages_offer_is_a_command` reads each through the grammar. The Commands page is the grammar's own (`?` and Tab, as choices), so what torqcli gains the window has. What asks a person (y/N, a password, their editor: `app::needs_terminal`) goes to COSMIC's terminal, on `torqcli --candidate -c` where it concerns the draft; a password is never typed in a window TorqOS draws. Confirming a commit uses a private candidate, always: `commit` of an empty one is what confirms, and a draft must not be swept in with it. Point 5's polkit dialog, point 3's patch of COSMIC Settings and point 4's "save my desktop" remain to build.
 
+- **Amended (2026-11-10, the owner: "both is best settable in torqos app"; "all but machine-specific"): point 4, built — "save my desktop".** COSMIC's settings files are kept, as COSMIC wrote them, in `users/<name>/desktop.json` (a user leaf read by no module; the broker checks every name is `<reverse-DNS component>/v<n>/<key>` and every value plain text, at most 4 MiB in all), not as generated tree words: COSMIC's keys move between releases, and a file per setting is already its own schema. What is saved and what the configuration puts back is decided per setting against the version both last agreed on (kept in `~/.local/state/torq`): the person's newer change is saved, the configuration's newer one (an undo, a pull, a rebuilt machine) is written into `~/.config/cosmic`, where COSMIC takes it at once. Saving is automatic (the panel's applet, every 15 minutes, one history entry such as "Desktop: panel, theme") or manual, the person's choice in TorqOS Settings' Desktop page or `request system desktop saving automatic|manual`; `request system desktop save` and `show system desktop` in torqcli. Left out as the machine's: which display the panel and dock are on, and when it sleeps. The values are written only by the person's own session, never by root.
+- **Amended (2026-11-11, the review of that day; the owner: "yes approve the ADR-045 amendment"): "save my desktop" keeps COSMIC's own settings only.** "All but machine-specific" took in every program that keeps its settings under `~/.config/cosmic`, applets from anyone included: a weather applet's location and a field for an API token went into `users/<name>/desktop.json`, which every account can read and a remote keeps, and its refresh time made a save every 15 minutes. Now only `com.system76.*` components are kept. The broker refuses any other name, from whoever proposes it, so torqcli leaving them out cannot drift. Also left out is what a COSMIC program writes of its own accord, by observation (KNOWN-GAPS 6zx): the screenshot tool's last area and display. A `desktop.json` saved before this keeps other programs' settings only until its next save, which takes them out. What was committed before stays in the repository's history (KNOWN-GAPS 6zy). A third-party applet's settings are that applet's, its own state in the person's home; saving them would be a choice per applet, not done. *Corrected 2026-11-11 (a correction of fact found by the review of the fix, not a new decision):* "from whoever proposes it … cannot drift" holds for a proposal, its apply and an undo (whose result is checked as a change's), but three writers are not checked: adopt, which takes a repository's history whole; the first commit of a new machine's configuration (`Repo::init`, empty ledger only); and a restore of the machine to an earlier ledgered commit, which can bring back a `desktop.json` saved before. The next save takes such settings out (KNOWN-GAPS 6zy).
 ## ADR-046 — Real hardware: firmware on metal, Wi-Fi in the base, a reference laptop
 
 **Status:** accepted, 2026-11-08 (the owner: "use this laptop to target for desktop for now"). Amends ADR-031
@@ -1625,6 +1662,7 @@ hardware file leaves CPU microcode off with it), and the base has networkd but n
   Wi-Fi device — a wireless interface, or a PCI device of the wireless class before its firmware is up —
   and its hardware file turns on iwd (`cli/src/install.rs` `found`). The firmware and iwd are not in the
   image's closure: ADR-048 5's carried build closure must hold them.
+- **Amended (2026-11-09, the owner): `torq desktop dimInsteadOfSuspend`, for a panel that cannot wake.** The Zenbook's OLED display does not come back from suspend (a real suspend at 18:44 ended in a hard reboot). The option refuses all sleep (`AllowSuspend=no` and the rest, so COSMIC's idle suspend cannot reach it either), ignores the lid in logind, and on the lid's event locks every session and turns the backlight to 0, restoring it on open. Off by default: a setting of this machine's. When the hardware profiles of point 3 are built, the Zenbook's turns it on.
 
 ## ADR-047 — The install: one console UI, and recipes — anyone's setup as a starting point
 
@@ -1807,3 +1845,482 @@ prebuilds it), so on real hardware it may fetch build tools from the network.
   4. The answers, the summary; the build (offline-capable, 5).
   5. **A restart** into the installed system, automatic, so every driver loads with its firmware and the
      console comes up on the real system.
+
+## ADR-049 — TorqOS in COSMIC: what a switch needs, and the panel that says so
+
+**Status:** accepted and built, 2026-11-09 (the owner: "fully integrate TorqOS into the COSMIC desktop … make the panel
+reflect it in a nice elegant way … and the TorqOS app have all the detailed information"). Builds on ADR-045.
+**Context:** A commit switches the running system the NixOS way: changed services restart at once; an app's new
+version waits until it is opened again, and COSMIC's launcher does not see a new menu entry until it restarts;
+COSMIC itself (compositor, panel, greeter) changes only at the next login, because restarting the session would
+close everything open; a kernel, initrd, firmware or the graphics driver changes only at the next boot; and
+turning the desktop on leaves the console until a restart. A rollback, or an expired `commit confirmed`, is the
+same in reverse. Nothing says any of this: on the laptop a commit finished with the desktop still running the old
+COSMIC (1.11 needed a restart), and a restart before confirming silently undid a change (#7, rolled back as #8).
+A server's person reads torqcli's output; a desktop's person looks at the screen.
+- **Decision:**
+  1. **What a switch needs, worked out, never guessed.** From the systems themselves, unprivileged:
+     - **restart** (as first written; see "As built": only the desktop turned on) — the running system's kernel, initrd, kernel modules or firmware differ from the booted
+       system's (`/run/current-system` against `/run/booted-system`), or the graphics driver does
+       (`/run/opengl-driver`, ADR-045 amended), or the desktop was turned on while the machine runs without it;
+     - **log out** — COSMIC's compositor, session or panel differs from what the person's session started with (the applet
+       records the system it started on, since it starts with the session);
+     - **nothing** — services restart themselves; apps take the new version when opened next.
+     One function in torqcli's library (`torq::app`), so torqcli's commit output, the applet and TorqOS Settings
+     say it in the same words ("Done. Restart to use the new kernel.").
+  2. **A panel applet, `torq-applet`: the machine's state at a glance, and the one action that settles it.**
+     A COSMIC applet (libcosmic), in the panel by default on TorqOS Desktop (COSMIC's defaults, the person may
+     move or remove it). Its icon is TorqOS's mark, quiet when all is well; a state shows as a small badge in the
+     theme's own colours, never a flashing thing. In order, the first that holds:
+     - **a commit waiting for confirmation** — its countdown; **Confirm** (and "Confirm and restart" when a
+       restart is also needed, so a restart can never undo a change unasked);
+     - **a restart or a log-out needed** — what changed, and **Restart** / **Log out** (asking first; never
+       on its own);
+     - **alarms** — the first, and **Open TorqOS Settings**;
+     - **proposals waiting** (the agent's among them, tainted ones marked) — how many, and **Review**;
+     - **an uncommitted draft** (the person's candidate) — **Review**;
+     - **all well** — "This machine is exactly as its history says", the last change, TorqOS's version.
+     Its popup holds those lines and a button to TorqOS Settings at the matching page; nothing more.
+  3. **TorqOS Settings holds the detail**: every alarm with its fix, the confirmation with what it changed,
+     what a restart or log-out is for and which packages caused it, each proposal with its diff and taint, the
+     draft with `show | compare`. The applet only points there.
+  4. **A notification when a state starts** (COSMIC's notifications): a switch that needs a restart or log-out,
+     a confirmation about to expire (two minutes before), an alarm, a proposal from the agent. Once per state,
+     with the same action.
+  5. **The menu refreshed after a switch**, so a new application appears without logging out (how COSMIC's
+     app library is made to re-read its entries is checked against its code before it is built: no patch if a
+     signal it already watches will do).
+  6. **Privilege stays where it is.** The applet and TorqOS Settings are the person's own programs, clients of
+     the broker's socket (status, confirm) and readers of `/run`; a confirmation that asks a password asks it in
+     a terminal until approval through polkit (ADR-045 5) exists. The applet runs no command as root, and
+     Restart and Log out are the session's own (logind), as COSMIC's power menu does.
+- **Consequences:** New code: `torq::app::needs()`, the applet (a second binary of `settings/` or its own crate,
+  sharing the page words), the panel default in the desktop module, notifications, the menu refresh. VM tests:
+  each case of 1 detected (a kernel change, a COSMIC change, a package change, a pending confirmation); the
+  applet in the panel after login.
+- **Amended (2026-11-09, the owner: "I dont think we should be requiring a reboot of a system without a true very pure need"): a restart is only asked for when nothing else can do.** The first version asked for one whenever the kernel, boot image, modules, firmware or driver differed from boot, and on the laptop every commit that changed the initrd (a host name) said so. Now: a new boot image, firmware or modules are not news; a new kernel is a sentence for the next start, not a badge or a request; COSMIC's compositor or session, or the graphics driver, asks for a log-out; only the desktop turned on from a machine booted without it asks for a restart. Nothing logs a person out unasked: a new login closes every open application, as a restart would.
+- **Amended (2026-11-09, the owner): what can be started again is, without a new login.** After a switch the applet ends the parts of COSMIC whose programs changed (`app::stale_parts`, `restart_parts`); COSMIC's session starts each again, new from the system's path, and open windows stay. Only the compositor and the session are the login; the greeter holds the lock screen and is left alone.
+- **As built (2026-11-09):** the badge is drawn from the mark in the panel's own text colour (a symbolic icon has one colour, and the badge is the news). The menu is refreshed by a file come and gone in `~/.local/share/applications`, which COSMIC's app library watches recursively; the system's own folder is replaced whole by a switch, so a watch on it sees nothing. The panel reads its default configuration whole or not at all (no `entries`: its compiled-in default, written to the person's config), so the package ships COSMIC's own `data/default_schema` from the pinned `cosmic-panel`, with the applet inserted, and its build stops if that list no longer reads as expected. The system a session started on is kept per login (`XDG_SESSION_ID`): the runtime directory outlives a logout while an SSH session is open. COSMIC's first-run wizard is left out: TorqOS has its own setup, and the wizard sets what the configuration owns.
+- **Not:** restarting or logging out on the person's behalf; a second status daemon (the applet asks the broker
+  as torqcli does); the applet as a way to change the system (it confirms, opens TorqOS Settings, or asks the
+  session to log out or restart).
+
+## ADR-050 — SSH tunnels on the desktop: the person's own, kept up, and in the panel
+
+**Status:** accepted and built, 2026-11-10 (the owner: "an applet in the top panel that starts a persistent autossh to that
+ip, a simple ssh tunnels applet I can setup is best"). Builds on ADR-045 and ADR-049. Its three questions are
+settled by the owner (below).
+**Context:** The owner sends one Firefox profile's web traffic and DNS through another machine, with
+`ssh -N -D 127.0.0.1:1080` and SOCKS5 with remote DNS. That works, but the tunnel is started by hand, dies with
+its terminal or the network, and nothing on the screen says whether it is up; when it is down, the profile's
+pages fail (as they should: no direct fallback). No COSMIC applet manages SSH tunnels (searched 2026-11-10: the
+Tailscale applets toggle Tailscale's own SSH, not forwards). A server already has one: NixOS's
+`services.autossh.sessions`, a tree setting like every other (ADR-025), ledgered and system-wide. A person's
+tunnel is not that: it uses the person's keys from their keyring, goes where they choose, and is turned on and
+off many times a day.
+- **Decision:**
+  1. **A tunnel is the person's, as a Wi-Fi network is** (desktop.nix: NetworkManager's state, never the
+     repository's). Defined in their home, `~/.config/torq/tunnels.toml`; turning it on or off is no commit and
+     asks no password. Each tunnel: a name, a destination (`user@host`, or a `Host` of the person's
+     `~/.ssh/config`, which ssh still reads for keys and `ProxyJump`), and its forwards: `socks <port>`,
+     `local <port> <host>:<port>`, `remote <port> <host>:<port>`. Nothing else: no free ssh options, so the file
+     cannot be made to run a command (`ProxyCommand`, `LocalCommand`, `PermitLocalCommand`), and a destination
+     starting with `-` is refused.
+  2. **Kept up by systemd, the person's own manager.** The desktop module ships one user unit template,
+     `torq-tunnel@<name>.service`: `torq-tunnel run <name>` reads that tunnel and execs ssh with fixed
+     options — `-N`, `ExitOnForwardFailure=yes`, `ServerAliveInterval=15`, `ServerAliveCountMax=3`,
+     `BatchMode=yes`, `StrictHostKeyChecking=yes` — and `Restart=always` with a growing delay. A dropped link,
+     a sleep, a network change: ssh notices within 45 s and systemd starts it again. Keys come from the
+     session's agent (COSMIC's keyring, `SSH_AUTH_SOCK` in the user manager), never a key file the unit names.
+  3. **Fails closed, never trusts on first use.** A host whose key is not already in the person's
+     `known_hosts` does not connect; the applet says to run `ssh <destination>` once at a terminal and check
+     the key there (secure over back doors: no `accept-new`). Forwards listen on 127.0.0.1 only; nothing in the
+     file can open one to the network (`GatewayPorts`, a bind address).
+  4. **The applet, `torq-tunnels`**: a third binary of `settings/`, a COSMIC panel applet as `torq-applet` is
+     (ADR-049; not folded into it: its popup holds the machine's state and nothing more). Its icon is quiet
+     with no tunnel up, marked in the accent colour while one is up, in the warning colour while one meant to
+     be up is not. The popup: each tunnel with a switch (start or stop), its state in a line ("Up · SOCKS on
+     127.0.0.1:1080", "Reconnecting: the host's key is not known…", from the unit's state and its last
+     journal line), and "Start at login" (`systemctl --user enable`); then **Add tunnel…** (name, destination,
+     forwards: written to the file) and **Edit tunnels…** (the file in COSMIC Edit). It talks to the user
+     manager as the person (`systemctl --user`, as built); it runs nothing as root and changes nothing of the system.
+  5. **The agent cannot reach it.** `torq-agent` is another account (ADR-035): it can read neither the person's
+     home nor their user manager, so it can neither start a tunnel nor point one somewhere. A tunnel is a way
+     out of the machine; it stays the person's.
+- **Settled by the owner (2026-11-10):**
+  1. **Plain ssh under systemd, not autossh** ("plain is fine if it works"): systemd's restart is the loop, ssh's
+     `ServerAlive` the check. It must work: the VM test of a dropped link coming back is what says so, and a
+     failure there reopens this question.
+  2. **Not in the default panel**: in COSMIC's applet list on TorqOS Desktop, added by the person (COSMIC
+     Settings → Desktop → Panel → Applets).
+  3. **Up while logged in only**: no linger. Up while logged out would be its own tree setting, later.
+- **Consequences:** New code: `torq-tunnel` (the file, its checks, the ssh command line; unit-tested), the
+  applet, the unit template and `openssh` in the desktop module. VM tests (`tests/desktop.nix` or its own):
+  a tunnel started from the file reaches a second VM and comes back after the link drops; an unknown host key
+  does not connect; `ProxyCommand` or a leading `-` in the file is refused; a forward never listens beyond
+  127.0.0.1; `torq-agent` cannot start or stop the person's tunnel.
+- **As built (2026-11-10):** the file's checks, the ssh command line, the states and "Add tunnel" are
+  `torq::tunnels` in torqcli's library (unit-tested there: the Nix build of settings/ runs no tests); the file is
+  read with `toml`, unknown settings refused (`deny_unknown_fields`). `torq-tunnel run <name>` (and `check`)
+  and the applet `torq-tunnels` are binaries of `settings/`; the unit `torq-tunnel@.service` ships in that
+  package (`lib/systemd/user`, with `[Install] WantedBy=default.target`, so "Start at login" is
+  `systemctl --user enable`) and the desktop module adds it with `systemd.packages`; ssh is on the unit's own `PATH` (NixOS puts its client in every system already, for the person's first `ssh`). ssh also gets
+  `ConnectTimeout=15`, `GatewayPorts=no`, `PermitLocalCommand=no`, `ControlMaster=no`/`ControlPath=none` (its
+  own connection, never a share of a multiplexed one) and `ForwardAgent=no`/`ForwardX11=no`, on the command
+  line ahead of the person's ssh config; `-T`, `-p` from the file's optional `port`, then `--` and the
+  destination. Restarts: 5 s, growing to 60 s (`RestartSteps`, `RestartMaxDelaySec`), unlimited; a wrong file
+  exits 78 and is not tried again (`RestartPreventExitStatus`). The applet asks the user manager with
+  `systemctl --user` and the journal with `journalctl --user` (not D-Bus: one program each, the person's own);
+  "Up" is the unit running and every forward here listening on 127.0.0.1 (`/proc/net/tcp`). A remote forward
+  listens on the far end's loopback as asked, unless that server's own `GatewayPorts yes` overrides it: the
+  far end's to decide. `tests/tunnels.nix` (check `tunnels`, two machines) checks each claim; on the laptop with
+  KVM its script took 99 s (112 s after the review's checks were added), about 60 of them the dropped link noticed (`Timeout, server far not responding.`, at
+  ~45 s), restarted and carrying traffic again. Mutation-checked: a destination allowed to start with `-`, and
+  `accept-new`, each fail a unit test.
+- **Amended (2026-11-10, the independent review):** what the guarantees are of. Points 1 and 3 hold for
+  `tunnels.toml`: nothing in it runs a command, opens a forward beyond 127.0.0.1 or accepts a key. The person's
+  own `~/.ssh/config` is still theirs and still read (that is what lets a destination be a `Host` with
+  `ProxyJump`), so it can do what ssh lets it: a `ProxyCommand` or `Match exec` of theirs runs, a
+  `DynamicForward 0.0.0.0:…` of theirs is added and listens wide (`GatewayPorts=no` does not override an
+  explicit bind address), and a jump host's own connection takes their settings for it, not the tunnel's
+  options. Overriding it (`-F` with a file of our own) would lose `ProxyJump`; not done. Fixed from the review:
+  ssh no longer adds a known server's other host keys to `known_hosts` (`UpdateHostKeys=no`; OpenSSH's default
+  did, and the test's snapshot is now taken before any tunnel runs); one wrong tunnel stops only itself (the file
+  read tunnel by tunnel, `torq::tunnels::read`; exit 78 only when the tunnel's own entry is wrong or gone, and a
+  file that is not TOML at all is tried again, so fixing it brings every tunnel back); the panel's line is ssh's
+  own last word, not the user manager's about the unit (the journal read by `_SYSTEMD_USER_UNIT`), checked in the
+  VM through `torq-tunnel status`; the agent's account checked unable to start a tunnel, not only to stop one,
+  with a check that the account itself works; the applet never starts a look while one is under way; "Add
+  tunnel" writes through a symlinked file and always makes its temporary file 0600. Not tested: keys from the
+  session's agent (the VM test uses a key file; the laptop's user manager has COSMIC's `SSH_AUTH_SOCK`), the
+  applet's own drawing and buttons, and that the desktop never lingers.
+- **Not:** tunnels in the configuration tree for a person (a server's are `services autossh`, already there);
+  a VPN; setting up a browser's proxy (the person's own, in their profile); accepting a host key from the
+  applet.
+
+## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
+- **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed
+  2026-11-10 (the owner: "is it possible to allow the torqos-agent to access and use passwords from the secret
+  manager without exposing the secret to the AI? … store secrets and allow AI to use them and limit which
+  ones"). Builds on ADR-035, ADR-038, ADR-041 and AI-LAYER.md's taint.
+- **Context:** ADR-038 keeps secrets out of the repository and leaves application credentials to a password
+  manager. The agent (ADR-041) runs as `torq-agent`, which reads nothing of the person's, so today a task that
+  needs a credential goes one of two ways. Either the person pastes it, and it is in the model's context: at
+  the model's provider, in a transcript, and one prompt injection away from being sent anywhere. Or the task
+  is not done. The line that matters is the uid, not the model. Whatever a process of `torq-agent`'s can
+  read, the model can read (it runs the tools), so "not exposed to the AI" means **the value never enters a
+  process of the agent's account, nor any bytes the agent decides where they go.** That has a precedent
+  people already trust: `ssh-agent`, which signs for a program that never holds the key. Hiding the value is
+  the easy half. The hard half is that a secret the agent can aim is a secret the agent has: put in an
+  environment variable (`echo $TOKEN`, base64 to pass any redaction), typed into a terminal it drives, sent
+  to a URL it chooses, or echoed back by a server that reflects request headers.
+- **Decision:**
+  1. **A store that only a small daemon reads.** `torq-secrets`, a new Rust service with
+     `#![forbid(unsafe_code)]` and `#![forbid(dead_code)]` like the broker, but not the broker: the broker stays the
+     only writer of the configuration, and this is the only reader of secrets. Values are kept under
+     `/var/lib/torq/secrets/store/`, root's alone, each encrypted at rest with `systemd-creds` (bound to the
+     TPM where there is one, to the host's key otherwise). A value is set, rotated or deleted only by a person:
+     `request system secret set <name>` asks for it twice at a terminal, an administrator's with their
+     password, as `request system backup key` does (ADR-038). The ledger records each set, rotation and deletion,
+     never the value. No command gives a value to the agent. A person reading one back (`request system
+     secret show <name>`) is an administrator's, at a terminal, with their password, its entry first.
+  2. **The rules are configuration; the values never are.** What each secret may be used for is in the tree,
+     reviewed and undone like any setting:
+     ```
+     secrets github-ci {
+         kind token;
+         use https { hosts [ api.github.com ]; header "Authorization: Bearer"; }
+         actors [ torq-agent ];
+         approve first-use;          # each-use | first-use | never
+     }
+     ```
+     A name is letters, digits, `-` and `_`. **The agent cannot widen its own access.** `secrets` is on the
+     agent's deny list (ADR-041 2): a proposal from `torq-agent` that touches it is refused at the broker,
+     however it is worded. Only a person grants a secret to the agent.
+  3. **Using a secret is one of a closed list of operations the daemon performs itself**, each bound to the
+     targets its rule names:
+     - **HTTPS with an injected header.** A reverse proxy per rule: the agent sends plain HTTP to a Unix socket
+       or a loopback port of the daemon's (`http://127.0.0.1:<port>/…`, so curl, git over HTTPS and any SDK
+       work unchanged). The daemon checks the caller's uid (`SO_PEERCRED`, or the socket's mode for a port),
+       adds the header, and makes the request to the rule's host itself: HTTPS only, TLS checked against the
+       system's CAs, no redirect followed to another host, no proxy settings taken from the caller. The
+       daemon makes the request with curl, its configuration on standard input as `torq::app::github` does, so the
+       value is never in an argv. The response goes back with the value scrubbed (exact, and its base64 and URL
+       encodings). That scrubbing is defence in depth, not the guarantee. The guarantee is the host list, and a
+       host that reflects credentials does not belong on it.
+     - **SSH, and signing with an SSH key.** The daemon is an `ssh-agent` for the agent's account, holding only
+       the keys the rules grant, each restricted to its rule's hosts with OpenSSH's own destination
+       constraints (`ssh-add -h`, OpenSSH 8.9 and later: the agent refuses to sign for any other host).
+       Known host keys only, never trust on first use (ADR-050 3). This also covers git over SSH, and signing
+       commits and artifacts (`ssh-keygen -Y sign`, namespace from the rule).
+     - **Not on the list, on purpose:** a value in an environment variable, a file, a command's arguments or
+       its standard input; typed into a window or terminal; HTTP to a host the request names; a shell "with the
+       secret loaded". Each would hand the value to something the agent controls. A new operation is added to
+       the list only by an ADR that says how it is bound.
+     What a use can do is what the credential can do at that host: a token with full `repo` scope used on
+     `api.github.com` can delete repositories there. The rule limits where the secret goes, not what the
+     remote end lets it do, so a narrow credential (a fine-grained token, a deploy key) is the person's
+     lever, and TorqOS Settings says so when one is added.
+  4. **Approval, and taint.** `approve` in the rule sets when a person confirms a use: never, the first use in
+     each agent session, or each use. Confirming happens in COSMIC's dialog or at a terminal (ADR-045's
+     approvals), showing the secret's name, the operation, the target, the session and its reason. **A tainted
+     session (AI-LAYER.md: one that has read a web page, an email or a downloaded file) needs approval for every
+     use, whatever the rule says.** Prompt injection is exactly when an agent should not spend a credential on
+     its own. A person's own uses (`actors` naming them) never ask.
+  5. **Every use is recorded.** The daemon writes each use to its own log: who, which secret, which operation,
+     which target, the session, allowed or refused, and the HTTP status. The log never holds the value or
+     the body. Each approval and refusal also goes to the ledger, as the session's taint does. `show system
+     secrets` lists each secret (name, kind, rules, last used, never the value) for anyone who may read the
+     tree; `show system secrets uses` shows the log.
+  6. **Backups and remotes.** The store is not in the repository (the fence) and not in a backup unless its
+     `paths` name it (ADR-038, amended 2026-11-07). A machine rebuilt from its URL comes back with every rule
+     and no value: each says it is empty until a person sets it again.
+- **Settled by the owner (2026-11-10):**
+  1. **HTTPS and SSH together** in the first version ("both").
+  2. **A person's own secrets are in the first version** ("yes"). `users <name> secrets` is a leaf of the
+     person's own tier, as their packages are: they set, rotate and delete their own values and rules
+     without an administrator's password, and nobody else's. Reading a value of their own back takes their
+     password, so that no program of their session reads it silently. The agent uses one only when the
+     person's own rule names `torq-agent`, and the person approves those uses. An administrator's password
+     does not show a person's values: it can delete them, and the deletion is recorded.
+  3. **The ledger records approvals, refusals and first uses** ("approval and refusal only and first use?").
+     For each secret, its first use in each agent session goes to the ledger, so the record shows every
+     session that touched a secret even when its rule asks no approval. Every later use goes only to the
+     daemon's log.
+  4. **Values can be entered in TorqOS Settings** ("yes"), in a masked field. The value goes from the window
+     to the daemon over its socket and is held nowhere else. Entering one is then no longer a terminal-only
+     step (`app::needs_terminal`).
+- **Consequences:** New code: the `torq-secrets` daemon (store, rules, the proxy, the SSH agent, the log), the
+  `secrets` tree in the schema, its entry on the agent's deny list, the commands above, and a Secrets page in
+  TorqOS Settings. Reused: `systemd-creds`, curl, OpenSSH's agent and its destination constraints, the
+  approval dialog. VM tests, each of a claim: `torq-agent` cannot read the store or the daemon's memory (no
+  ptrace, a different uid); a use to a host not in the rule is refused, and a redirect to one is not followed;
+  the value never appears in the agent's environment, argv or a response, checked against a test server that
+  echoes headers; an SSH key granted for one host signs for it and is refused for another; a proposal from the
+  agent touching `secrets` is refused; a tainted session's use waits for the dialog; a rebuilt machine has its
+  rules and no values. Mutation-checked: the host check, the redirect check and the deny-list entry.
+- **How it is built (2026-11-10), in five steps, each reviewed:**
+  - **Who holds what.** The broker keeps the values, as it keeps passwords and backup keys: it checks who
+    asks and their password, writes the ledger entry first, encrypts with `systemd-creds` (`--with-key=auto`:
+    the TPM and the host key where there is a TPM), and writes `/var/lib/torq/secrets/store/system/<name>` or
+    `…/store/users/<person>/<name>`, root's alone. The broker reads a value back only for `show`. The daemon
+    reads values only to use them, and holds no value longer than one use.
+  - **The rules are two files of the configuration,** in one format: `secrets/system.json` (system tier, an
+    administrator's) and `users/<person>/secrets.json` (a new user leaf, the person's own). The daemon reads
+    them from the repository, so a change to a rule is a commit that builds nothing (as `desktop.json`,
+    ADR-045). They are not nodes of the tree: torqcli's own tree has one level of names (`users <name>`),
+    and a person's secret is a second. They change through commands instead, which TorqOS Settings shares:
+    `request system secret set|delete|show <name>`, `allow <name> https <host>` or `ssh <host>`, `disallow …`,
+    `approve <name> each-use|first-use|never`, each ending `user <person>` for a person's own (theirs alone:
+    another person's is refused, an administrator's included, except `delete`). `show system secrets` lists
+    both kinds. The agent cannot propose either file: the default-deny list (ADR-041 2) admits only a
+    person's `packages.json` and listed settings, and both files are neither; a test pins it.
+  - **Steps:** 1, the values and the rules (broker, torqcli, the files, a VM test); 2, the daemon with HTTPS
+    and the first-use records; 3, SSH; 4, approvals and taint; 5, the Secrets page in TorqOS Settings. A
+    person approves an agent's use as they apply a proposal (ADR-045): the daemon holds the request, the
+    panel and Settings show it, and the person's yes goes through the usual dialog. The agent's own process
+    is in no person's session, so COSMIC's dialog cannot be asked for it directly.
+- **Step 1 built (2026-11-10), and its independent review's findings fixed:** the broker keeps the values
+  (`broker/src/secrets.rs`), the rules' one shape is `torq_wire::secrets`, and torqcli has the commands above
+  (`cli/src/secrets.rs`). Tested in `broker/tests/secrets.rs`, `trust_loop.rs`, torqcli's session tests and
+  `tests/socket.nix` (the real socket, systemd-creds and agent account). The VM test found systemd-creds writing
+  its output anew, 0644; the broker makes it 0600 before it is in place. From the review:
+  - **A person's own is theirs at the broker itself, not only at its socket.** `sudo torq-broker secret-show
+    --user sam` is refused to anyone but sam, as is `secret-set`; an apply, a schedule or an undo of a change to
+    `users/<p>/secrets.json` approved by anyone but p is refused where every way in passes
+    (`policy::check_secret_rules`), as `check_allowed` is.
+  - **What this does not promise, said plainly:** root can always decrypt a value by hand (`systemd-creds
+    decrypt`), unrecorded, and an administrator can set a person's password and then be them, which the ledger
+    records. TorqOS's own commands never give an administrator a person's value; root on the machine is not
+    fenced from it, as ADR-035 says root is not fenced. The agent is: it is never root.
+  - **No value on a disk or in a core.** torqcli passes a value through a private file in memory (the
+    session's runtime directory or `/dev/shm`, never `/tmp`), and the broker is not dumpable, with no core for
+    itself or `systemd-creds` (`RLIMIT_CORE` 0; `LimitCORE=0` on `torq-broker@`).
+  - **A rules file is read as every reader reads it:** from its bytes, a secret or a host named twice refused (JSON
+    allows it and serde keeps the last, so a reviewer would read one rule and the daemon another). In a person's
+    own file, only the agent may be named besides them (`parse_person`); another person uses a system secret.
+  - **`delete` removes the rule first, then the value:** a declined commit leaves both as they were.
+  - **For the steps to come:** a token holding a line break must never reach a header (the daemon refuses it,
+    step 2); an SSH key is several lines, so it is given from a file, not typed (step 3).
+- **Step 2 built (2026-11-10): the daemon, and its independent review's findings fixed.** The owner chose the
+  loopback port over a Unix socket or a command ("Loopback port"): `torq-secrets` (its own crate, `secrets/`) is its
+  own account in a tight unit, listening on 127.0.0.1:7800. A request to `/system/<secret>/<host>/<path>` (a
+  person's own: `/user/<person>/<secret>/<host>/<path>`; `show system secrets` prints each) is a use, which the
+  daemon asks of the broker (`secret-use`, open to that account alone, which may ask nothing else). The broker reads
+  who is connected from the kernel's own table itself, both ends of the connection (the client's is the actor, the
+  other must be the daemon's), judges the use by the rule at HEAD, records the agent's first use in each session,
+  and gives the value, header and prefix for this request. Until approving is built (step 4) the agent's use is
+  only from an untainted session (`X-Torq-Session`) of a rule that asks no approval; anything else is refused. The
+  daemon sends with curl (its configuration, and the value, on its input; `--disable`, HTTPS, the certificate
+  checked, no redirect followed, no proxy, no URL globbing), asks for no compression and refuses an answer it cannot
+  check, drops a program's own header of the secret's name, and replaces the value in what comes back: as it is,
+  in base64 (padded or not, URL-safe, at any offset), percent-encoded in either case, JSON-escaped. Every use is in
+  its journal, never the value. `tests/secrets.nix` has a second machine as the HTTPS host and checks both ends.
+  From the review:
+  - **A web page the person has open runs as them** (the serious one): its script could send a request to
+    127.0.0.1:7800 and the broker would rightly see the person's own account; GitHub's API lets any page read its
+    answers. The daemon now takes only what a program sends: `Host` must be the daemon's own (a page that rebinds its
+    name to 127.0.0.1 still sends its name), and a request with `Origin`, `Referer` or any `Sec-Fetch-*` header
+    (which every current browser adds) is refused; `OPTIONS` (a browser's preflight) is not taken; no
+    `Access-Control-*` header of an answer is passed on, so no page could read one. What is left: a browser so old
+    it sends no Fetch Metadata, with its referrer turned off, could still send a blind GET it cannot read.
+  - **The record stays bounded**: a refusal goes on it only for a secret that has a rule, once per session and
+    secret, and at most 60 an hour; what was recorded is remembered in the broker's `secret-uses.json` rather than
+    found by reading the whole ledger at every use.
+  - The status reason and the headers of an answer are scrubbed too, and a header with a control character is
+    dropped; curl's error is scrubbed before it is cut; a request's head has one deadline (15 s), not one between
+    bytes; the unit has `MemoryMax=1G`; a HEAD's length is the host's; an answer whose lines end in a bare LF is read.
+  - **Said plainly: taint is the agent's own word.** It can start a new, untainted session when it likes (at most
+    `SESSIONS_AN_HOUR`, KNOWN-GAPS 6zq), so refusing a tainted session's use stops an honest agent that read
+    something untrusted, not a hostile program running as the agent. Against that, the rule is the guarantee: the
+    agent uses only what a rule names, only at its hosts.
+- **Step 3 built (2026-11-10): SSH, and its independent review's findings fixed.** A rule's SSH hosts carry their
+  keys (`known`, known_hosts lines), taken from the person's own known_hosts when they `allow … ssh <host>`; a host
+  they never connected to and checked is refused. A key is given from a file (`request system secret set <name>
+  file <path>`), and the broker keeps its public half beside it, read from the key's own header (no program is
+  given the private key for that, and no file holds it); a key under a passphrase, or in the older PEM form, is
+  refused, saying why. A program asks for an agent socket (`POST http://127.0.0.1:7800/ssh-agent`, its session
+  named as for HTTPS): the broker grants it to whoever is connected, read from the kernel (`secret-agent`, an hour,
+  at most 8 at once for one account), and the daemon opens a socket only that account is answered on
+  (`SO_PEERCRED`), at most 4 for one account. On it the daemon lists the keys the account may use and takes no
+  key, removal or lock. A signature is made this way: the daemon starts a private `ssh-agent` of its own; that
+  agent, holding nothing yet, takes the session's binding only if the host's signature of the session holds; the
+  request must be a login to that bound session; only then does the broker judge the use by the socket's grant
+  (recording the agent's first use) and give the value; it goes into the private agent restricted to the rule's
+  host (`ssh-add -h <host> -H <the rule's keys of it>`), on ssh-add's input; the request is signed there, and the
+  private agent is gone. Which host a session is with is by its key, never its name: DNS gains nothing.
+  `tests/secrets.nix` signs in to the rule's host as the agent and as its owner, and is refused at another host
+  that would let the key in. From the review:
+  - **A forwarded session is refused** (`ssh -A` through a host the rule does not name, then on to one it does):
+    the relay replays one binding, so a chain of hops is not one OpenSSH could check; a second binding on one
+    connection is refused too, as OpenSSH's own agent does.
+  - **Nothing is asked of the broker before the binding is checked**, so no use is recorded, and no value
+    decrypted, for a host the session was never with.
+  - The public half no longer passes through `ssh-keygen` and a key file (the review: a crash would have left the
+    key in the clear in the store).
+  - Threads and sockets are bounded (a thread that cannot be had turns a request away; the daemon does not stop).
+  - **Said plainly:** a key restricted to a host signs logins to it and nothing else. OpenSSH refuses such a key
+    for `ssh-keygen -Y sign`, so signing commits and artifacts is not this operation (Decision 3 said it would
+    be): it would be one of its own, by a later ADR. SSH hosts are on port 22 for now (`[host]:port` is refused).
+- **Later, not now:** a person's own secret typed into the focused window by a COSMIC shortcut, theirs and never
+  the agent's (the owner's Alt+O, 2026-11-10; it needs a way to type into windows that COSMIC accepts, and it
+  never serves `torq-agent`); a service's secret from the same store (systemd's `LoadCredential`, instead of a
+  `passwordFile` by hand); OAuth device flows the daemon holds the refresh token for.
+- **Not:** a browser password manager (the person's own: KeePassXC, Bitwarden, the browser's); a sync service
+  for secrets (ADR-039); handing the agent any secret "just this once". There is no fallback route around the
+  guarantee: a task that needs a value in hand is done by a person.
+
+## ADR-053 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown
+
+**Status:** accepted and built, 2026-11-10 (the owner chose it: re-check at approval). ADR-051's proposals
+from TorqOS's own agent will rely on it: an agent's proposal waits for a person, and the configuration moves
+meanwhile.
+**Context:** `tests/desktop.nix` failed at "a system change from the desktop is approved in COSMIC's dialog":
+`refused: the configuration has changed since this change was prepared`. The panel applet saves the person's
+COSMIC settings by itself ("save my desktop", `cli/src/desktop.rs`): at login, when the ledger changes and every
+15 minutes, each save a ledgered commit to `users/<name>/desktop.json`. A change waiting for approval was
+prepared on the commit before, and apply refused any proposal whose base was not HEAD. So most proposals,
+the agent's above all, would become unapprovable before a person reached them. The refusal was there for the
+audit of M3's H1: a diff's effect depends on HEAD (a copy can be nothing to a file at one commit and its whole
+content at the next), and a proposal must be judged on what it does, not on what was recorded.
+- **Decision:** when a waiting proposal with a base is applied and HEAD is no longer its base, the broker:
+  1. applies its recorded diff to the current head in a scratch index and computes what it does there, by the
+     function `propose` uses (`Repo::proposal_effect`), not a second implementation;
+  2. goes ahead only if that effect is byte for byte the one recorded and shown (its `effect_sha256`), and then,
+     as every apply does, the files it touches and its tier are the ones recorded and gated on (H1's check), the
+     user-tier files are checked as data, and an agent's proposal passes the agent's list as it is now. It builds
+     on the current head, and the `applied` entry says `rechecked_on: <head>`;
+  3. otherwise refuses: `refused: proposal <n> would now do something different from what was shown: the
+     configuration has changed since this change was prepared (prepared on …, now at …); prepare it again from
+     the current configuration`. A diff that no longer applies is refused the same way.
+
+  One function (`recheck_on_head`, `broker/src/lib.rs`) on every path that applies a waiting proposal:
+  `apply_locked` holds it, and a person's `apply`, a `commit confirmed` (`apply --confirm`), session trust's
+  automatic apply (`session::apply_trusted`) and a scheduled `commit at`'s run (`at::Scheduler::run`) all go
+  through `apply_locked`. Scheduling a `commit at` takes the same re-check at once (its entry says
+  `rechecked_on` too), and its run no longer refuses a moved head by itself: apply judges it, and a refusal
+  of apply's is ledgered as the schedule's `apply_refused`. `refuse_unledgered_head` is unchanged: nothing is
+  applied on a HEAD the ledger did not make. `propose --base` is still refused when stale (the person, or the
+  agent, prepares on what they see).
+- **Why it keeps H1:** the effect is what `git diff --cached HEAD` writes after the diff, so equal bytes mean the
+  same files changed, each from the same blob (the `index` line) by the same hunks, to the same result: the
+  change the person approved, on a configuration whose other commits were each ledgered and approved in turn.
+  The audit's copy is nothing to the other list at the base and its content at the new head: a different
+  effect, refused (and H1's files-and-tier check would refuse it too). A base-less proposal (torq-broker by root
+  only, as KNOWN-GAPS 6g) is not re-checked by effect: H1's check holds it, as before.
+- **Known:** the `index` line's blob ids are abbreviated as git chooses; a repository grown past a size where git
+  writes a longer abbreviation, or a new ambiguous prefix, makes an unchanged change's effect differ and so be
+  refused — the safe way. Any commit to the same file, even far from the change, changes that line, so it
+  refuses too (the test's case (c)): the change is prepared again.
+- **Tests:** `broker/tests/trust_loop.rs` — another file moved HEAD: applied, `rechecked_on` the new head, built on
+  it (`proposal_whose_base_moved_by_another_file_applies_rechecked`); the audit's copy with a base: refused by the
+  re-check (`the_audits_copy_with_a_base_is_refused_by_the_recheck`); the same file changed so the diff still
+  applies, same files and tier: refused (`proposal_whose_file_changed_since_is_refused`); re-checked, but its tier
+  or files not the ones gated on: refused (`a_rechecked_proposal_is_still_held_to_its_tier_and_files`); an agent's
+  re-judged by its narrowed list (`an_agents_rechecked_proposal_is_judged_by_its_list_on_the_new_head`); a
+  `commit at` applied and refused at its run, and re-checked when scheduled. `broker/tests/sessions.rs`: trust's
+  apply, both ways. VM: `tests/desktop.nix` waits for the applet's desktop save to land between propose and
+  approval, and the approval then applies with `rechecked_on`; `tests/commit-at.nix`, the refusal's words.
+  Mutation-checked: the effect comparison made always true fails five tests; H1's check removed fails three.
+- **Not:** rebasing a change whose effect differs (merging, or applying "what it would do now") — a person is
+  never asked to trust what they were not shown; applying on an unledgered head; re-checking a base-less one by
+  effect.
+- **Amended (2026-11-10, the fresh review of the desktop line):** the agent's limit of 20 waiting proposals
+  (ADR-041) counted only those on the current head, because one on an older head could never land. Since this
+  ADR it can, so every desktop save (every 15 minutes) emptied the count, and the agent could leave 20 more
+  waiting each time. Now a proposal counts while it could still land, judged as apply judges it
+  (`could_still_land`): its diff kept here, its effect re-checked on the current head by `recheck_on_head`, and
+  the agent's list as it is now (`agent_check`), so narrowing the list frees the slots. Newest first, stopping
+  at the limit, among the newest 100 not yet applied (`AGENT_WAITING_LOOK`): each judgement costs git runs
+  under the broker's lock, and a machine's dead proposals are not judged again forever. Tests:
+  `the_agents_waiting_proposals_still_count_when_another_file_moves_the_head` (the review's case);
+  `the_agents_waiting_proposals_that_apply_would_refuse_do_not_count` (a narrowed list, a diff not kept);
+  `the_agents_record_never_blocks_setup_or_the_agent` now frees the agent by a person changing the same file.
+  Mutation-checked: counting by base only, counting every proposal, not judging the list, and counting a
+  proposal whose diff is gone each fail a test. Still open: a person cannot decline a proposal (narrowing the
+  agent's list is the one way, ADR-051's proposals page the place for a "decline"), and a re-check that fails
+  at apply writes no ledger entry.
+
+## ADR-054 — Touchpad gestures in the compositor, not a gesture daemon
+- **Status:** accepted and built, 2026-11-10; on the laptop since change #73, the owner: "the touchpad is working great". Asked for (the owner: "three finger swipe to see windows and down to see
+  workspace", "four finger pinch to open applications", no three-finger left/right).
+- **Context:** COSMIC's compositor (cosmic-comp 1.11.0) has one touchpad gesture: four fingers left and
+  right (up and down on a vertical layout) switch workspaces. Three-finger swipes are its `TODO`, taken and
+  dropped; pinches go to the app under the pointer. Linux's usual answer, a gesture daemon (libinput-gestures,
+  fusuma, touchegg), reads `/dev/input` itself, so the person joins the `input` group — which reads every
+  input device, the keyboard included. Any program of theirs could then read their password as they type it
+  into the approval prompt or COSMIC's polkit dialog: the one thing ADR-035 says a program in the owner's
+  session does not have.
+- **Decision:** the gestures go into cosmic-comp, carried as a patch in the desktop's overlay
+  (`modules/cosmic/cosmic-comp-gestures.patch`, `modules/desktop.nix`), as ADR-045 3 carries cosmic-settings'.
+  The compositor has the touchpad already; nothing gains access to input. Each gesture runs the command of
+  COSMIC's own system action (its keyboard shortcut's), from `system_actions`:
+  1. **Three fingers up:** the workspace overview (`WorkspaceOverview`). With it open, **three fingers down**
+     closes it (it toggles), so three-finger swipes are the compositor's even while the overview is open.
+  2. **Three fingers down:** the window switcher (`WindowSwitcher`).
+  3. **Four fingers pinched in** to three quarters of where they started: the app library (`AppLibrary`,
+     toggles), once per pinch. Pinches of fewer fingers stay the app's (zoom).
+  4. Three fingers left and right do nothing: four fingers switch workspaces, unchanged.
+  5. **Off by default, behind a gate** (the owner, 2026-11-10: "`desktop custom compile true` is required to
+     turn on anything custom in cosmic"). A patched package is not in NixOS's cache, so a machine with it
+     compiles it, at almost every update: the weekly bump moves `nixpkgs-cosmic`, and with it something
+     cosmic-comp is built from. That is against ADR-023 for everyone who did not ask for it. So
+     `torq desktop customCompile` (off) allows any of TorqOS's changes to COSMIC, and each is its own setting
+     besides, here `torq desktop touchpadGestures` (off); a feature without the gate is refused at commit,
+     with the setting to turn on. The gate alone changes nothing. Both off, cosmic-comp is upstream's, from
+     the cache. Not a TorqOS binary cache: that is ADR-039's, on its own merits, not this feature's.
+- **Consequences:** where both are on, cosmic-comp is built on the machine, not taken from NixOS's cache (at
+  almost every update), and the patch is checked again at each. Upstream builds it with whole-program
+  optimisation (`lto = "fat"`, Cargo.toml's release profile), for build servers: on the laptop (20 threads,
+  22 GB) its final crate froze the desktop until a reboot, twice (2026-11-10), once with every core and once
+  with six. So TorqOS's build of it is thin LTO (`CARGO_PROFILE_RELEASE_LTO=thin`) with at most 8 jobs. A
+  limit for every build of a desktop machine (`nix settings cores`) is open. Offered upstream (cosmic-comp #1799 is a step
+  towards four-finger overview gestures). The gestures fire when recognised; they do not follow the fingers.
+  Not tested in a VM: QEMU has no multi-finger touchpad to drive; checked by hand on the laptop.
+- **Known (the independent review, 2026-11-10):** a swipe's direction is its first movement's, as upstream's
+  four-finger one: a three-finger swipe that starts sideways does nothing. A swipe and a pinch share the
+  compositor's one gesture state, as two swipes do upstream: two touchpads at once can confuse it. The overview
+  counts as open on the active output once drawn: on another output, or while it starts, three fingers down
+  opens the window switcher instead of closing it. The window switcher (`cosmic-launcher alt-tab`) picks a
+  window when Super is let go; started from a gesture, with none held, how it behaves is to be seen on the laptop.
+  A pinch that is then cancelled has still opened the app library.

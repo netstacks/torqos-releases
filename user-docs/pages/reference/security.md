@@ -10,18 +10,18 @@
 | Passwords | Kept outside the configuration, readable by the system only, so their hashes are never in its history |
 | SSH (once on) | Keys only unless passwords are allowed; 3 tries per connection; the owner only; repeated wrong guesses blocked |
 | Releases | Images and updates are signed; every update's signature is checked before it is loaded |
-| History | A hash-chained ledger of every change, checked at boot and every 15 minutes |
-| Footprint | No desktop, no graphical stack, no installer tools on an installed machine |
+| History | A hash-chained ledger of every change, checked at boot and every 15 minutes. Against someone with root on the same machine it holds only if the configuration is also pushed to a remote, which is off by default |
+| Footprint | The base has no desktop and no graphical stack, and no installer tools on an installed machine. A desktop (COSMIC) is an opt-in configuration: see [The desktop](../guide/desktop.md) |
 
 ## How changes are controlled
 
-- **One writer.** Only TorqOS's broker writes the machine's configuration. A stray build of
+- **One writer.** Only TorqOS's broker writes the machine's configuration. The configuration tree refuses a list of settings that would change the broker itself, but plain Nix files attached to the tree, and other settings that run code as root, can still change it: what stands there is an administrator reading and approving the change. A stray build of
   `/etc/nixos` (where stock NixOS keeps its configuration) is refused.
-- **A person approves.** A system change shows its comparison and needs a yes at a terminal.
+- **A person approves.** A system change shows its comparison and needs a yes at a terminal (on a desktop, in a password dialog).
 - **Nothing hidden.** Any Nix file in a change is shown as its raw diff before you approve it.
 - **Drift is visible.** Changes made around TorqOS (with `sudo`, for example) are reported by
   `show system alarms`, and `request system repair` puts the machine back.
-- **The privileged code is small Rust**, with `unsafe` and dead code forbidden by the compiler.
+- **The broker is Rust** (about 9,000 lines, with `unsafe` and dead code forbidden by the compiler). Other things also run as root: a few shell scripts, and `torqcli` itself at setup and install. The broker's own systemd units are not sandboxed yet.
 
 ## Root and sudo
 
@@ -61,7 +61,7 @@ Snapshots live on the same disk. A backup is NixOS's own restic, set in configur
 any setting, to a disk, a NAS, SFTP or S3:
 
 ```
-set services restic backups nas repository sftp:backup@nas:/torq5
+set services restic backups nas repository sftp:backup@nas:/torq
 commit
 ```
 

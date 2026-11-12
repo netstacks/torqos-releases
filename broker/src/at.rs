@@ -1,18 +1,19 @@
 //! `commit at` (ROADMAP M1.5): a proposal approved now and applied at a time, by a transient timer.
 //!
-//! `schedule` takes a proposal made on the configuration as it is (its base is HEAD), approved by the
+//! `schedule` takes a proposal with a base — on a configuration moved on since, only one that still does
+//! exactly what was shown (ADR-053) — approved by the
 //! person now (over the socket, gated as `apply` is: their password for a system change), arms a
 //! timer of its own (`{broker} run-scheduled {id}`), and ledgers `apply_scheduled`: the proposal, the
 //! time, who, the timer, the base and the hash of the diff approved. At the time, `run-scheduled`
 //! applies that proposal as that person — `applied` or `apply_failed`, marked `scheduled` — unless
-//! the configuration has moved on, a commit confirmed is waiting, or the diff is not the one
-//! approved: then it is refused and ledgered (`apply_refused`), never applied on top of something
-//! else. `cancel-scheduled` ledgers `apply_cancelled` and stops the timer.
+//! a commit confirmed is waiting, the diff is not the one approved, or apply refuses it (on a
+//! configuration moved on, one that would now do something other than was shown): then it is refused
+//! and ledgered (`apply_refused`). `cancel-scheduled` ledgers `apply_cancelled` and stops the timer.
 //!
 //! What is scheduled is the ledger's word alone: a run finds its schedule there, by the timer's id,
 //! under the broker lock, and a cancelled or settled one does nothing — so nothing outlives a cancel,
 //! even a timer that could not be stopped. One at a time: a second would be prepared on the same
-//! configuration the first changes, and so could only ever be refused; a person schedules the next
+//! configuration the first changes, and land on one it was not prepared on; a person schedules the next
 //! once the first has landed.
 
 use crate::ledger::{Entry, NewEntry};
@@ -53,8 +54,6 @@ pub struct Scheduled {
     pub tier: String,
     pub reason: String,
     #[serde(skip)]
-    base: String,
-    #[serde(skip)]
     diff_sha256: String,
     #[serde(skip)]
     boot_id: Option<String>,
@@ -84,7 +83,6 @@ pub fn pending(entries: &[Entry]) -> Vec<Scheduled> {
                 tier: e.body.tier.clone(),
                 // The proposal's own reason: the entry's, less what it says of the time.
                 reason: e.body.reason.strip_prefix(&format!("Scheduled for {}: ", d["at"].as_str()?)).unwrap_or(&e.body.reason).to_string(),
-                base: d["base"].as_str()?.into(),
                 diff_sha256: d["diff_sha256"].as_str()?.into(),
                 boot_id: d["boot_id"].as_str().map(String::from),
             })
@@ -205,14 +203,32 @@ impl<'a> Scheduler<'a> {
         if crate::session::cuts_off(&p).is_some() {
             bail!("refused: proposal {proposal_seq} could lose the network or the screen: it is applied confirmed, by a person who is there");
         }
+        // Refused now, not at its time (where applying checks it again).
+        crate::policy::check_secret_rules(p.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()), approved_by)?;
         let base = p.body.data["base"].as_str().context("refused: a scheduled change says the commit it was prepared against (its base)")?.to_string();
-        b.refuse_stale_base(&base)?;
         let diff = b.proposal_text(&p, "diff")?;
+        // On a configuration moved on from its base, only if it still does exactly what was shown
+        // (ADR-053), as apply checks again at its time.
+        let tmp = crate::DropFile(b.state_dir.join(format!("schedule-{proposal_seq}.diff")));
+        std::fs::write(&tmp.0, &diff)?;
+        let rechecked_on = b.recheck_on_head(&p, &tmp.0)?;
+        drop(tmp);
         let timer = chrono::Utc::now().timestamp_millis().unsigned_abs();
         // The timer first, then the record: a timer whose record never got written finds no schedule
         // by its id and does nothing; a record without a timer would wait for ever.
         self.arm(&lock, timer, at)?;
         let at_s = at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let mut data = json!({
+            "proposal": proposal_seq,
+            "at": at_s,
+            "timer": timer,
+            "base": base,
+            "diff_sha256": sha(&diff),
+            "boot_id": b.boot_id(),
+        });
+        if let Some(head) = rechecked_on {
+            data["rechecked_on"] = head.into();
+        }
         b.ledger.append(NewEntry {
             actor: p.body.actor.clone(),
             approved_by: Some(approved_by.into()),
@@ -220,14 +236,7 @@ impl<'a> Scheduler<'a> {
             tier: p.body.tier.clone(),
             tainted: false,
             reason: format!("Scheduled for {at_s}: {}", p.body.reason),
-            data: json!({
-                "proposal": proposal_seq,
-                "at": at_s,
-                "timer": timer,
-                "base": base,
-                "diff_sha256": sha(&diff),
-                "boot_id": b.boot_id(),
-            }),
+            data,
         })
     }
 
@@ -282,10 +291,8 @@ impl<'a> Scheduler<'a> {
         if let Some(pc) = pending_confirm(&b.ledger.read_all()?) {
             return Ok(Some(format!("change #{} (commit confirmed) was waiting for confirmation", pc.applied)));
         }
-        let head = b.repo.head()?;
-        if head != s.base {
-            return Ok(Some(format!("the configuration has changed since it was scheduled (prepared on {}, now at {head})", s.base)));
-        }
+        // A configuration moved on since is apply's to judge, as for any apply (ADR-053): applied only if
+        // the change does exactly what was shown, refused on the record otherwise.
         if b.find_child("applied", "proposal", s.proposal)?.is_some() {
             return Ok(Some(format!("proposal #{} was already applied", s.proposal)));
         }

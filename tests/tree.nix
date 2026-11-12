@@ -231,7 +231,11 @@ let
   ++ (let
     described = lib.unique (map (n: lib.removePrefix "users/<name>/" n.file)
       (lib.filter (n: n ? file && n.tier == "user") (lib.attrValues nodes)));
-    allowed = schemaConfig.torq.packages.userLeaves;
+    # Every user leaf is a typed setting of the tree, but desktop.json: COSMIC's settings files kept as
+    # COSMIC wrote them, "not as generated tree words" (ADR-045's amendment, "save my desktop"), read by no
+    # module; torqcli shows it with `show system desktop`. And secrets.json: a person's secrets' rules, written
+    # by `request secret …` and shown by `show secrets` (ADR-052), never set as tree words, and theirs alone.
+    allowed = lib.subtractLists [ "desktop.json" "secrets.json" ] schemaConfig.torq.packages.userLeaves;
   in lib.optional (lib.sort lib.lessThan described != lib.sort lib.lessThan allowed)
     "schema: user-tier files ${builtins.toJSON described} != allowed user leaves ${builtins.toJSON allowed}")
   ++ lib.optional (!(nodes.users.values ? dev)) "schema: users lists the machine's normal users (dev)"

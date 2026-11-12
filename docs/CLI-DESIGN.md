@@ -1,7 +1,7 @@
 | `show users` | the people with an account here (NixOS's isNormalUser: numbers 1000 to 29999), where each is logged in now, and their groups; it says where groups are set (`users users <name> extraGroups`) |
 # CLI design — `torqcli`, the TorqOS shell
 
-Status: **plan** (milestone M1.5 in `ROADMAP.md`; ADR-016). TorqOS is driven like a network
+Status: **built** (milestone M1.5 in `ROADMAP.md`, rebuilt by ADR-025; the sections say where something is not built). ADR-016. TorqOS is driven like a network
 device: a shell with an operational mode and a configuration mode, a private *candidate*
 configuration, `show | compare`, `commit check`, `commit confirmed`, `rollback <n>`. One syntax, the
 J style (`set`, `delete`, `edit`, `show | compare`; ADR-021). Anyone who has run a router already
@@ -24,8 +24,9 @@ knows how to drive TorqOS.
 6. **Commit is the approval, and it says exactly what it approves.** `commit` prints the change it is
    making before it switches; any `.nix` file in it is shown as its raw diff. A system-tier commit
    needs a terminal — which stops cron, services and other background jobs, but **not** anything
-   started from your terminal (an AI tool, a script, a package's install hook): until the broker
-   identifies its caller (M3, KNOWN-GAPS #4), whatever runs in your terminal can commit as you.
+   started from your terminal (an AI tool, a script, a package's install hook). Since ADR-040 the broker
+   learns who is asking from the kernel, and a system change needs an administrator's password, which a
+   program in your terminal does not have (one that draws a fake prompt could still ask for it; KNOWN-GAPS 4).
 7. **Errors say what, why and what to do** — never `Caused by:`, git hints or Rust error text.
 8. **One visual language.** Colour with meaning only; `NO_COLOR` and non-terminals get plain text;
    fits 80 columns.
@@ -34,17 +35,17 @@ knows how to drive TorqOS.
 
 ```
 $ torqcli                                   # interactive
-viper@torq-utm> show system alarms          # operational mode
-viper@torq-utm> configure                   # configuration mode
+alice@torq> show system alarms          # operational mode
+alice@torq> configure                   # configuration mode
 $ torqcli show system alarms                # one command, for scripts
-$ torqcli -c "configure; set users users viper packages htop; commit"
+$ torqcli -c "configure; set users users alice packages htop; commit"
 ```
 
 | | |
 |---|---|
-| operational prompt | `viper@torq-utm>` |
+| operational prompt | `alice@torq>` |
 | enter configuration | `configure` (or `config`); `configure exclusive`: the shared candidate yours alone until you leave |
-| configuration prompt | `[edit networking]` line, then `viper@torq-utm#` |
+| configuration prompt | `[edit networking]` line, then `alice@torq#` |
 | add / change | `set environment systemPackages jq` |
 | remove | `delete environment systemPackages jq` (one value); `delete environment systemPackages`, `delete networking` (everything below); not set: a warning |
 | go down / up / to the top | `edit networking` · `up` (or `exit`) · `top` |
@@ -158,6 +159,8 @@ configuration mode leaves it as `exit configuration-mode` does, and in operation
 torqcli; `-c` ends saying its uncommitted changes are discarded. `save` and `load` read a
 relative file name as in the home folder, as on a network device, wherever torqcli was started; `save`
 says the full path.
+
+**`torqcli --candidate -c "…"`** runs a script on your own saved candidate, as the shell's, kept when it ends: how TorqOS Settings hands a commit of the draft to a terminal (ADR-045, amended).
 
 **Scripts (`torqcli -c`)** use a private candidate that exists only for that invocation — never your
 interactive candidate, so a script cannot commit your half-done edits or leave edits behind. They
@@ -307,12 +310,12 @@ configuration, in Nix: …`, 5a), with the software the machine runs (`## softwa
 any change to one is shown as its raw diff in `show | compare` and in `commit`.
 
 ```
-viper@torq-utm> show configuration
+alice@torq> show configuration
 environment {
     systemPackages [ vim ];
 }
 networking {
-    hostName torq-utm;
+    hostName torq;
 }
 services {
     openssh {
@@ -324,7 +327,7 @@ time {
 }
 users {
     users {
-        viper {
+        alice {
             packages [ htop ripgrep ];
         }
     }
@@ -398,7 +401,7 @@ per place (one name, the first form, still reads as a list of one).
   that produced a new configuration (`init`, `applied`, `reverted`, `rolled_back`), newest first.
   Numbers shift
   with every commit, so `rollback <n>` says which commit it loaded (date, who, comment).
-  `show system commit` reads the ledger, so it uses `sudo` like a commit does.
+  `show system commit` reads the ledger through the broker's socket, as a commit does.
 - **`rollback <n>`** loads commit <n>'s *configuration* into the candidate — every file except
   `flake.lock`, so it never downgrades the software (network devices keep the two apart, too). That
   includes `.nix` files (e.g. turning development mode back on): `show | compare` shows each one as
@@ -435,12 +438,12 @@ per place (one name, the first form, still reads as a list of one).
     by committing their own; a second `commit confirmed` is refused until the first is settled.
 
 ```
-viper@torq-utm# set services openssh enable true
-viper@torq-utm# show | compare
+alice@torq# set services openssh enable true
+alice@torq# show | compare
 [edit services openssh]
 +   enable true;
-viper@torq-utm# commit confirmed 5 comment "ssh, keys only"
-viper@torq-utm# commit
+alice@torq# commit confirmed 5 comment "ssh, keys only"
+alice@torq# commit
 ```
 
 - **`commit at <time>`** (with `comment "…"` and `and-quit`; not with `confirmed` or `check`):
@@ -452,13 +455,16 @@ viper@torq-utm# commit
   proposal then, and is discarded. The broker (broker/src/at.rs):
   - is asked over the socket exactly as `apply` is (`schedule` is gated as `apply`: a person's own
     folder theirs, anything else an administrator's with their password), and refuses a tainted
-    proposal, one without a base, one whose base is not HEAD, or one already applied;
+    proposal, one without a base, one already applied, or — its base no longer HEAD — one that would now
+    do something different from what was shown (ADR-053: re-checked on the current head; its entry then
+    says `rechecked_on`);
   - arms a transient timer of its own (`commitAt` in broker.json: `systemd-run … --unit=torq-commit-at-<id>
     --on-calendar=<at> {broker} run-scheduled <id>`), then ledgers `apply_scheduled`: the proposal,
     the time, who, the timer's id, the base, and the hash of the diff approved;
   - at the time applies that proposal as that person: `applied` / `apply_failed` with `scheduled: <n>`.
-    It is refused, `apply_refused` with `scheduled: <n>`, if the configuration has moved on from the
-    base, a commit confirmed is waiting, the proposal was applied meanwhile, or the diff kept beside
+    It is refused, `apply_refused` with `scheduled: <n>`, if apply refuses it (on a configuration moved on
+    from the base, a change that would now do something different from what was shown, ADR-053), if
+    a commit confirmed is waiting, the proposal was applied meanwhile, or the diff kept beside
     the ledger is not the one whose hash was approved; or if it is more than 15 minutes past its time
     (asleep then, a clock stepped since, a broker busy all along), or its approver may no longer (no
     account by that name, not a person's, or not an administrator, unless the change is wholly their
@@ -476,9 +482,9 @@ viper@torq-utm# commit
   or an administrator's
   with their password): `apply_cancelled` in the ledger first, then the timer stopped. A run reads
   the ledger, so nothing outlives a cancel even if the timer could not be stopped.
-  `show system commit` lists it above the configurations: `Scheduled: #57 at … by viper: …`.
+  `show system commit` lists it above the configurations: `Scheduled: #57 at … by alice: …`.
 
-The first `commit` shows the comparison and the keys that will be able to log in as viper (it
+The first `commit` shows the comparison and the keys that will be able to log in as alice (it
 refuses if there are none), asks, and says when the change rolls back unless confirmed; the second
 confirms it.
 
@@ -554,7 +560,7 @@ system software rollback`, or a release without a version: dates, as before. `ro
 software loaded into the candidate (and says so); `rollback 0` starts over without it. Loading onto a
 candidate whose base is no longer the active configuration warns that `commit` will be refused.
 
-`show system commit` reads the ledger (4f) — through the broker, as a commit does (`sudo`: the
+`show system commit` reads the ledger (4f) — through the broker, as a commit does (over its socket: the
 ledger is root's, and stays unreadable to users) — its configurations, newest first, with who
 approved each; without the broker there are no numbers, rather than git's; `rollback <n>`, `show system rollback <n>`
 and `request system software rollback <n>` use the same numbers (`rollback 0`: what is active). `show packages` searches this machine's nixpkgs.
@@ -584,7 +590,7 @@ the running machine (/proc, `ip -j addr`, `df`, the system profiles, /etc/passwd
 - **Reading history** for `rollback <n>`: the config repo is world-readable, read with git plumbing
   (`-c safe.directory=… -c core.hooksPath=/dev/null -c core.fsmonitor=false`). Secrets never go in
   the config repo (they get their own mechanism later).
-- **The broker command is fixed**: `/run/wrappers/bin/sudo /run/current-system/sw/bin/torq-broker`.
+- **The broker is reached the one way**: the socket (ADR-040), or, run as root, `/run/current-system/sw/bin/torq-broker` by absolute path.
   `TORQ_BROKER` and `TORQ_CONFIG_REPO` overrides exist only in test builds, so nothing in your
   environment can redirect the command your next `commit` runs as root.
 - **Line editing**: a small line-editor crate for history, Tab and `?`.
@@ -645,7 +651,7 @@ The broker stays small; its additions for this model:
   system configuration, works from `/` (path arguments made absolute first) with umask 022. The
   fixed `PATH` starts with store paths of nix, git, coreutils, bash and systemd, so a
   change that drops one of them from the system cannot break its own `revert`; it takes the place
-  of a sudo `secure_path`. The CLI calls sudo and the broker by absolute path. Without root
+  of a sudo `secure_path`. The CLI calls the broker by absolute path. Without root
   (tests), flags apply.
 - User-tier files are an explicit allow-list in `policy.rs` (`USER_LEAVES`, kept in step with the
   module's): `users/<name>/packages.json` (`cli.json`, the CLI style, until ADR-021) — a leaf joins

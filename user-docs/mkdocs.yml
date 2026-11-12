@@ -7,7 +7,7 @@ site_description: Install, configure and run TorqOS, the operating system that i
 docs_dir: pages
 site_dir: site
 site_url: https://docs.torqos.org/
-repo_url: https://github.com/netstacks/torqos-releases
+repo_url: https://github.com/torqosorg/torqos-releases
 repo_name: torqos-releases
 edit_uri: ""
 copyright: TorqOS · Apache License 2.0 · Built on NixOS
@@ -49,7 +49,7 @@ extra:
       link: https://torqos.org
       name: torqos.org
     - icon: fontawesome/brands/github
-      link: https://github.com/netstacks/torqos-releases
+      link: https://github.com/torqosorg/torqos-releases
       name: TorqOS releases on GitHub
 
 extra_css:
@@ -83,6 +83,9 @@ nav:
       - The configuration: guide/configuration.md
       - Commit and roll back: guide/commit.md
       - Users, passwords and SSH: guide/users-ssh.md
+      - SSH tunnels: guide/ssh-tunnels.md
+      - The remote: guide/remote.md
+      - The desktop: guide/desktop.md
       - Updates: guide/updates.md
       - History and health: guide/history.md
       - The agent: guide/agent.md

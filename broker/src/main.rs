@@ -13,6 +13,7 @@ mod serve;
 
 use torq_broker::config::{self, Requested, Settings};
 use torq_broker::{ledger::Entry, policy::Actor, Broker, Busy};
+use torq_wire::socket::{BUSY, OK, REFUSED};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -79,6 +80,12 @@ enum Cmd {
     Backups,
     BackupKey { name: String, key_file: PathBuf, approved_by: String },
     BackupRestore { name: String, snapshot: Option<String>, path: String, approved_by: String },
+    SecretSet { name: String, user: Option<String>, value_file: PathBuf, approved_by: String },
+    SecretDelete { name: String, user: Option<String>, approved_by: String },
+    SecretShow { name: String, user: Option<String>, approved_by: String },
+    Secrets,
+    SecretUse { name: String, user: Option<String>, host: String, client_port: Option<u16>, server_port: Option<u16>, session: Option<String>, grant: Option<String>, ssh: bool },
+    SecretAgent { client_port: u16, server_port: u16, session: Option<String> },
     AdoptKey { url: String },
     AdoptInspect { url: String },
     Adopt { url: String, own: PathBuf, head: String, tip: String, user: String },
@@ -228,6 +235,12 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("backups").about("The backups the configuration declares (ADR-038): whether each has its key, the snapshots its repository holds, and how it last ran. Read only."))
         .subcommand(Command::new("backup-key").about("Keep a declared backup's key (its passphrase, read from a file) root's alone, outside the config repo, where its passwordFile points; ledgered without the key.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("key-file").long("key-file").required(true).value_parser(value_parser!(PathBuf))).arg(by()))
         .subcommand(Command::new("backup-restore").about("Put a path back from a declared backup (ADR-038): restic restores it where only root can reach it, then its owner writes it, what is there set aside; ledgered.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("snapshot").long("snapshot").help("A snapshot's id [default: latest].")).arg(Arg::new("path").long("path").required(true)).arg(by()))
+        .subcommand(Command::new("secret-use").about("For the secrets daemon alone (ADR-052): one use of a secret, judged by its rule, the caller read from the kernel's table of the loopback connection (or from the grant of its agent socket); its value printed.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(Arg::new("host").long("host").required(true)).arg(Arg::new("client-port").long("client-port").value_parser(value_parser!(u16))).arg(Arg::new("server-port").long("server-port").value_parser(value_parser!(u16))).arg(Arg::new("session").long("session")).arg(Arg::new("grant").long("grant").conflicts_with_all(["client-port", "server-port", "session"])).arg(Arg::new("ssh").long("ssh").action(ArgAction::SetTrue).help("A signature for SSH to the host, not an HTTPS request")))
+        .subcommand(Command::new("secret-agent").about("For the secrets daemon alone (ADR-052): an SSH agent socket granted to the one connected (read from the kernel), and the keys it may use (public halves only).").arg(Arg::new("client-port").long("client-port").required(true).value_parser(value_parser!(u16))).arg(Arg::new("server-port").long("server-port").required(true).value_parser(value_parser!(u16))).arg(Arg::new("session").long("session")))
+        .subcommand(Command::new("secrets").about("The secrets that have a value (ADR-052): whose, and their names. Never a value."))
+        .subcommand(Command::new("secret-set").about("Keep a secret's value (read from a file) encrypted, root's alone, outside the config repo: the system's, or with --user a person's own; ledgered without the value.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(Arg::new("value-file").long("value-file").required(true).value_parser(value_parser!(PathBuf))).arg(by()))
+        .subcommand(Command::new("secret-delete").about("Delete a secret's value (its rule stays the configuration's): ledgered.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(by()))
+        .subcommand(Command::new("secret-show").about("Print a secret's value, to the one who asked: on the record first.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(by()))
         .subcommand(Command::new("fetch-incoming").about("Fetch the remote's `incoming` branch into the config repo (refs/torq/incoming), for torqcli's `request system pull` to load into a candidate: nothing is applied."))
         .subcommand(Command::new("ledger-acknowledge").about("A person has looked into where the ledger and the repository disagree: said no more, and on the record.").arg(by()))
         .subcommand(Command::new("remote-clear").about("Clear the remote's alarm, having looked into it (ledgered): the next push checks the remote's whole history again, and raises it again if it is still true.").arg(by()))
@@ -290,6 +303,12 @@ fn parse_cli() -> Cli {
         "ledger-acknowledge" => Cmd::Acknowledge { approved_by: by(sub) },
         "fetch-incoming" => Cmd::FetchIncoming,
         "backups" => Cmd::Backups,
+        "secrets" => Cmd::Secrets,
+        "secret-use" => Cmd::SecretUse { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), host: s(sub, "host").unwrap_or_default(), client_port: sub.get_one::<u16>("client-port").copied(), server_port: sub.get_one::<u16>("server-port").copied(), session: s(sub, "session"), grant: s(sub, "grant"), ssh: sub.get_flag("ssh") },
+        "secret-agent" => Cmd::SecretAgent { client_port: *sub.get_one::<u16>("client-port").unwrap_or(&0), server_port: *sub.get_one::<u16>("server-port").unwrap_or(&0), session: s(sub, "session") },
+        "secret-set" => Cmd::SecretSet { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), value_file: p(sub, "value-file").unwrap_or_default(), approved_by: by(sub) },
+        "secret-delete" => Cmd::SecretDelete { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), approved_by: by(sub) },
+        "secret-show" => Cmd::SecretShow { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), approved_by: by(sub) },
         "backup-key" => Cmd::BackupKey { name: s(sub, "name").unwrap_or_default(), key_file: p(sub, "key-file").unwrap_or_default(), approved_by: by(sub) },
         "backup-restore" => Cmd::BackupRestore { name: s(sub, "name").unwrap_or_default(), snapshot: s(sub, "snapshot"), path: s(sub, "path").unwrap_or_default(), approved_by: by(sub) },
         "snapshots" => Cmd::Snapshots,
@@ -342,7 +361,7 @@ fn main() {
         } else {
             eprintln!("Error: {e:?}");
         }
-        std::process::exit(if busy { 75 } else { 1 });
+        std::process::exit(if busy { BUSY } else { REFUSED });
     }
 }
 
@@ -415,7 +434,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
     let writes = matches!(
         cli.cmd,
         Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. } | Cmd::SessionStart | Cmd::SessionTaint { .. } | Cmd::TrustGrant { .. } | Cmd::TrustRevoke { .. }
-            | Cmd::ExpireConfirm { .. } | Cmd::Schedule { .. } | Cmd::RunScheduled { .. } | Cmd::CancelScheduled { .. } | Cmd::ResumeScheduled | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. } | Cmd::BackupKey { .. } | Cmd::BackupRestore { .. }
+            | Cmd::ExpireConfirm { .. } | Cmd::Schedule { .. } | Cmd::RunScheduled { .. } | Cmd::CancelScheduled { .. } | Cmd::ResumeScheduled | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. } | Cmd::BackupKey { .. } | Cmd::BackupRestore { .. } | Cmd::SecretSet { .. } | Cmd::SecretDelete { .. } | Cmd::SecretShow { .. }
     );
     let _push = writes.then_some(PushAfter(&b, b.ledger.read_all().map_or(0, |l| l.len())));
     let sched = torq_broker::at::Scheduler::new(&b, &s.commit_at, &s.commit_at_cancel);
@@ -437,7 +456,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             (Some(p), false) if p.ok => println!("pushed: the remote has the configuration and {} ledger entries", p.entries),
             (Some(p), false) => {
                 println!("not pushed: {}", printable(p.error.as_deref().unwrap_or("?")));
-                std::process::exit(1);
+                std::process::exit(REFUSED);
             }
         },
         Cmd::AdoptKey { url } => {
@@ -469,7 +488,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             let c = b.verify_store()?;
             println!("{}", serde_json::to_string(&c)?);
             if !c.modified.is_empty() {
-                std::process::exit(1);
+                std::process::exit(REFUSED);
             }
         }
         Cmd::SnapshotTake { approved_by } => println!("{}", serde_json::to_string(&b.snapshot_now(&approved_by)?)?),
@@ -528,6 +547,53 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 return print_entry(&e);
             }
             println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        Cmd::Secrets => println!("{}", serde_json::to_string(&b.kept_secrets())?),
+        // Always JSON, as show is: the value for the daemon to put in one request, and nothing else.
+        Cmd::SecretUse { name, user, host, client_port, server_port, session, grant, ssh } => {
+            no_core()?;
+            use torq_broker::secrets::{Owner, Use};
+            // Who: the kernel's answer for the loopback connection, or the grant of the agent socket it came through
+            // (itself read from the kernel when that socket was asked for).
+            let (actor, session) = match (grant, client_port, server_port) {
+                (Some(g), None, None) => {
+                    let g = b.grant(&g)?;
+                    (g.actor, g.session)
+                }
+                (None, Some(c), Some(s)) => (connected(c, s)?.0, session),
+                _ => anyhow::bail!("refused: a use names its connection (--client-port and --server-port) or its grant"),
+            };
+            let u = Use { owner: Owner::of(user.as_deref())?, name, host, actor, session, ssh };
+            let g = b.use_secret(&u)?;
+            println!("{}", json!({ "value": g.value, "header": g.header, "prefix": g.prefix, "known": g.known, "actor": u.actor }));
+        }
+        Cmd::SecretAgent { client_port, server_port, session } => {
+            let (actor, uid) = connected(client_port, server_port)?;
+            let grant = b.grant_agent(&actor, uid, session.as_deref())?;
+            println!("{}", json!({ "grant": grant, "actor": actor, "uid": uid, "keys": b.ssh_keys_for(&actor) }));
+        }
+        Cmd::SecretSet { name, user, value_file, approved_by } => {
+            no_core()?;
+            let owner = torq_broker::secrets::Owner::of(user.as_deref())?;
+            let value = plain_file(&value_file, torq_broker::secrets::VALUE_MAX as u64 + 1, "the value")?;
+            let e = b.set_secret(&owner, &name, value.strip_suffix('\n').unwrap_or(&value), &approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        Cmd::SecretDelete { name, user, approved_by } => {
+            let e = b.delete_secret(&torq_broker::secrets::Owner::of(user.as_deref())?, &name, &approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        // Always JSON: a value is printed for a program to hand on, never mixed with words.
+        Cmd::SecretShow { name, user, approved_by } => {
+            no_core()?;
+            let (e, value) = b.show_secret(&torq_broker::secrets::Owner::of(user.as_deref())?, &name, &approved_by)?;
+            println!("{}", json!({ "seq": e.body.seq, "value": value }));
         }
         Cmd::BackupRestore { name, snapshot, path, approved_by } => println!("{}", serde_json::to_string(&b.restore_backup(&name, snapshot.as_deref(), &path, &approved_by)?)?),
         Cmd::Password { user, hash_file, approved_by } => {
@@ -718,7 +784,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 // Mid-operation, pending.json exists and the tree may be half-applied: reporting
                 // `interrupted` or `dirty` now would describe a running change as a broken one.
                 println!("{}", json!({ "ok": false, "busy": s.busy, "problems": [] }));
-                std::process::exit(75);
+                std::process::exit(BUSY);
             }
             if json {
                 println!(
@@ -747,11 +813,11 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                         "trust": torq_broker::session::active(&b.ledger.read_all().unwrap_or_default()),
                     })
                 );
-                std::process::exit(if s.busy.is_some() { 75 } else if problems.is_empty() { 0 } else { 1 });
+                std::process::exit(if s.busy.is_some() { BUSY } else if problems.is_empty() { OK } else { REFUSED });
             }
             if let Some(who) = &s.busy {
                 println!("a broker operation is running ({who}); not checked — try again when it is done");
-                std::process::exit(75); // EX_TEMPFAIL: "busy" without parsing the text
+                std::process::exit(BUSY); // EX_TEMPFAIL: "busy" without parsing the text
             }
             let or = |v: &Option<String>, none: &str| v.clone().unwrap_or_else(|| none.to_string());
             println!("ledger          {}", match &s.ledger { Ok(n) => format!("OK, {n} entries"), Err(e) => e.clone() });
@@ -776,7 +842,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 for p in &problems {
                     println!("PROBLEM: {p}");
                 }
-                std::process::exit(1);
+                std::process::exit(REFUSED);
             }
         }
     }
@@ -832,4 +898,34 @@ impl Drop for PushAfter<'_> {
             let _ = self.0.sync_remote();
         }
     }
+}
+
+/// While it holds a secret's value (ADR-052), the broker leaves no core: not dumpable, so nothing of its memory
+/// is written or read out, and no core for what it runs either (systemd-creds), whose limit it inherits —
+/// systemd-coredump keeps nothing of a process whose limit is 0.
+fn no_core() -> Result<()> {
+    use rustix::process::{set_dumpable_behavior, setrlimit, DumpableBehavior, Resource, Rlimit};
+    set_dumpable_behavior(DumpableBehavior::NotDumpable).context("protecting the value")?;
+    setrlimit(Resource::Core, Rlimit { current: Some(0), maximum: Some(0) }).context("protecting the value")?;
+    Ok(())
+}
+
+/// Who holds the client end of the loopback connection from `client` to the secrets daemon at `server`, by the
+/// kernel's own table (ADR-052): that account and its uid. Both ends are read: the other must be the daemon's.
+fn connected(client: u16, server: u16) -> Result<(String, u32)> {
+    use torq_broker::secrets::uid_of_connection;
+    use torq_wire::secrets::{DAEMON, PORT};
+    if server != PORT {
+        anyhow::bail!("refused: a use is of a connection to the secrets daemon's port ({PORT})");
+    }
+    let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
+    let tables = format!("{}{}", read("/proc/net/tcp"), read("/proc/net/tcp6"));
+    let (passwd, group) = (read("/etc/passwd"), read("/etc/group"));
+    let account = |uid: u32| torq_broker::socket::caller(uid, &passwd, &group).map(|c| c.name);
+    let daemon = uid_of_connection(&tables, server, client).map(account).transpose()?;
+    if daemon.as_deref() != Some(DAEMON) {
+        anyhow::bail!("refused: no connection from 127.0.0.1:{client} to the secrets daemon");
+    }
+    let uid = uid_of_connection(&tables, client, server).context("refused: the connection has gone")?;
+    Ok((account(uid)?, uid))
 }

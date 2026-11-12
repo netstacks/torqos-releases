@@ -6,7 +6,7 @@
    generation and a ledger entry; the ledger is hash-chained and verified.
 2. **The AI can never touch the trust layer.** The ledger, the broker's settings, AI permissions
    and boot keys are user-only, changed by a person at a terminal.
-3. **Thin.** Few services, no display server; what is not installed cannot be attacked.
+3. **Thin.** Few services, and no display server in the base (the desktop is opt-in); what is not installed cannot be attacked.
 
 ## Later: owner-rooted boot security
 
@@ -106,23 +106,29 @@ tell a person from a program at a root shell — nothing can.
   command that checks it (INSTALL.md); and each release's source, a git commit the key signed.
   `request system update` takes only a commit signed (an SSH signature; OpenPGP and X.509 ones are
   refused) with the key the machine was installed with (`/etc/torq/release-signers`), checked by
-  torqcli before the update enters the candidate. Not yet covered (audit of 2026-11-04, KNOWN-GAPS):
-  a lock someone else wrote — a proposal by hand, later the agent's — whose content hash points at
-  other source than the signed commit (A2: the broker re-fetching and checking it is M3), and the
-  machine refusing an older release by itself (A3: CI refuses to move `stable` back).
+  torqcli before the update enters the candidate. A2 of the audit of 2026-11-04 (a lock someone else
+  wrote, whose content hash points at other source than the signed commit) is covered: before it
+  builds a commit that changes `flake.lock`, the broker fetches each changed input again by its `rev`,
+  compares the hash, and checks that TorqOS's own releases are signed by the release key
+  (`broker/src/inputs.rs`, `tests/release-path.nix`; the audit of 2026-11-08 closed two ways round it,
+  KNOWN-GAPS 6zs). Not covered, A3: the machine refusing an older release by itself (CI refuses to
+  move `stable` back, and `show | compare` names both versions).
 
 ## Threat model
 
-| Threat | Primary defence | Notes |
-|---|---|---|
-| Stolen machine | LUKS2 full-disk encryption | TPM2 + PIN, recovery key shown once at install |
-| Evil maid (boot files tampered while away) | Owner-key Secure Boot + measured boot | Disk won't unseal if PCRs change |
-| Firmware keys reset to factory | Firmware admin password; PCR 7 change → disk stays locked | `show system alarms` warns |
-| Malware during a session | read-only /nix/store, few services, sandboxed services | |
-| Malware persistence across boots | Signed UKIs only; config rebuilt from repo | Optional impermanence later |
-| Prompt injection steering the AI | Broker tiers + taint tracking | Untrusted-content-derived actions need per-step approval |
-| Compromised signing key on device | Only the db key lives on device (broker-only, TPM-sealed); PK/KEK exported offline then deleted | |
-| Secure Boot bypass vulns (BlackLotus, LogoFAIL class) | fwupd firmware + dbx updates, applied via broker | |
+Status (2026-11-11): **built** = in the code and tested; **opt-in** = built and off by default; **not built** = designed only. Disk encryption, Secure Boot, the TPM and sandboxed services are not built.
+
+| Threat | Primary defence | Status | Notes |
+|---|---|---|---|
+| Stolen machine | LUKS2 full-disk encryption | not built | TPM2 + PIN, recovery key shown once at install. Today a stolen disk is readable |
+| Evil maid (boot files tampered while away) | Owner-key Secure Boot + measured boot | not built | Disk won't unseal if PCRs change. Only the boot menu's editor is off (built) |
+| Firmware keys reset to factory | Firmware admin password; PCR 7 change → disk stays locked | not built | `show system alarms` warns |
+| Malware during a session | read-only /nix/store, few services, sandboxed services | partly: the store is read-only and few services run (built); sandboxed services not built | The broker's units are not sandboxed (KNOWN-GAPS N5) |
+| Malware persistence across boots | Signed UKIs only; config rebuilt from repo | config rebuilt from the repository: built. Signed UKIs: not built | Optional impermanence later |
+| Prompt injection steering the AI | Broker tiers + taint tracking | built, with limits | Untrusted-content-derived actions need per-step approval. Taint is what TorqOS's own doctor reports; another program run as the agent can simply not report (KNOWN-GAPS 6zq) |
+| Compromised signing key on device | Only the db key lives on device (broker-only, TPM-sealed); PK/KEK exported offline then deleted | not built | Needs Secure Boot and the TPM |
+| Secure Boot bypass vulns (BlackLotus, LogoFAIL class) | fwupd firmware + dbx updates, applied via broker | not built | |
+| A ledger rewritten by root on the machine | Pushing the configuration and ledger to a remote | opt-in | Off by default; without it the hash chain only detects partial edits (KNOWN-GAPS 2) |
 
 ## Secure Boot: owner keys, no Microsoft
 
@@ -156,7 +162,7 @@ Hardware guidance: integrated-graphics machines are lowest risk for removing Mic
 
 - Kernel lockdown is asked for (integrity), but this kernel has no lockdown module loaded, so it does
   nothing yet (KNOWN-GAPS 6); modules are not signature-checked.
-- No display server by default.
+- No display server in the base; the opt-in desktop (COSMIC) adds one.
 - Minimal enabled services. TorqOS's own services are not yet sandboxed beyond what systemd does by
   default (`torq-broker-init` only; audit N5).
 - `nix.settings.allowed-users` is root and wheel: the owner can build anything, and root can switch

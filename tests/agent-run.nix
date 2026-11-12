@@ -19,6 +19,8 @@ pkgs.testers.runNixOSTest {
     users.users.sam = { isNormalUser = true; hashedPasswordFile = lib.mkForce null; hashedPassword = "!"; };
     torq.broker.rebuildCommand = "true";
     environment.systemPackages = [ pkgs.socat pkgs.jq pkgs.bubblewrap ];
+    # Room for the many files the sweep race below walks (the default disk runs out of inodes at ~75k).
+    virtualisation.diskSize = 4096;
   };
 
   testScript = ''
@@ -125,6 +127,19 @@ pkgs.testers.runNixOSTest {
         out = agent("cp /run/current-system/sw/bin/true ./sid && chmod 4755 ./sid && stat -c %a ./sid", share="/home/dev/src/project")
         assert "set-id bits taken off" in out and "sid" in out, out
         assert machine.succeed("stat -c %a /home/dev/src/project/sid").strip() == "755"
+
+    with subtest("the sweep cannot be led out of the folder by a link (KNOWN-GAPS 6zz)"):
+        # The agent leaves a set-id file named sudo in a folder with many others (a long walk for find); the
+        # moment the sweep starts, the person swaps that folder for a link to sudo's wrapper's own. find has
+        # the path already and chmod goes by it again: as root, it would take the bits off sudo's wrapper.
+        wrapper = "/run/wrappers/bin/sudo"
+        mode = machine.succeed(f"stat -c %a {wrapper}").strip()
+        assert mode.startswith(("4", "6")), mode
+        machine.succeed("su - dev -c 'cd ~/src/project && (until pgrep -x find > /dev/null; do :; done; mv d d.real && ln -s /run/wrappers/bin d) > /dev/null 2>&1 &'")
+        agent("mkdir d && cd d && cp /run/current-system/sw/bin/true sudo && chmod 4755 sudo && seq 200000 | xargs touch", share="/home/dev/src/project")
+        machine.succeed("test -L /home/dev/src/project/d")  # the swap happened while the sweep ran
+        assert machine.succeed(f"stat -c %a {wrapper}").strip() == mode, "the sweep changed sudo's wrapper"
+        machine.succeed("rm -rf /home/dev/src/project/d /home/dev/src/project/d.real")
     with subtest("a sandbox of its own still runs inside (as Claude Code's does)"):
         out = agent("bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --die-with-parent sh -c 'id -un; echo nested'")
         assert "nested" in out, out

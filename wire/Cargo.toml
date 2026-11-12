@@ -1,0 +1,11 @@
+[package]
+name = "torq-wire"
+version = "0.4.0"
+edition = "2021"
+description = "What crosses between TorqOS's programs: the broker's socket and its ledger's words (ADR-044)"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

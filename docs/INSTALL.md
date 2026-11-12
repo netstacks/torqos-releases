@@ -1,15 +1,17 @@
-# Install: the TorqOS image and first-boot setup (M2)
+# Install: the TorqOS image and first-boot setup
 
-Status: **design, being built** (ROADMAP M2; ADR-023; SECURITY-MODEL.md, "Accounts and passwords",
-agreed 2026-11-01). Nobody builds TorqOS to install it: a release is an image to download, check and
-boot.
+Status: **built** (M2, released as v0.2.0, and changed since by M3.5: setup's network step and its
+repository question; ADR-023, ADR-031, ADR-048; SECURITY-MODEL.md, "Accounts and passwords").
+Nobody builds TorqOS to install it: a release is an image to download, check and boot. Not built
+yet: the console UI for the installer and setup, an answers file for unattended installs, recipes,
+and the installer's other ways (ROADMAP M3.5).
 
 ## From download to a running machine
 
 1. **The project builds a release** (ADR-028): the images (`torqos-<arch>.qcow2`,
-   `torqos-<arch>.vmdk.gz`, and the installer `torqos-<arch>.iso`), their checksums (`SHA256SUMS`), and a signature of that
+   `torqos-<arch>.vmdk.gz`, and the installer `torqos-<arch>.iso`; x86_64 only since v0.3.0), their checksums (`SHA256SUMS`), and a signature of that
    file made with the TorqOS release key (`SHA256SUMS.sig`), with the key (`allowed_signers`).
-   Plain files on the release page of `netstacks/torqos-releases`: no service.
+   Plain files on the release page of `torqosorg/torqos-releases`: no service.
 2. **Someone downloads and (optionally) checks it**, with OpenSSH and coreutils:
    ```
    ssh-keygen -Y verify -f allowed_signers -I torqos-release -n file -s SHA256SUMS.sig < SHA256SUMS
@@ -21,7 +23,13 @@ boot.
 3. **They boot it.** The image is a complete TorqOS — the same modules as any TorqOS machine — with
    no user account: `root` is locked, SSH is off, nothing listens. The console shows setup instead of
    a login prompt.
-4. **Setup asks, once**, like a network device's initial configuration dialog:
+4. **Setup asks, once**, like a network device's initial configuration dialog. First the network
+   (cli/src/network.rs): a machine already online (a cable) says so and goes on; otherwise setup
+   lists the Wi-Fi networks it sees (the image brings the radio up from the firmware it carries)
+   and joins the one chosen with iwd, or the person skips it, and TorqOS installs without a network.
+   Then, only online, how the machine starts: as a new machine, or from a repository, which it adopts
+   (ADR-036): the repository's SSH URL, a deploy key to add to it, what setup found in it shown for
+   confirmation, the owner's password asked again, change #1 (tests/adopt.nix). A new machine asks:
    - the machine's name and time zone;
    - the owner's user name and password (twice);
    - how to log in remotely: not at all (the default: Enter turns nothing on), by password, by SSH
@@ -35,9 +43,10 @@ boot.
    repo over: it builds it first (a configuration that does not build changes nothing, and setup
    asks again), switches to it, and records change #1, "TorqOS set up", with the system it switched
    to. The broker runs as a service of its own, so the switch (which brings back the console's
-   login prompt) cannot cut it short. A machine is set up once its history has change #1: a setup
-   cut short before its switch, by a power cut mid-build say, runs again at the next boot and
-   starts clean; the image never takes over a repo by itself. Cut short after its switch, the
+   login prompt) cannot cut it short. On real hardware the broker's unit then restarts the machine.
+   A machine is set up once its history has change #1: a setup
+   cut short before its switch, by a power cut mid-build say, runs again at the next boot, from the
+   network step, and starts clean (what it left is removed: cli/src/setup.rs, broker `set_up`); the image never takes over a repo by itself. Cut short after its switch, the
    machine starts its new system with no history yet: setup kept a record of what it was doing
    (`/var/lib/torq/state/setup.json`, written before the repo had a history), and the new
    system's first start (`torq-broker-init`) finishes it — change #1 for setup's own commit and
@@ -51,7 +60,7 @@ boot.
 The image is one EFI disk; first-boot setup is on its console (give the VM a display). The disk is
 small (about 6 GB): give the VM a bigger one, and the root file system grows to fill it at boot.
 
-- **UTM, QEMU, Proxmox:** `torqos-<arch>.qcow2` (`nix build .#image`), as it is, UEFI firmware.
+- **UTM, QEMU, Proxmox:** `torqos-x86_64-linux.qcow2` (`nix build .#image`), as it is, UEFI firmware.
 - **VMware ESXi** (x86_64): `torqos-x86_64-linux.vmdk` (a release has it gzipped: `gunzip` it first;
   or `nix build .#image-vmdk`, or the `image` workflow's artifact), a sparse VMDK, which ESXi copies
   into a disk of its own:
@@ -97,8 +106,9 @@ machine builds itself from its configuration (ADR-019); TorqOS (torqcli, the bro
 nano, `file edit`'s editor, with NixOS's core commands (coreutils, curl, ssh and the like). git is
 its minimal build; there are no man pages or other manuals, no htop or jq (a configuration adds
 them: `set environment systemPackages [ htop ]`), and no NixOS tools for changing a machine — the broker builds and switches (ADR-032). No
-NetworkManager (systemd-networkd, DHCP on wired interfaces). About 1.2 GB installed; the download
-is compressed.
+NetworkManager (systemd-networkd, DHCP on wired interfaces; Wi-Fi is iwd's, and the desktop, when
+turned on, uses NetworkManager with iwd as its backend). About 1.2 GB installed (`checks.x86_64-linux.size`
+holds a new machine's system under 1280 MB); the download is compressed.
 
 ## Where a machine's TorqOS comes from
 
@@ -107,7 +117,7 @@ machine starts from the TorqOS **inside the image**: its own source, in the read
 hash in the config repo's `flake.lock` — so setup needs no network for TorqOS itself. A `path:`
 source is allowed outside dev mode only there, in the store: nothing can change it (a folder anyone
 can write to stays a dev-mode source). The first `request system update` moves the machine to
-TorqOS's releases (`git+https://github.com/netstacks/torqos-releases?ref=stable`, ADR-028); every
+TorqOS's releases (`git+https://github.com/torqosorg/torqos-releases?ref=stable`, ADR-028); every
 update after takes the newest release on `stable`, and only one signed with the release key the
 machine was installed with (`/etc/torq/release-signers`): anything else is refused before it is
 loaded.
@@ -147,7 +157,7 @@ needs only what differs from the image (the host name, the user): usually nothin
 Done (2026-11-01; tried end to end in QEMU: the image boots to setup, setup switches, the owner
 logs in, change #1 is in the history and `show system alarms` is clean):
 
-1. The image: a qcow2 of the factory system that boots in UTM/QEMU (aarch64 first); x86_64 and
+1. The image: a qcow2 of the factory system that boots in QEMU; x86_64 and (until v0.2.0) aarch64 images, and
    a VMDK for ESXi built by CI (the `image` workflow), 2026-11-02.
 2. Setup on the console (`torqcli setup`, as root, on the image only, until change #1).
 3. Passwords outside the repo, and `request system password`; existing passwords carried over.
@@ -155,10 +165,10 @@ logs in, change #1 is in the history and `show system alarms` is clean):
 5. The image's own TorqOS as the config repo's source (`path:` in the store, locked: exactly
    `/nix/store/<hash>-<name>`, nothing after it).
 
-Next:
+Also built, after those:
 
 6. The release (ADR-028): built and signed by CI on a tag, published in
-   `netstacks/torqos-releases`; machines update to it, signature checked. *Built 2026-11-02.*
+   `torqosorg/torqos-releases`; machines update to it, signature checked. *Built 2026-11-02.*
 7. A VM test (tests/image.nix, 2026-11-02): the image boots to setup with nothing listening; setup,
    typed on the console, records change #1; the first update moves the machine to signed
    releases, served over HTTPS; a release the key did not sign is refused. (Commits and

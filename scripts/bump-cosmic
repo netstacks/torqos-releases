@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Move COSMIC to the newest nixos-unstable (ADR-045, amended): the flake input, and the two NixOS modules
+# TorqOS carries as that nixpkgs has them (checks.cosmic-modules holds them to it).
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+nix flake update nixpkgs-cosmic
+src=$(nix eval --raw --impure --expr '(builtins.getFlake (toString ./.)).inputs.nixpkgs-cosmic.outPath')
+install -m 644 "$src/nixos/modules/services/desktop-managers/cosmic.nix" modules/cosmic/cosmic.nix
+install -m 644 "$src/nixos/modules/services/display-managers/cosmic-greeter.nix" modules/cosmic/cosmic-greeter.nix

@@ -1,0 +1,39 @@
+[package]
+name = "torq-settings"
+version = "0.3.2"
+edition = "2024"
+description = "TorqOS Settings: torqcli in a COSMIC window, TorqOS in its panel, and SSH tunnels (ADR-045 2, ADR-049, ADR-050)"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1"
+# The command line's own calls and words (cli/src/app.rs): what the window shows is what torqcli prints.
+torq = { path = "../cli" }
+# COSMIC's notifications, from the panel's applet (ADR-049 4).
+zbus = "5"
+
+# COSMIC's toolkit, at the revision COSMIC's own Settings 1.11.0 uses (the desktop's, ADR-045 amended).
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic"
+rev = "430f3d48a97d8779f9c1985473912e594ccca1ae"
+default-features = false
+features = ["winit", "tokio", "dbus-config", "multi-window", "applet"]
+
+# The window, and TorqOS in COSMIC's panel (ADR-049).
+[[bin]]
+name = "torq-settings"
+path = "src/main.rs"
+
+[[bin]]
+name = "torq-applet"
+path = "src/applet.rs"
+
+# The person's SSH tunnels (ADR-050): what their unit runs, and the panel applet.
+[[bin]]
+name = "torq-tunnel"
+path = "src/tunnel.rs"
+
+[[bin]]
+name = "torq-tunnels"
+path = "src/tunnels.rs"

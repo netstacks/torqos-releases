@@ -20,6 +20,7 @@ pub mod inputs;
 pub mod ledger;
 pub mod policy;
 pub mod repo;
+pub mod secrets;
 pub mod session;
 pub mod socket;
 
@@ -74,6 +75,8 @@ pub struct Broker {
     agent_limits: agent::Limits,
     /// The backups the configuration declares, and where their keys are (ADR-038, backup.rs).
     backup: backup::Backups,
+    /// Where the values of the secrets are, and what encrypts them (ADR-052, secrets.rs).
+    secrets: secrets::Store,
     /// The config repo's remote, if the owner named one (ADR-036).
     remote: Option<String>,
 }
@@ -208,6 +211,8 @@ pub const AGENT_MAX_DIFF: u64 = 1 << 20;
 /// once, its refusals ledgered in an hour.
 pub const AGENT_REASON_MAX: usize = 200;
 pub const AGENT_WAITING_MAX: usize = 20;
+/// How many of the agent's newest proposals not yet applied are judged for the waiting count.
+pub const AGENT_WAITING_LOOK: usize = 100;
 pub const AGENT_REFUSALS_AN_HOUR: usize = 30;
 
 /// How often the rollback of an unconfirmed commit may fail to take before it is ledgered as not
@@ -615,6 +620,7 @@ impl Broker {
             people: Vec::new(),
             agent_limits: agent::Limits::default(),
             backup: backup::Backups::default(),
+            secrets: secrets::Store::default(),
             remote: None,
         }
     }
@@ -1309,6 +1315,14 @@ impl Broker {
         }
     }
 
+    /// Whether the change from `before` to `after` leaves the system as it is: only files no module reads,
+    /// each there before and after. A new one may make a person's folder, which the build checks names a
+    /// person on this machine: that one is built.
+    fn builds_nothing(&self, files: &[String], before: &str, after: &str) -> bool {
+        !files.is_empty()
+            && files.iter().all(|f| policy::builds_nothing(f) && self.repo.size_at(before, f).is_some() && self.repo.size_at(after, f).is_some())
+    }
+
     fn with_system(&self, mut data: serde_json::Value) -> serde_json::Value {
         data["system"] = self.running_system().into();
         data
@@ -1743,26 +1757,67 @@ impl Broker {
     /// NixOS module reading the file is still the authority on what the data means; this makes sure
     /// it is the right kind of data, refused now rather than failing the rebuild.
     fn check_user_data(&self, diff_path: &Path, files: &[String]) -> Result<()> {
-        let user: Vec<String> = files.iter().filter(|f| policy::is_user_data(f)).cloned().collect();
-        if user.is_empty() {
+        let (paths, most) = Self::data_files(files);
+        if paths.is_empty() {
             return Ok(());
         }
-        for (path, file) in self.repo.proposed_files(diff_path, &user, USER_DATA_MAX)? {
-            let Some(f) = file else { continue };
-            let leaf = path.rsplit('/').next().unwrap_or_default();
-            let data = f.mode == "100644"
-                && f.size <= USER_DATA_MAX
-                && serde_json::from_slice::<serde_json::Value>(&f.content).is_ok_and(|v| policy::user_leaf_ok(leaf, &v));
-            if !data {
-                bail!(
-                    "refused: {path} must be a regular file holding {} of at most {} KiB",
-                    match leaf {
-                        "packages.json" => format!("a JSON list of package names (at most {})", policy::MAX_USER_PACKAGES),
-                        _ => "JSON data".to_string(),
-                    },
-                    USER_DATA_MAX / 1024
-                );
+        for (path, file) in self.repo.proposed_files(diff_path, &paths, most)? {
+            if let Some(f) = file {
+                Self::data_ok(&path, &f)?;
             }
+        }
+        Ok(())
+    }
+
+    /// The same, of `files` as HEAD has them: what an undo leaves, which git writes, not a diff (an undo
+    /// of a person's own change needs no one's approval, so it is no way around these rules either).
+    fn check_user_data_at_head(&self, files: &[String]) -> Result<()> {
+        let (paths, most) = Self::data_files(files);
+        for path in &paths {
+            if let Some(f) = self.repo.file_at("HEAD", path, most)? {
+                Self::data_ok(path, &f)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Which of `files` are data checked by `data_ok`, and the most bytes one of them may be.
+    fn data_files(files: &[String]) -> (Vec<String>, u64) {
+        let rules = torq_wire::secrets::SYSTEM_RULES;
+        let paths: Vec<String> = files.iter().filter(|f| f.as_str() == rules || policy::is_user_data(f)).cloned().collect();
+        let most = paths
+            .iter()
+            .map(|p| if p == rules { torq_wire::secrets::MAX_FILE } else { policy::user_leaf_max(p.rsplit('/').next().unwrap_or_default()) })
+            .max()
+            .unwrap_or(USER_DATA_MAX);
+        (paths, most)
+    }
+
+    /// One data file as a change would leave it: the system's secrets' rules, or a person's file.
+    fn data_ok(path: &str, f: &repo::ProposedFile) -> Result<()> {
+        // The system's secrets' rules (ADR-052): their daemon reads them, so they are checked as a person's are.
+        if path == torq_wire::secrets::SYSTEM_RULES {
+            if f.mode != "100644" {
+                bail!("refused: {path} must be a regular file");
+            }
+            return torq_wire::secrets::parse(&f.content).map(drop).map_err(|why| anyhow::anyhow!("refused: {path}: {why}"));
+        }
+        let leaf = path.rsplit('/').next().unwrap_or_default();
+        let data = f.mode == "100644"
+            && f.size <= policy::user_leaf_max(leaf)
+            && serde_json::from_slice::<serde_json::Value>(&f.content).is_ok_and(|v| policy::user_leaf_ok(leaf, &v))
+            // A person's secrets' rules as every reader takes them, from the bytes: a name twice is refused (ADR-052).
+            && (leaf != torq_wire::secrets::PERSON_RULES || torq_wire::secrets::parse_person(&f.content).is_ok());
+        if !data {
+            bail!(
+                "refused: {path} must be a regular file holding {} of at most {} KiB",
+                match leaf {
+                    "packages.json" => format!("a JSON list of package names (at most {})", policy::MAX_USER_PACKAGES),
+                    "desktop.json" => "COSMIC's own settings (com.system76.*) as JSON, no other program's".to_string(),
+                    _ => "JSON data".to_string(),
+                },
+                policy::user_leaf_max(leaf) / 1024
+            );
         }
         Ok(())
     }
@@ -1806,9 +1861,10 @@ impl Broker {
     }
 
     /// Propose a change prepared against the configuration at commit `base`. It is refused now if
-    /// the configuration has moved on since, and again at `apply` if it moves before then: applied
-    /// on top of a newer configuration, a change prepared against an older one can silently undo or
-    /// mix with the commit in between. Without a base, the diff is applied wherever it applies.
+    /// the configuration has moved on since: applied on top of a newer configuration, a change
+    /// prepared against an older one can silently undo or mix with the commit in between. If it moves
+    /// before `apply`, apply re-checks it there and goes ahead only if it does exactly what was shown
+    /// (ADR-053). Without a base, the diff is applied wherever it applies.
     pub fn propose_on(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
         self.propose_in(base, diff_path, reason, actor, tainted, None)
     }
@@ -2030,19 +2086,33 @@ impl Broker {
                 bail!("refused: the agent's reason is at most {AGENT_REASON_MAX} characters");
             }
             let entries = self.ledger.read_all()?;
-            // Only those still able to land: an agent's proposal carries its base, and one prepared
-            // against an older configuration can never be applied (the second review).
-            let head = self.repo.head().ok();
+            // Only those still able to land (the second review): on their base, or, since ADR-053, on
+            // a head that has moved on, if they would still do there exactly what was shown — judged as
+            // apply judges it. Not by base alone: the desktop's own saves move the head every quarter of
+            // an hour, and each would empty the count (the review of the desktop line, 2026-11-10).
+            // Newest first, no further than the limit, and among the newest AGENT_WAITING_LOOK not yet
+            // applied: each one judged costs git runs under the lock, and the dead ones of a machine's
+            // whole life are not judged again on every proposal. Older ones pass out of the count only
+            // as newer ones stop being able to land, which takes a person's commits (the review).
             let done: std::collections::HashSet<u64> = entries
                 .iter()
                 .filter(|e| matches!(e.body.kind.as_str(), "applied" | "apply_failed"))
                 .filter_map(|e| e.body.data["proposal"].as_u64())
                 .collect();
-            let waiting = entries
+            let mut waiting = 0;
+            for p in entries
                 .iter()
+                .rev()
                 .filter(|p| p.body.kind == "proposal" && p.body.actor == "agent" && !done.contains(&p.body.seq))
-                .filter(|p| head.is_some() && p.body.data["base"].as_str() == head.as_deref())
-                .count();
+                .take(AGENT_WAITING_LOOK)
+            {
+                if self.could_still_land(p)? {
+                    waiting += 1;
+                    if waiting >= AGENT_WAITING_MAX {
+                        break;
+                    }
+                }
+            }
             if waiting >= AGENT_WAITING_MAX {
                 bail!("refused: {waiting} of the agent's proposals are waiting for a person already (at most {AGENT_WAITING_MAX})");
             }
@@ -2143,6 +2213,51 @@ impl Broker {
             );
         }
         Ok(())
+    }
+
+    /// A waiting proposal approved on a configuration that has moved on from its base (ADR-053): its
+    /// diff (at `diff_path`) applied to the current head as `propose` applies it, by the same function,
+    /// must do byte for byte what was recorded and shown — its `effect`, by the hash its entry holds.
+    /// Otherwise refused, never judged again. None: the head is its base (or it names none: H1's
+    /// files-and-tier check is what holds a base-less one); Some(head): re-checked on that head.
+    fn recheck_on_head(&self, p: &Entry, diff_path: &Path) -> Result<Option<String>> {
+        let Some(base) = p.body.data["base"].as_str() else { return Ok(None) };
+        let head = self.repo.head()?;
+        if head == base {
+            return Ok(None);
+        }
+        // A diff that no longer applies does something different too: nothing.
+        let now = self.repo.proposal_effect(diff_path).ok();
+        let same = match (now, p.body.data["effect_sha256"].as_str()) {
+            (Some(now), Some(sha)) => hex::encode(Sha256::digest(now.as_bytes())) == sha,
+            // As the ledger once kept it, in the entry.
+            (Some(now), None) => p.body.data["effect"].as_str() == Some(now.as_str()),
+            (None, _) => false,
+        };
+        if !same {
+            bail!(
+                "refused: proposal {} would now do something different from what was shown: the configuration \
+                 has changed since this change was prepared (prepared on {base}, now at {head}); prepare it again \
+                 from the current configuration",
+                p.body.seq
+            );
+        }
+        Ok(Some(head))
+    }
+
+    /// Whether an agent's waiting proposal could still be applied, judged as apply judges it: its diff
+    /// kept here, its effect re-checked on the current head if that has moved (`recheck_on_head`), and
+    /// the agent's list as it is now (`agent_check`), so narrowing the list frees the agent's slots
+    /// (the review of the fix). Writing its diff to judge it is the one error: the caller refuses.
+    fn could_still_land(&self, p: &Entry) -> Result<bool> {
+        let Ok(diff) = self.proposal_text(p, "diff") else { return Ok(false) };
+        let tmp = DropFile(self.state_dir.join(format!("waiting-{}.diff", p.body.seq)));
+        fs::write(&tmp.0, &diff)?;
+        if self.recheck_on_head(p, &tmp.0).is_err() {
+            return Ok(false);
+        }
+        let Ok(files) = self.repo.diff_files(&tmp.0) else { return Ok(false) };
+        Ok(matches!(self.agent_check(&tmp.0, &files), Ok(Ok(_))))
     }
 
     fn find_child(&self, kind: &str, key: &str, seq: u64) -> Result<Option<Entry>> {
@@ -2588,20 +2703,21 @@ impl Broker {
             );
         }
         let diff = self.proposal_text(&p, "diff")?;
-        if let Some(base) = p.body.data["base"].as_str() {
-            self.refuse_stale_base(base)?;
-        }
 
         // Re-validate against the current repo state (it may have changed since proposing).
         // Gone however this ends (the review of 0.2.1, L1).
         let tmp = DropFile(self.state_dir.join(format!("proposal-{proposal_seq}.diff")));
         let tmp = &tmp.0;
         fs::write(tmp, &diff)?;
+        // Moved on from its base (a desktop saved meanwhile, say): applied only if it does exactly what
+        // was shown (ADR-053); then its files, tier and the agent's list are judged again below, as always.
+        let rechecked_on = self.recheck_on_head(&p, tmp)?;
         let files = self.repo.diff_files(&tmp)?;
         self.check_user_data(&tmp, &files)?;
         let tier = policy::tier_for_paths(&files);
         let actor = if p.body.actor == "agent" { Actor::Agent } else { Actor::User };
         policy::check_allowed(tier)?;
+        policy::check_secret_rules(files.iter().map(String::as_str), approved_by)?;
         // What was judged is what is applied. The gate decided on the proposal's tier and files, as they
         // were on the commit it was made on, and a diff means what it does at HEAD: nothing there can be
         // something here (the audit of M3, H1). Refused, never judged again: a proposal is to be made anew.
@@ -2698,6 +2814,8 @@ impl Broker {
                     "boot_id": self.boot_id(),
                 })))
                 .map_err(|e| (e, Some(anchor))),
+            // Nothing to build: the system running is the one this commit describes (its other files unchanged).
+            (None, _) if self.builds_nothing(&files, &before, &commit) => Ok(None),
             _ => self.rebuild(&lock, &commit).map(|()| None).map_err(|e| (e, None)),
         };
         let confirm_record = match activated {
@@ -2726,6 +2844,10 @@ impl Broker {
         let mut data = at::note(with_snapshot(json!({ "proposal": proposal_seq, "commit": commit, "files": files }), &snapshot), scheduled);
         if let Some(c) = confirm_record {
             data["confirm"] = c;
+        }
+        // The history says it landed on a configuration other than the one it was prepared on (ADR-053).
+        if let Some(head) = rechecked_on {
+            data["rechecked_on"] = head.into();
         }
         let e = self.ledger.append(NewEntry {
             actor: p.body.actor.clone(),
@@ -3009,6 +3131,7 @@ impl Broker {
         if self.find_child("reverted", "applied", applied_seq)?.is_some() {
             bail!("change {applied_seq} was already reverted");
         }
+        policy::check_secret_rules(a.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()), approved_by)?;
         let commit = a.body.data["commit"].as_str().context("applied entry has no commit")?.to_string();
         let next_seq = self.ledger.read_all()?.len() as u64 + 1;
         let msg = format!(
@@ -3031,11 +3154,30 @@ impl Broker {
             attempts: 0,
         };
         self.write_pending(&pending)?;
-        let new_commit = self.undo_failed_commit(&pending, self.repo.revert_and_commit(&commit, &msg))?;
+        let files: Vec<String> = a.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect();
+        // What the undo leaves must be what a change could: a person's file of the shape it takes now (a desktop
+        // saved by an older TorqOS, with another program's settings, is not put back). Refused before anything is
+        // recorded, the commit kept for the audit and reset, as a commit that failed.
+        // Two cases, each said with what to do: the file is already one TorqOS no longer takes (a desktop an earlier
+        // TorqOS saved, with another program's settings, not yet saved again), or the undo would make it one.
+        let already = self.check_user_data_at_head(&files).is_err();
+        let checked = |c: String| match self.check_user_data_at_head(&files) {
+            Ok(()) => Ok(c),
+            Err(e) if already => Err(e.context(
+                "refused: this undo leaves a file of yours that TorqOS no longer takes as it is (a desktop saved by an earlier \
+                 TorqOS still holds other programs' settings): `request system desktop save` first, which takes them out, then undo",
+            )),
+            Err(e) => Err(e.context(
+                "refused: this undo would put back what TorqOS no longer takes (another program's settings, in a desktop): \
+                 the change it undoes took them out, and they may not come back",
+            )),
+        };
+        let new_commit = self.undo_failed_commit(&pending, self.repo.revert_and_commit(&commit, &msg).and_then(checked))?;
         pending.commit = Some(new_commit.clone());
         let snapshot = self.take_snapshot(&lock, &a.body.tier);
         self.write_pending(&pending)?;
-        if let Err(e) = self.rebuild(&lock, &new_commit) {
+        let rebuilt = if self.builds_nothing(&files, &before, &new_commit) { Ok(()) } else { self.rebuild(&lock, &new_commit) };
+        if let Err(e) = rebuilt {
             let restored = self.restore(&before, &lock)?;
             self.ledger.append(NewEntry {
                 actor: "broker".into(),

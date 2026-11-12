@@ -671,6 +671,21 @@
         "users",
         "users",
         "<name>",
+        "flatpaks"
+      ],
+      "help": "Apps installed for this person, from Flathub.",
+      "type": {
+        "name": "listOf",
+        "elem": {
+          "name": "str"
+        }
+      }
+    },
+    {
+      "loc": [
+        "users",
+        "users",
+        "<name>",
         "packages"
       ],
       "type": {

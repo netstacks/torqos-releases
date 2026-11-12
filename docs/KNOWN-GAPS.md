@@ -96,7 +96,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    so a stale change can still mix with a newer commit. `torqcli` always passes it; the broker
    requires it for `--actor agent` (second audit, M2), and nothing builds on a commit that is not
    the last ledgered one (audit of 2026-10-31). The base must be a 40-hex SHA-1 id: a config repo created with git's SHA-256 object
-   format could not use it.
+   format could not use it. With a base, a proposal applied after HEAD moved on is re-checked there and
+   applied only if its effect is byte for byte the one shown (ADR-053); any commit to a file it touches, even
+   far from its lines, makes it refused (the `index` line names the file's blob), as can git writing a longer
+   abbreviation of blob ids in a much larger repository: refusals the safe way, the change prepared again.
 6j. **torqcli and a malformed tree file.** torqcli refuses to load a tree file it cannot show
    faithfully (wrong shape, unknown key, a value with spaces), so one bad file blocks `configure`
    and `commit` for everyone until it is fixed — by a raw diff through `torq-broker propose`.
@@ -284,7 +287,7 @@ The audit of 2026-11-04 (end of M2, `docs/AUDIT-2026-11-04.md`), kept as written
 | # | What | Status |
 |---|---|---|
 | A1 | The release check accepted an OpenPGP- or X.509-signed commit (git handed it to gpg and the caller's keyring) | fixed: only an SSH signature, checked before git verifies; gpg's and X.509's programs `false`, no caller's home (cli/src/release.rs, a test with a PGP-signed commit) |
-| A2 | A lock's content hash, not its signed `rev`, decides what is built: a lock someone else wrote can pair the newest signed rev with older source in the store | open — the broker re-fetching each changed input as root and checking its hash and signature (M3, with the socket broker); SECURITY-MODEL says what is not covered |
+| A2 | A lock's content hash, not its signed `rev`, decides what is built: a lock someone else wrote can pair the newest signed rev with older source in the store | fixed: the broker re-fetches each changed input as root and checks its hash, and TorqOS's own releases' signatures (`broker/src/inputs.rs`, `tests/release-path.nix`); two ways round it were closed after the audit of 2026-11-08 (6zs) |
 | A3 | `stable` could move to an older release; `show \| compare` shows dates, not versions | mostly fixed: CI refuses a release not newer than `stable`'s version (release.yml); torqcli names TorqOS by version in `show \| compare` and at `commit` (`torq 0.2.1 (2026-11-05) -> 0.2.2 (2026-11-07)`: the running one from /etc/os-release, the release's from the commit fetched to check its signature, no second fetch: its number from `cli/Cargo.toml`, its tag, a pre-release included, from the signed message) and says an older number is a downgrade, whatever the dates (a pre-release and its release: by date, as the running side never says a pre-release) (cli/src/release.rs, session.rs `software_is_shown_as_versions`); a source other than the releases, or one without a version, still by date. Open: refusing an older version or a pre-release on `stable` unless the person confirms |
 | A4 | First-boot setup ledgered change #1 when the switch failed before the new system took, leaving the image with no account | fixed: ledgered only if the new system runs or is the boot default; otherwise nothing set up, setup asks again (broker/src/lib.rs `set_up`, its test) |
 | A5 | Release authority wider than the key: the releases token in the bump job's environment, any `v*` tag published | open — a protected environment for release, the token in the step that needs it (GitHub settings) |
@@ -307,12 +310,12 @@ Its §5 lists claims without a test.
    is not built into the kernel either, so "signed modules only" (SECURITY-MODEL.md) is not true.
 
 ## Upstreams (ADR-039)
-6u. **`cache.nixos.org` and `github.com/NixOS/nixpkgs` are a bet, not a right.** Every machine
+6zv. **`cache.nixos.org` and `github.com/NixOS/nixpkgs` are a bet, not a right.** Every machine
    fetches from the Foundation's cache (ADR-023) and `flake.lock` points at GitHub; neither has an
    SLA, and the cache's cost is a recurring Foundation concern. The *code* cannot be withdrawn (MIT,
    pinned, and the nixpkgs tree is inside every image); the services can change for everyone. If
    the cache went away, Nix builds from source — slowly. Answer when there are users: a nixpkgs
-   mirror under `netstacks`, a caching proxy, a source mirror. Not yet: the release's source
+   mirror under `torqosorg`, a caching proxy, a source mirror. Not yet: the release's source
    statement and CI's unfree check (ROADMAP M2).
 
 ## Desktop (off in the base; the torqos-desktop configuration's, ADR-034, M4)
@@ -320,6 +323,80 @@ Its §5 lists claims without a test.
    still carries niri until M4 rewrites it.
 8. ~~Template hard-codes user `casey`.~~ Fixed: `torq user` (nixos/torq.json) is the one place
    (asserted set and well-formed); per-user apps are `users/<name>/packages.json`.
+9. **An applet that exits stays gone until the panel starts again (2026-11-10).** COSMIC 1.11's panel starts its
+   applets when it starts itself and does not start again one that exits: a crash of `torq-applet` (seen aborting when
+   the panel itself died, as COSMIC's own applets do) leaves the machine without TorqOS in the panel, and without
+   its restarting of the approval dialog after polkit is replaced, until the panel restarts or the person logs in
+   again. The dialog's restart no longer depends on the applet's memory (ADR-049), but it does on the applet running;
+   torqcli's own retry (cli/src/run.rs, `NO_APPROVAL_AGENT`) still starts the dialog again for a terminal's command.
+10. **Desktop VM tests on .52 (nested ESXi, software rendering).** COSMIC's launcher, app library and portal panic
+   on wgpu validation errors there, and the desktop is slow enough that the first approval after login can come
+   before COSMIC's dialog has registered with polkit (answered in 3 s, no dialog): once in three runs, the others
+   finding the dialog in under 4 s; the laptop always does. The dialog's restart after polkit took 52 s there (5 s
+   on the laptop), so the test waits up to 120 s.
+
+6zx. ~~**The desktop's automatic save can commit every 15 minutes for good.**~~ Fixed (2026-11-11, for
+   0.4.0-rc1), as far as it was seen. Found by the review of that day: a third-party weather applet rewrote its
+   `last_updated` at each refresh, so every sync differed, and the machine committed `users/<name>/desktop.json`
+   every 15 minutes (two ledger entries and a git commit each; 68 such on the owner's laptop). Now a save is
+   made only when a setting the person can choose has changed (`cli/src/desktop.rs`, test
+   `a_sync_with_nothing_the_person_changed_saves_nothing`): other programs' settings are not kept at all (6zy),
+   and what a COSMIC program writes of its own accord is left out, `desktop::programs_own`. That list is **by
+   observation**, of the owner's laptop over three days on 2026-11-11: only the screenshot tool's last area and
+   display (`com.system76.CosmicPortal/v1/screenshot`) was found. Candidates to watch, not seen changing by
+   themselves there: `CosmicTheme.Mode/v1/is_dark` when the theme switches with the time of day,
+   `CosmicFiles/v1/tab`, `CosmicAudio`. A COSMIC release that starts rewriting another of its settings by
+   itself brings the repeated saves back for that setting until it goes on the list; a backstop (stop saving a
+   setting by itself after it changed at several syncs in a row) is for later. The history's label names what
+   changed and what was taken out ("Desktop: panel; other programs' settings taken out …"), never "Desktop:
+   com". Old entries are not pruned: the ledger and the repository only grow, by design.
+6zy. ~~**The desktop save copied third-party applets' settings into the configuration repository.**~~ Fixed
+   (2026-11-11, for 0.4.0-rc1), except for what was already saved and three writers not checked (below). Only COSMIC's own components
+   (`com.system76.*`) are saved now. torqcli leaves the others out, and the broker refuses a `desktop.json`
+   holding any other name, by one rule shared by both (`torq_wire::desktop::key_ok`), so the two cannot drift.
+   The broker refuses it whoever proposes it, by a proposal, its apply (a trusted one, a scheduled one, a
+   pull's, all through the one apply), and an undo, whose result is checked as a change's would be (an undo of
+   a person's own change needs no approval; tests `a_persons_desktop_is_cosmics_settings_and_nothing_else`,
+   `a_saved_desktop_with_another_programs_settings_is_refused`, `an_undo_cannot_put_another_programs_settings_back`,
+   mutation-checked). An undo is refused in two cases, each said with what to do: the undo would put other
+   programs' settings back (the save that took them out), or the person's file already holds them, not yet
+   saved again (`request system desktop save` first, then undo). The undo check judges every person's file the
+   undo touches (`packages.json` and `secrets.json` too), so an undo can be refused for a rule its result fails
+   that the undo itself did not cause. **Three writers are not checked:** adopt, which takes a repository's
+   history whole (ADR-036), a `desktop.json` saved by an earlier TorqOS included (refusing it would make the
+   person's own older repository impossible to adopt, and its history holds the same values anyway); the first
+   commit of a new machine's configuration (`Repo::init`, empty ledger only); and a return to an earlier
+   ledgered commit (`restore_anchor`, as when a confirmed commit expires), which can bring back a `desktop.json`
+   saved before. The next save takes such settings out. A `desktop.json` saved before keeps other programs'
+   settings until its next save, which takes them out ("… other programs' settings taken out"; `show system
+   desktop` and TorqOS Settings say they will be): by itself with saving automatic, with `request system
+   desktop save` (or Save now) once with saving manual. Switching between automatic and manual saving takes
+   them out too, and its history entry says so.
+   **What was saved before stays in the history:** each earlier commit of `desktop.json` still holds the values
+   (seen: a latitude, a longitude, a location name, a field for a token), in the machine's configuration
+   repository, which every account can read (6r), and on a remote that received them (ADR-036). TorqOS does not
+   rewrite the repository or the ledger to remove them: the ledger names each commit, and a rewritten history
+   would no longer verify. What a person can do: change what can be changed (a new token; a location cannot be).
+   Deleting a remote repository at its host removes the copy there, but any new remote the machine is given
+   receives the whole history again, since the history is the machine's; only a machine set up again from
+   scratch, not from its repository, starts without it. A way to start a person's desktop history afresh is not
+   built.
+6zza. **`com.system76` is a name, not an identity** (the review of work/autosave, 2026-11-11; open, recorded
+   during the freeze). Any program running as the person can write `~/.config/cosmic/com.system76.Foo/v1/…`:
+   it would be saved as COSMIC's, bringing back the 15-minute saves (6zx) or putting its data in the repository.
+   It can also propose a `desktop.json` to the broker itself: the person's own folder, so no password, and no
+   limit on how often. Only the names and sizes are checked, not who wrote the files. And 2000 files planted
+   under a component that sorts first (`com.system76.Aaa`) fill `MAX_KEYS` ahead of the real settings, so every
+   sync fails (older than this fix).
+6zzb. **COSMIC's own settings can be personal, and the saved desktop is readable by every account** (6r; the
+   review of work/autosave). Kept on purpose, as the person's desktop, but not harmless: the wallpaper's path
+   (`CosmicBackground/v1/all`, a folder in the home), custom shortcuts (`CosmicSettings.Shortcuts/v1/custom`,
+   command lines the person typed), the panel's applets and the dock's favourites (`AppList`, what is
+   installed), and when they are set: Files' favourites (network places), the terminal's profiles (commands,
+   hosts), wallpaper folders, window rules. A remote keeps them too. The user guide's desktop page says so.
+6zzc. **An applet started before an update keeps the old torqcli** (the review of work/autosave): its 15-minute
+   save still proposes other programs' settings, refused by the new broker each time without a word to the
+   person, until they log in again (an applet is not restarted by an update; desktop 9).
 
 ## Dev host quirks (not TorqOS bugs)
 - **ESXi must expose nested virtualisation** or there is no `/dev/kvm`, and every NixOS VM test
@@ -470,7 +547,8 @@ Its §5 lists claims without a test.
      any agent process runs, so a running agent service will block sharing until that is designed.
    - **The agent's own `commit`** (it proposes and stops) is tested in torqcli's unit tests, not in a
      VM: the VM tests' configurations are stubs torqcli cannot evaluate.
-   - **Stale proposals stay listed.** A proposal prepared against an older configuration is refused
+   - **Stale proposals stay listed.** A proposal prepared against an older configuration that would now do
+     something different from what was shown (ADR-053; one that still does exactly that is applied) is refused
      at `request system apply` (the configuration has moved on), but `show system proposals` still
      lists it; there is no way to withdraw or expire one.
    - **The list is by setting, not by what a setting does.** `services.openssh` allows every option
@@ -484,6 +562,22 @@ Its §5 lists claims without a test.
      ("N more not recorded") would close it.
    - **A refusal's hash is of the request's file as the broker re-reads it**: over the socket that is
      the broker's own copy (root's 0700 directory); under sudo, root's word.
+
+6zz. ~~**`torq agent run` clears set-id bits as root over a folder the person owns.**~~ Fixed (2026-11-11, for
+   0.4.0-rc1). Found by the review of that day: after the sandbox ended, `modules/agent-run.sh` ran, as root,
+   `find "$share" -xdev -user torq-agent -perm /6000 -type f -exec chmod ug-s {} +` over the shared directory,
+   which the person owns. `find` tests a file and `chmod` acts later on its name, following links, so a person
+   swapping a folder in it for a link between the two made root clear the set-id bits of whatever the link led
+   to, such as sudo's wrapper in `/run/wrappers` (a denial of service, not a gain of privilege). Now the sweep
+   runs as `torq-agent` (setpriv: its uid and group, no capabilities, no new privileges), inside the launcher's
+   own mount namespace, where the shared directory is mounted and reachable. The files it is for are the
+   agent's own, and their owner may clear their bits. Whatever link the person or the agent puts in the way, the
+   sweep can change only what the agent could change anyway, so no descriptor-by-descriptor walk is needed, and
+   no check for other processes of the agent's either (they could do nothing to it the agent cannot do itself).
+   `tests/agent-run.nix` races it: a folder with many files, swapped for a link to `/run/wrappers/bin` the moment
+   the sweep starts, leaves sudo's wrapper as it was (the old root sweep fails the test). **What remains:** a
+   person who swaps a folder during the sweep can make it miss a set-id file the agent left in that folder,
+   which keeps its bits, in the person's own directory; that is the person working against their own sweep.
 
 6zh. **The remote's open ends (ADR-036, the push and the anchor; its review, 2026-11-05).** Fixed
    from it: a merge in the remote's ledger history is refused (a rewrite set beside it passed a
@@ -682,7 +776,7 @@ Its §5 lists claims without a test.
      is later.
    - **With a remote endpoint the configuration leaves the machine**, a wifi network's key in it
      included, as well as anything else a tool returns.
-   - **`tests/doctor.nix` has not been run** yet (amended on `work/w5` for the broker's sessions), and no real model has been tried: the unit tests and
+   - **`tests/doctor.nix` ran green in CI** (the v0.3.2 release run, 2026-11-09; amended on `work/w5` for the broker's sessions), but no real model has ever been tried: the unit tests and
      the VM test use a scripted endpoint. Whether a given local model calls tools well is untested.
    - **Anyone on the machine can use the local model** (its socket is 0666); restricting it to the
      agent's group needs the service off DynamicUser.
@@ -696,8 +790,8 @@ Its §5 lists claims without a test.
    boot no longer stops the others; one long past its time is settled by the next `commit at`; its
    approver may cancel their own; apply's own refusal of a proposal is not hidden by a schedule's.
    Open:
-   - **`tests/commit-at.nix` is written and registered, not yet run** (the branch's worker may not build
-     VM tests); the broker's unit tests stub the timer.
+   - **`tests/commit-at.nix` ran green in CI** (the v0.3.2 release run); it was written on a branch whose worker could not build
+     VM tests. The broker's unit tests stub the timer.
    - **A scheduled proposal is still listed** by `show system proposals`, and `request system apply` of
      it before its time applies it; the schedule is then refused at its time (already applied).
    - **Local times are read by `date`** when the commit is made (`HH:MM`, `"YYYY-MM-DD HH:MM"`): the
@@ -726,6 +820,12 @@ Its §5 lists claims without a test.
    kind added on one side only would go unnoticed by the compiler. ADR-044's crate `torq-wire` closes it,
    fixtures first so the ledger's bytes are proven unchanged; not in 0.3.0 (it changes all three Nix
    packages' sources and touches `lib.rs` while the release's branches do).
+   **Steps 0 and 1 done (2026-11-09):** the fixtures, and the socket's types and exit codes in `torq-wire`, shared
+   by the broker and torqcli. Open: the kinds, tiers and actors (step 2) and the newtypes (step 3). Before step 2,
+   the fixtures need lines no `cargo test` writes (review, 2026-11-09): `adopted`, `data_restored`,
+   `disagreement_acknowledged`, `remote_cleared`, `backup_key_failed`, and an entry with `data.via` and
+   `data.caller` as every entry since ADR-040 has; else a misspelt `Kind` for one of them round-trips as
+   `Unknown` and no test sees it.
 
 6zr. **Python out of a new machine (ADR-032/033, amended 2026-11-07, `work/w6`).** The root is grown by
    systemd-repart in the initrd, not growpart; the SSH greeting runs fastfetch's program without its
@@ -767,7 +867,7 @@ Its §5 lists claims without a test.
      confirm or not. A setting not on it that a network or a login still depends on (another VPN's,
      a `systemd.sockets` or `systemd.user` unit, `security.pam`) is not caught; NixOS's other aliases
      of a listed option are caught only where listed.
-   - **`tests/agent-proposals.nix` is written and registered, not yet run.** No VM test runs the
+   - **`tests/agent-proposals.nix` ran green in CI** (the v0.3.2 release run). No VM test runs the
      doctor's own propose step (torqcli's commit as the agent evaluates the configuration, which the
      test VM cannot): it is covered by the agent crate's tests, with torqcli stubbed.
    - **Sessions share one budget.** At most 600 are started an hour and 2000 records kept (the oldest
@@ -831,3 +931,11 @@ Its §5 lists claims without a test.
    - **Setup's own path is not what the test runs:** the test loads the registration as setup does
      (`register_carried`) and builds as the broker would; tests/image.nix's setup still switches to a
      prebuilt specialisation.
+
+6zw. **Approval on the desktop is the dialog, not a trusted path (ADR-045 5, 2026-11-09).** A password sent to the
+   broker from the desktop is refused, so one a lookalike window took cannot be replayed there. It can still be used
+   from a text console, or by `ssh localhost` where SSH accepts passwords: a program of the person's that has their
+   password can reach a session the broker treats as a terminal. And a lookalike of the dialog is still possible: no
+   dialog is a trusted path. The dialog leads with the broker's facts; the reason in it is the proposer's words (the
+   agent's, if it proposed), shown as such. One person can still spend another's tries at the helper (its socket is open
+   to `users`), and be locked out of the dialog, sudo and `torq-approve` for ten minutes; a service or the agent cannot.

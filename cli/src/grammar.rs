@@ -48,6 +48,10 @@ pub enum Value {
     Backup,
     /// A backup's snapshot (`latest`, or its id) — or, where it may be left out, the path after it.
     Snapshot,
+    /// A secret's name (ADR-052).
+    Secret,
+    /// A host a secret may be used for: a DNS name.
+    Host,
     /// Free text (a comment).
     Text,
 }
@@ -67,6 +71,8 @@ impl Value {
             Value::Interface => "<interface>",
             Value::Backup => "<backup>",
             Value::Snapshot => "<snapshot>",
+            Value::Secret => "<secret>",
+            Value::Host => "<host>",
             Value::Text => "<\"text\">",
         }
     }
@@ -95,6 +101,10 @@ impl Value {
             Value::Backup => bail!("'{w}' is not a backup's name (letters, digits, - and _: show system backups lists them)"),
             Value::Snapshot if w == "latest" || w.starts_with('/') || ((8..=64).contains(&w.len()) && w.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) => Ok(()),
             Value::Snapshot => bail!("'{w}' is neither a snapshot (latest, or an id from show system backups) nor a path"),
+            Value::Secret if torq_wire::secrets::name_ok(w) => Ok(()),
+            Value::Secret => bail!("'{w}' is not a secret's name (letters, digits, - and _: show system secrets lists them)"),
+            Value::Host if torq_wire::secrets::host_ok(w) => Ok(()),
+            Value::Host => bail!("'{w}' is not a host name (lowercase, with a dot: api.github.com; no address, no wildcard)"),
             Value::Text => Ok(()),
             _ => bail!("an empty word is not a {}", self.placeholder()),
         }
@@ -265,19 +275,57 @@ static SHOW_SYSTEM: &[Node] = &[
     fixed("alarms", "Whether this machine is as its history says", In::Op).whole(|r| Ok(Op::ShowAlarms { display: r.display })).pipes(Pipes::Views(DETAIL)),
     fixed("backups", "The backups the configuration declares: whether each has its key, its snapshots, its last run", In::Op).whole(|_| Ok(Op::ShowBackups)).pipes(Pipes::Filters),
     fixed("commit", "The configurations so far, newest first", In::Op).whole(|r| Ok(Op::ShowCommits { display: r.display })).pipes(Pipes::Views(DETAIL)),
+    fixed("desktop", "Your desktop: what of COSMIC's settings is saved in your configuration, and what is not yet", In::Op).whole(|_| Ok(Op::ShowDesktop)).pipes(Pipes::Filters),
     fixed("ledger", "Every change, as the ledger has it (refused and failed ones too)", In::Op).whole(ledger).pipes(Pipes::Filters).then(&[value(Value::Count, "How many entries (20)").whole(ledger).pipes(Pipes::Filters)]),
     fixed("proposals", "Changes proposed and waiting for a person (the agent's): request system apply <n> applies one", In::Op).whole(|_| Ok(Op::ShowProposals)).pipes(Pipes::Filters),
     fixed("remote", "The configuration's remote: where it and its ledger are pushed, and how the last push went", In::Op).whole(|_| Ok(Op::ShowRemote)).pipes(Pipes::Filters),
     fixed("rollback", "An earlier configuration, or how two differ", In::Op).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(show_rollback).pipes(Pipes::Views(CONFIGURATION_VIEWS)).then(&[fixed("compare", "How it differs from another one", In::Op).then(&[value(Value::Rollback, "The configuration to compare with").whole(show_rollback).pipes(Pipes::Views(COMPARISON))])])]),
+    fixed("secrets", "The secrets: whose, whether each has a value, and what each may be used for (never a value)", In::Op).whole(|_| Ok(Op::ShowSecrets)).pipes(Pipes::Filters),
     fixed("snapshots", "The snapshots of the data this machine still has, each from before a change", In::Op).whole(|_| Ok(Op::ShowSnapshots)).pipes(Pipes::Filters),
     fixed("storage", "The disks: size and use, and the system versions kept", In::Op).whole(|_| Ok(Op::ShowStorage)).pipes(Pipes::Filters),
     fixed("uptime", "How long the machine has run, its load, and its last change", In::Op).whole(|_| Ok(Op::ShowUptime)).pipes(Pipes::Filters),
+];
+
+/// `… user <user>`: a person's own secret, not the system's.
+/// After `set <name>`: its value from a file, and whose.
+static SECRET_SET: &[Node] = &[
+    fixed("file", "From a file (an SSH key, ssh-keygen's: several lines, not typed); read as you, not kept anywhere else", In::Op).then(&[value(Value::File, "The file (relative: to where torq runs)").whole(secret).then(SECRET_OWNER)]),
+    fixed("user", "A person's own secret, not the system's: yours (no one else's, an administrator included, but to delete)", In::Op).then(&[value(Value::User, "Whose: yours").whole(secret)]),
+];
+
+static SECRET_OWNER: &[Node] = &[fixed("user", "A person's own secret, not the system's: yours (no one else's, an administrator included, but to delete)", In::Op).then(&[value(Value::User, "Whose: yours").whole(secret)])];
+
+/// What a secret may be used for, or by whom: given (`allow`) or taken back (`disallow`).
+static SECRET_GRANT: &[Node] = &[
+    fixed("agent", "The agent (torq-agent): it uses the secret through TorqOS, never reading it", In::Op).whole(secret).then(SECRET_OWNER),
+    fixed("https", "Sent in an HTTPS header to this host, and to no other (a token)", In::Op).then(&[value(Value::Host, "The host: a DNS name (api.github.com)").whole(secret).then(SECRET_OWNER)]),
+    fixed("ssh", "Signs for SSH to this host, and for no other (an SSH key)", In::Op).then(&[value(Value::Host, "The host: a DNS name (github.com)").whole(secret).then(SECRET_OWNER)]),
+];
+
+static REQUEST_SECRET: &[Node] = &[
+    fixed("allow", "Let it be used: for a host, or by the agent (one change, undoable)", In::Op).then(&[value(Value::Secret, "The secret's name").then(SECRET_GRANT)]),
+    fixed("approve", "When a person is asked before the agent uses it (a tainted session is always asked)", In::Op).then(&[value(Value::Secret, "The secret's name").then(&[
+        fixed("each-use", "Every time", In::Op).whole(secret).then(SECRET_OWNER),
+        fixed("first-use", "The first time in each of the agent's sessions", In::Op).whole(secret).then(SECRET_OWNER),
+        fixed("never", "Never: only a tainted session asks", In::Op).whole(secret).then(SECRET_OWNER),
+    ])]),
+    fixed("delete", "Delete its value and its rule (no undoing the value)", In::Op).then(&[value(Value::Secret, "The secret's name").whole(secret).then(SECRET_OWNER)]),
+    fixed("disallow", "Take back a use: a host, or the agent's (one change, undoable)", In::Op).then(&[value(Value::Secret, "The secret's name").then(SECRET_GRANT)]),
+    fixed("set", "Give its value, typed here (or from a file): kept encrypted, root's alone, outside the configuration, never in the ledger", In::Op).then(&[value(Value::Secret, "Its name: letters, digits, - and _").whole(secret).then(SECRET_SET)]),
+    fixed("show", "Print its value, here (it asks your password)", In::Op).then(&[value(Value::Secret, "The secret's name").whole(secret).then(SECRET_OWNER)]),
 ];
 
 static REQUEST_SYSTEM: &[Node] = &[
     fixed("agent", "The agent (torq-agent): what it may do without asking", In::Op).then(&[fixed("trust", "For <minutes> (at most 60), the agent's untainted proposals in your own folder apply without asking — never the system's; ledgered; it asks your password", In::Op).then(&[fixed("revoke", "End your trust in the agent now", In::Op).whole(|_| Ok(Op::Request(Request::TrustRevoke))), value(Value::Minutes, "1 to 60").whole(|r| Ok(Op::Request(Request::Trust { minutes: r.number(Value::Minutes).unwrap_or(0) as u32 })))])]),
     fixed("apply", "Apply a change someone else proposed (the agent's): it shows it and asks first", In::Op).then(&[value(Value::Change, "The proposal's number, from show system proposals").whole(|r| Ok(Op::Request(Request::Apply { proposal: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),
     fixed("backup", "A backup the configuration declares (services restic backups)", In::Op).then(&[fixed("key", "Give its key, typed here: kept root's alone, outside the configuration, never in the ledger (it asks your password)", In::Op).then(&[value(Value::Backup, "The backup's name, from show system backups").whole(|r| Ok(Op::Request(Request::BackupKey { name: r.value(Value::Backup).unwrap_or_default().into() })))])]),
+    fixed("desktop", "Your desktop (COSMIC's settings), kept in your own configuration", In::Op).then(&[
+        fixed("save", "Save it now: what you changed goes into your configuration (no password; one change, undoable)", In::Op).whole(|_| Ok(Op::Request(Request::DesktopSave))),
+        fixed("saving", "When it is saved", In::Op).then(&[
+            fixed("automatic", "By itself, as you change it", In::Op).whole(|_| Ok(Op::Request(Request::DesktopSaving { automatic: true }))),
+            fixed("manual", "Only when you ask (request system desktop save)", In::Op).whole(|_| Ok(Op::Request(Request::DesktopSaving { automatic: false }))),
+        ]),
+    ]),
     fixed("ledger", "The ledger", In::Op).then(&[fixed("acknowledge", "You have looked into where it and the repository disagree: say no more of it (ledgered; a new one is said as ever)", In::Op).whole(|_| Ok(Op::Request(Request::LedgerAcknowledge)))]),
     fixed("password", "Change a person's password (yours, or <user>'s)", In::Op).whole(password).then(&[value(Value::User, "Whose (yours, if none)").whole(password)]),
     fixed("pull", "Load the configuration waiting on the remote (its incoming branch) into the candidate: nothing changes until you commit it", In::Op).whole(|_| Ok(Op::Request(Request::Pull))),
@@ -285,6 +333,7 @@ static REQUEST_SYSTEM: &[Node] = &[
     fixed("repair", "Return a machine changed outside TorqOS to its last configuration (it asks first)", In::Op).whole(|_| Ok(Op::Request(Request::Repair))),
     fixed("restore", "Put a path back from a backup, as its owner: what is there now is set aside, not lost (it asks your password)", In::Op).then(&[value(Value::Backup, "The backup's name, from show system backups").then(&[value(Value::Snapshot, "A snapshot's id, from show system backups — or, for the newest, the path").whole(restore).then(&[value(Value::File, "The path, under /home or /var/lib").whole(restore)])])]),
     fixed("revert", "Undo one change: a new change that reverses it (it asks first, unless it only touches your own settings)", In::Op).then(&[value(Value::Change, "The change's number, from show system ledger").whole(|r| Ok(Op::Request(Request::Revert { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),
+    fixed("secret", "A secret: a token or an SSH key, kept encrypted, that the agent may use and never read", In::Op).then(REQUEST_SECRET),
     fixed("snapshot", "The data as it was before a change", In::Op).then(&[fixed("delete", "Delete one, for the room or for what is in it: on the record first, and there is no undoing it (it asks your password)", In::Op).then(&[value(Value::Change, "The change's number, from show system snapshots").whole(|r| Ok(Op::Request(Request::SnapshotDelete { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]), fixed("restore", "Put a path back, as its owner: what is there now is set aside, not lost (it asks your password)", In::Op).then(&[value(Value::Change, "The change's number, from show system snapshots").then(&[value(Value::File, "The path, under /home or /var/lib").whole(|r| Ok(Op::Request(Request::RestoreData { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()?, path: r.value(Value::File).map(String::from).unwrap_or_default() })))])]), fixed("take", "Take one now, before work you may think better of (it asks your password)", In::Op).whole(|_| Ok(Op::Request(Request::SnapshotTake)))]),
     fixed("software", "This machine's software", In::Op).then(&[fixed("rollback", "Load an earlier configuration's software into the candidate (a downgrade)", In::Op).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(|r| Ok(Op::Request(Request::SoftwareRollback { n: r.number(Value::Rollback).unwrap_or(0), detail: r.display.is_some() }))).pipes(Pipes::Steps)])]),
     fixed("update", "Load the newest TorqOS into the candidate (nothing changes until you commit it)", In::Op).whole(update).pipes(Pipes::Steps).then(&[fixed("all", "Every input, nixpkgs too", In::Op).whole(update).pipes(Pipes::Steps)]),
@@ -369,6 +418,38 @@ fn show_active(r: &Read) -> Result<Op> {
 fn show_rollback(r: &Read) -> Result<Op> {
     let n: Vec<usize> = r.values.iter().filter(|(k, _)| *k == Value::Rollback).filter_map(|(_, v)| v.parse().ok()).collect();
     Ok(Op::ShowRollback { n: n.first().copied().unwrap_or(0), compare: n.get(1).copied(), display: r.display })
+}
+
+/// `request system secret <act> <name> … [user <user>]`, from the words read.
+fn secret(r: &Read) -> Result<Op> {
+    use crate::secrets::{Act, Grant};
+    use torq_wire::secrets::Approve;
+    let host = || r.value(Value::Host).unwrap_or_default().to_string();
+    let grant = || {
+        if r.has("https") {
+            Grant::Https(host())
+        } else if r.has("ssh") {
+            Grant::Ssh(host())
+        } else {
+            Grant::Agent
+        }
+    };
+    let act = if r.has("allow") {
+        Act::Allow(grant())
+    } else if r.has("disallow") {
+        Act::Disallow(grant())
+    } else if r.has("approve") {
+        Act::Approve(["each-use", "first-use", "never"].into_iter().find(|w| r.has(w)).and_then(Approve::from_word).unwrap_or_default())
+    } else if r.has("set") && r.has("file") {
+        Act::SetFile(r.value(Value::File).unwrap_or_default().to_string())
+    } else if r.has("set") {
+        Act::Set
+    } else if r.has("show") {
+        Act::Show
+    } else {
+        Act::Delete
+    };
+    Ok(Op::Request(Request::Secret { name: r.value(Value::Secret).unwrap_or_default().into(), user: r.value(Value::User).map(String::from), act }))
 }
 
 fn interfaces(r: &Read) -> Result<Op> {

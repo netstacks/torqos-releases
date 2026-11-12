@@ -12,7 +12,7 @@ in
   options.torq.releases = {
     url = lib.mkOption {
       type = lib.types.strMatching "git\\+https://[^?]+\\?ref=[A-Za-z0-9._/-]+";
-      default = "git+https://github.com/netstacks/torqos-releases?ref=stable";
+      default = "git+https://github.com/torqosorg/torqos-releases?ref=stable";
       description = "The releases, as a flake reference: a git repository over HTTPS, and the branch machines follow.";
     };
     signers = lib.mkOption {

@@ -4,17 +4,17 @@ This is for the person steering AI sessions, not for the sessions. It says what 
 to stop, and when to hand a session's work to a *different* session to check. The plan itself is
 `docs/ROADMAP.md`; the reasons are `docs/DECISIONS.md`. This is the procedure.
 
-Three rules that cover most of what goes wrong:
+Four rules that cover most of what goes wrong:
 
 1. **One session writes in a tree at a time.** Two sessions in `~/torq` overwrite each other.
    A second piece of work gets its own worktree and branch (`git worktree add ~/torq-<name> -b
-   <name>`), as `~/torq-slim` does.
+   <name>`), as the other sessions' worktrees beside `~/torq` are.
 2. **The session that built it never judges it.** A builder will tell you it works. A fresh
    session, given only the diff and the ADR — not the builder's summary — tells you whether it does.
-3. **Nothing ships from a dirty tree.** `git status` before `request system update` on torq5: a
+3. **Nothing ships from a dirty tree.** `git status` before `request system update` on the dev machine: a
    `path:` source builds whatever is on disk, committed or not.
-4. **The tests run here.** `nix flake check` on torq5, green, before anything merges to `main` —
-   not GitHub's CI, which runs only for pull requests, by hand and at each release (ADR-030,
+4. **Run the full check before merging.** `nix flake check` on the check host (the second machine, with KVM), green, before anything merges to `main` —
+   GitHub's CI does not do it for you: it runs only for pull requests, by hand and at each release (ADR-030,
    amended). aarch64 is set aside until x86_64 is stable: not built, not tested.
 
 ## The loop, for one piece of work
@@ -72,7 +72,7 @@ What comes back is either *nothing* (ship), *a fix* (back to step 3 with the fin
 same branch), or *a design hole* (back to step 1: the ADR was wrong, amend it first).
 
 ### 6. Ship
-Merge to `main` (fast-forward if you can). On torq5, in tmux, with a private candidate:
+Merge to `main` (fast-forward if you can). On the dev machine, in tmux, with a private candidate:
 
 ```bash
 cd ~/torq && git status            # clean, on main
@@ -80,11 +80,11 @@ torqcli -c "request system update; configure; show | compare; commit comment \"M
 ```
 
 Read the prompt: `[edit system software]` only. If the machine misbehaves: `rollback 1`.
-Push `main` (no CI runs on a push: the full check ran here, rule 4).
+Push `main` (no CI runs on a push: the full check ran on the check host, rule 4).
 
 ### 7. Record
 Tick the ROADMAP line, with the date and the test's name in italics as the others are. If the
-"Where things stand" section of `CLAUDE.md` is now wrong, fix it in the same commit. Then step 1.
+"Current status" section of `CLAUDE.md` is now wrong, fix it in the same commit. Then step 1.
 
 ## When to run a whole-project audit
 
@@ -103,7 +103,7 @@ when the work they belong to comes up, not all at once.
 Each item: what to build, the test that must exist, and **⏹** where a fresh session validates
 before you go on. A ⏹ with *adversarial* means both kinds.
 
-### M2 — finish (ADR-032, ADR-033, ADR-039)
+### M2 — done, v0.2.0 (ADR-032, ADR-033, ADR-039)
 - [x] Merge `slim` after the installer lands (2026-11-03; reviewed: no race, three fixes made). *Test:* `checks.x86_64-linux.size` under budget;
       trust-loop and image tests green with the `nix`-only switch.
       **⏹ review:** does the broker's new switch path race `nixos-rebuild`'s unit as the old one did?
@@ -137,31 +137,31 @@ Order matters: the socket first, because everything after keys on identity.
       `sudo bash` is refused. **⏹ adversarial:** get root without an entry.
 - [x] Snapshots before each system change, on btrfs in new images. *Test:* a file deleted is back
       after `request system snapshot restore` (a person's act, not `rollback`'s: ADR-038, amended).
-- [ ] **⏹ audit** — end of M3. This is the audit that matters most: after it, the security claims
+- [x] **⏹ audit** — end of M3 (2026-11-06, `docs/AUDIT-2026-11-06.md`; findings fixed or in KNOWN-GAPS 6zl). This is the audit that matters most: after it, the security claims
       in SECURITY-MODEL should each name a test.
 
 ### M4 — the desktop as a configuration (ADR-034, ADR-037, ADR-038)
-Can run in its own worktree beside M3; it is a configuration, not broker work.
-- [ ] `torqos-desktop`: COSMIC (ADR-045), its portal, Flatpak. *Test:* a VM boots it to a
+Largely built (ROADMAP M4 has the detail: the flatpaks reconcile, rung 3 and syncthing are not). Can run in its own worktree; it is a configuration, not broker work.
+- [x] `torqos-desktop`: COSMIC (ADR-045), its portal, Flatpak (2026-11-09, `modules/desktop.nix`). *Test:* a VM boots it to a
       session; `load override` on an image machine produces it. **⏹ review:** does the
       configuration carry anything of the base's that should be a setting?
 - [ ] `users <name> flatpaks`. *Test:* declared → present after switch; removed → gone.
 - [ ] Rung 3, a person's own builds in the tree — its design first (one session, an ADR
       amendment), then code. *Test:* a package from a repo in `/home` installs at user tier and
       `rollback` removes it. **⏹ adversarial:** can a user-tier build run anything as root?
-- [ ] Data: `services syncthing`, `services restic backups`, `request system restore` (the backup and
-      restore built 2026-11-07, `tests/backup.nix`; syncthing not). *Test:* a
+- [ ] Data: `services syncthing` (not built), and `services restic backups`, `request system restore` (built 2026-11-07; the backup and
+      restore: `tests/backup.nix`). *Test:* a
       backed-up file returns on a rebuilt VM. **⏹ review:** the backup key is nowhere in the repo.
-- [ ] Approval as a dialog. *Test:* the dialog's text is torqcli's prompt text (one source).
+- [x] Approval as a dialog (2026-11-09; `tests/desktop.nix` drives the real one). *Test:* the dialog shows the broker's facts (not torqcli's prompt word for word).
 - [ ] **⏹ audit** — light: the desktop's attack surface (what listens, what the portal grants).
 
 ### M5 — the agent (AI-LAYER.md)
-Only after M3's audit. The agent's safety is M3's; do not build it on the sudo broker.
-- [ ] Doctor mode. *Test:* the agent's tools cannot write — a VM test that every tool is read-only
+Only after M3's audit (done). The agent's safety is M3's; do not build it on the sudo broker.
+- [x] Doctor mode (built; experimental: no real model tried). *Test:* the agent's tools cannot write — a VM test that every tool is read-only
       against the fence and the repo. **⏹ adversarial:** prompt-inject the doctor into proposing.
-- [ ] Proposals. *Test:* scenario (a), "fix my wifi": the proposal, the approval, `commit
+- [x] Proposals (built, non-GUI half; experimental). *Test:* scenario (a), "fix my wifi": the proposal, the approval, `commit
       confirmed`, the revert when the machine does not confirm. **⏹ adversarial.**
-- [ ] Session trust. *Test:* it never covers system tier; it expires; each change is ledgered.
+- [x] Session trust (built, non-GUI half). *Test:* it never covers system tier; it expires; each change is ledgered.
       **⏹ adversarial.**
 - [ ] "Build me an application" (scenario b) and "watch while I try it" (scenario c). *Test:* each
       end to end in a VM. **⏹ review.**

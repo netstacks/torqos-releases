@@ -6,18 +6,20 @@ Nothing needs to be built.
 ## 1. Download
 
 Get the image for your platform from the
-[latest release](https://github.com/netstacks/torqos-releases/releases/latest):
+[latest release](https://github.com/torqosorg/torqos-releases/releases/latest):
 
 | File | For |
 |---|---|
-| `torqos-x86_64-linux.qcow2` | QEMU/KVM, Proxmox VE, libvirt (x86_64) |
-| `torqos-aarch64-linux.qcow2` | UTM on Apple silicon, QEMU (aarch64) |
-| `torqos-x86_64-linux.vmdk.gz` | VMware ESXi (x86_64) — `gunzip` it first |
-| `torqos-aarch64-linux.vmdk.gz` | VMware on arm64 — `gunzip` it first |
+| `torqos-x86_64-linux.qcow2` | QEMU/KVM, Proxmox VE, libvirt |
+| `torqos-x86_64-linux.vmdk.gz` | VMware ESXi: `gunzip` it first |
+| `torqos-x86_64-linux.iso` | A real machine: the installer, written to a USB stick |
+
+TorqOS is built and tested for x86_64 only. The `v0.3.x` releases have no aarch64 images (earlier
+releases do, but they are older and are not tested now).
 
 From the same release, also download `SHA256SUMS`, `SHA256SUMS.sig` and `allowed_signers`.
 
-The download is about 730 MB compressed; an installed system is about 1.5 GB.
+An installed system is about 1.2 GB (a new machine's system is held under a budget of 1280 MB).
 
 ## 2. Check the download
 
@@ -52,8 +54,7 @@ The image is a single EFI disk. Whatever your hypervisor:
 
 === "QEMU / KVM / libvirt"
 
-    Use `torqos-x86_64-linux.qcow2` (or the aarch64 image on an ARM host) as the VM's disk, with UEFI
-    firmware. With libvirt, for example:
+    Use `torqos-x86_64-linux.qcow2` as the VM's disk, with UEFI firmware. With libvirt, for example:
 
     ```sh
     qemu-img resize torqos-x86_64-linux.qcow2 20G
@@ -74,12 +75,29 @@ The image is a single EFI disk. Whatever your hypervisor:
        make it first in **Options → Boot Order**.
     4. Start the VM and open its console.
 
-=== "UTM (Apple silicon)"
+=== "Real hardware (ISO)"
 
-    1. Create a new virtual machine: **Virtualize → Linux**, and skip the installation ISO.
-    2. Remove the empty drive UTM creates, and import `torqos-aarch64-linux.qcow2` as the VM's
-       drive.
-    3. Keep UTM's default display and UEFI boot, and start the VM.
+    The ISO starts on UEFI machines only, with Secure Boot off.
+
+    1. Write `torqos-x86_64-linux.iso` to a USB stick of 2 GB or more, as it is (not by copying the
+       file onto the stick). On Linux:
+       ```sh
+       sudo dd if=torqos-x86_64-linux.iso of=/dev/sdX bs=4M conv=fsync
+       ```
+       Check the device name first: everything on the stick is erased. Other tools that write a
+       disk image raw (balenaEtcher, Rufus in DD mode) work too.
+    2. Start the machine from the stick, using its firmware's boot menu. The console shows the
+       installer: no login, nothing listening on the network.
+    3. The installer lists the disks it can use (whole disks, at least the image's size, never the
+       stick it started from), with each one's size and what is on it. Choose one, then type its name
+       again (`nvme0n1`, `sda`). **Everything on that disk is erased.** Nothing is written before
+       you type the name.
+    4. It writes TorqOS to the disk, reads it back to check it, and detects the machine's hardware.
+    5. Remove the stick and restart. First-boot setup runs on the console.
+
+    Not yet possible: installing beside another system or onto one partition, disk encryption, and
+    machines with BIOS firmware only. TorqOS has been installed on one physical machine so far, the
+    owner's laptop.
 
 === "VMware ESXi"
 

@@ -17,29 +17,39 @@ use std::time::{Duration, Instant};
 /// Never a shared directory: without a home there is no log (it would be readable, and replaceable,
 /// by others in /tmp).
 pub fn log_path() -> Result<PathBuf> {
+    log_named("last.log")
+}
+
+fn log_named(name: &str) -> Result<PathBuf> {
     let state = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .context("neither XDG_STATE_HOME nor HOME is set, so there is nowhere private to keep the log")?;
-    Ok(state.join("torq/last.log"))
+    Ok(state.join("torq").join(name))
 }
 
 /// Start a fresh log for this command: private to the user (0600), and never written through a
 /// symlink.
 pub fn start_log() -> Result<PathBuf> {
-    open_log(true)
+    open_log("last.log", true)
+}
+
+/// A log of its own for what looks at the machine over and over (the panel, TorqOS Settings' pages), so that
+/// it never empties the one a commit is writing, or a failed command has just pointed a person to.
+pub fn watch_log() -> Result<PathBuf> {
+    open_log("watch.log", true)
 }
 
 /// The log as this command has it so far, added to (made as `start_log` makes it if there is none):
 /// a step after another, whose output belongs with the first's.
 pub fn go_on_log() -> Result<PathBuf> {
-    open_log(false)
+    open_log("last.log", false)
 }
 
-fn open_log(fresh: bool) -> Result<PathBuf> {
+fn open_log(name: &str, fresh: bool) -> Result<PathBuf> {
     use std::os::unix::fs::OpenOptionsExt;
-    let p = log_path()?;
+    let p = log_named(name)?;
     fs::create_dir_all(p.parent().unwrap()).with_context(|| format!("creating {}", p.display()))?;
     if fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
         fs::remove_file(&p).with_context(|| format!("removing the symlink {}", p.display()))?;
@@ -227,34 +237,9 @@ pub enum Call {
     Exec(Command),
 }
 
-/// The broker's socket (modules/broker.nix).
-pub const SOCKET: &str = "/run/torq/broker.sock";
-/// The exit code that says the broker needs the caller's password (torq_broker::socket).
-const NEED_PASSWORD: i32 = 77;
-
-/// What goes over the socket (torq_broker::socket::Request): the arguments without who is asking,
-/// which the broker takes from the kernel, and files' contents rather than their paths.
-#[derive(serde::Serialize, Default)]
-struct Request {
-    args: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    diff: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    password: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    key: Option<String>,
-}
-
-/// What comes back (torq_broker::socket::Frame).
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Frame {
-    Out(String),
-    Err(String),
-    Exit(i32),
-}
+/// The broker's socket and its words, the broker's own (ADR-044).
+pub use torq_wire::socket::SOCKET;
+use torq_wire::socket::{Frame, Request, BUSY, NEED_PASSWORD, NO_APPROVAL_AGENT, OK, REFUSED, USAGE};
 
 /// The arguments torqcli builds for any broker, as a socket request: `--actor` and `--approved-by`
 /// left out (the broker decides them), `--diff`, `--hash-file` and `--key-file` sent as what they hold.
@@ -274,6 +259,8 @@ fn request(args: &[String]) -> Result<Request> {
             "--diff" => r.diff = Some(fs::read_to_string(value()?).context("reading the change")?),
             "--hash-file" => r.hash = Some(fs::read_to_string(value()?).context("reading the hash")?),
             "--key-file" => r.key = Some(fs::read_to_string(value()?).context("reading the key")?),
+            // A secret's value goes as a key does (ADR-052).
+            "--value-file" => r.key = Some(fs::read_to_string(value()?).context("reading the value")?),
             _ => r.args.push(a.clone()),
         }
     }
@@ -357,6 +344,14 @@ fn exec(call: Call, err: &mut dyn Write, err_stdio: impl Fn() -> Result<Stdio>, 
                 r.args.push("--json".into());
             }
             let mut answer = over_socket(&r, err)?;
+            // The desktop's dialog could not appear (its agent gone, or registered with a polkit since replaced):
+            // it is started again, and asked once more. Nothing was done: the broker stopped before the change.
+            let said: Option<serde_json::Value> = serde_json::from_slice(&answer.1).ok();
+            if answer.0 == Some(REFUSED) && said.as_ref().and_then(|v| v["error"].as_str()).is_some_and(|e| e.contains(NO_APPROVAL_AGENT)) {
+                crate::app::restart_approval_agent();
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                answer = over_socket(&r, err)?;
+            }
             for again in [false, true, true] {
                 if answer.0 != Some(NEED_PASSWORD) {
                     break;
@@ -396,7 +391,7 @@ pub fn read(broker: Call) -> Result<(Option<i32>, Vec<u8>)> {
 fn broken(code: Option<i32>) -> String {
     match code {
         // 2: it did not understand the request — an installed broker older than this command.
-        Some(2) => "the installed broker is older than this torq command (update the machine first)".into(),
+        Some(USAGE) => "the installed broker is older than this torq command (update the machine first)".into(),
         Some(code) => format!("the broker stopped unexpectedly (exit code {code})"),
         None => "the broker was stopped before it finished".into(),
     }
@@ -411,10 +406,10 @@ pub fn broker_json(broker: Call, log: &std::path::Path) -> Result<Outcome> {
 pub fn broker_json_live(broker: Call, log: &std::path::Path, live: bool) -> Result<Outcome> {
     let (code, v) = call(broker, log, live)?;
     Ok(match (code, v) {
-        (Some(0), Some(v)) => Outcome::Done(v),
-        (Some(75), _) => Outcome::Busy,
+        (Some(OK), Some(v)) => Outcome::Done(v),
+        (Some(BUSY), _) => Outcome::Busy,
         // 77: it needs the caller's password, and none was given or it was wrong (ADR-040).
-        (Some(1 | 77), Some(v)) => Outcome::Refused(v["error"].as_str().unwrap_or_default().to_string()),
+        (Some(REFUSED | NEED_PASSWORD), Some(v)) => Outcome::Refused(v["error"].as_str().unwrap_or_default().to_string()),
         (code, _) => Outcome::Broken(broken(code)),
     })
 }
@@ -424,8 +419,8 @@ pub fn broker_json_live(broker: Call, log: &std::path::Path, live: bool) -> Resu
 pub fn broker_status(broker: Call, log: &std::path::Path) -> Result<std::result::Result<Value, String>> {
     let (code, v) = call(broker, log, false)?;
     Ok(match (code, v) {
-        (Some(0 | 1 | 75), Some(v)) if v.get("error").is_none() => Ok(v),
-        (Some(1), Some(v)) => Err(crate::history::one_line(v["error"].as_str().unwrap_or("the broker refused"), 200)),
+        (Some(OK | REFUSED | BUSY), Some(v)) if v.get("error").is_none() => Ok(v),
+        (Some(REFUSED), Some(v)) => Err(crate::history::one_line(v["error"].as_str().unwrap_or("the broker refused"), 200)),
         (code, _) => Err(broken(code)),
     })
 }

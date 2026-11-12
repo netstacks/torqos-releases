@@ -4,7 +4,12 @@ One base, two faces (ADR-034): the sysadmin's server as code, and a person's mac
 drive. M1–M2 built the base and the server face. M3–M5 build what the laptop face needs — and
 each of them serves the server face too.
 
-## Virtual machines (the dev host `torq5`, x86_64 on ESXi since ADR-030; NixOS VM tests)
+Milestones and releases (2026-11-11): v0.2.0 = M2; v0.3.x = M3 and the agent's non-GUI half (M5's
+doctor, proposals and session trust); 0.4.0 = the desktop (M4) and secrets (ADR-052), in preparation
+and not released. The checkboxes below are the current record; a box is ticked only for what is built,
+and a part not built has its own unticked line.
+
+## Milestones (built on x86_64; development on the owner's laptop, full checks on a second machine, ADR-030)
 
 ### M1 — The trust loop  ✓ done
 Done in the aarch64 UTM VM on the M4 Mac, which was the dev host at the time (retired, ADR-030):
@@ -15,8 +20,8 @@ Done in the aarch64 UTM VM on the M4 Mac, which was the dev host at the time (re
 - [x] `torq-broker propose` accepts a diff + reason, shows it.
 - [x] `torq-broker apply` commits (with `Ledger-Entry` trailer), rebuilds, appends ledger.
 - [x] `torq-broker rollback` reverts, rebuilds, appends ledger.
-- [x] `torq-broker verify` detects an edited, added or removed field or entry (not yet: the newest
-      entries cut off, until the ledger is anchored, M3; KNOWN-GAPS 2).
+- [x] `torq-broker verify` detects an edited, added or removed field or entry. (The newest entries cut
+      off are caught only against a remote copy, which is built in M3 and off by default; KNOWN-GAPS 2.)
 - [x] NixOS VM test `tests/trust-loop.nix` proves propose → apply → rollback.
   (Runs inside the UTM VM without `/dev/kvm`: QEMU falls back to TCG; ~75 s of test time.)
 
@@ -52,7 +57,7 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`. torqcli is the agent's int
       [compare <m>]`, `show packages` (was `show packages available`), `show services`, `show system alarms` (3e).
 - [x] `commit check` (evaluates the committed base; building is left to the commit); `commit
       [comment]`; `commit confirmed [<minutes>]`; system-tier commits (and others' folders) print
-      the change and need a terminal. Not yet run end to end against a real broker: the cutover.
+      the change and need a terminal. (`commit check` evaluates the candidate; it does not build.)
 - [x] `rollback <n>`, `request system repair`; `request system update [all]` and `request system
       software rollback <n>` load the software (`flake.lock`) into the candidate (4e).
 - [x] Configuration numbers from the ledger (4f); `request system revert <change>`, `show system
@@ -69,7 +74,7 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`. torqcli is the agent's int
       `show interfaces`, `show system storage` (CLI-DESIGN.md).
 - [ ] Human polish, below M3–M5: the walk of every `?`; a usability check by someone new to TorqOS
       (installs, removes, undoes and reads the log unaided). Done: `configure exclusive` (2026-11-07, cli/src/exclusive.rs).
-- [x] `commit at <time>` (approved now, applied then as that person; one at a time; refused if stale;
+- [x] `commit at <time>` (approved now, applied then as that person; one at a time; on a moved configuration only if it does exactly what was shown, ADR-053;
       `clear system commit`; `tests/commit-at.nix`, CLI-DESIGN.md).
 
 **First round** (done with the earlier command names; carried over):
@@ -93,7 +98,7 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`. torqcli is the agent's int
 - [x] Terminal look: TorqOS's shell, zsh + oh-my-zsh with the TorqOS prompt (modules/shell.nix);
       torqcli in colour (`show | compare`, `show configuration`, its prompt, errors, `?`; paint.rs).
 
-### M2 — Install: TorqOS as a ready image  ← finishing
+### M2 — Install: TorqOS as a ready image  ✓ done (v0.2.0, 2026-11-04)
 Nobody has to build TorqOS to install it: a release is an image to download and boot. Updates work
 as NixOS's do (ADR-023): almost everything comes signed from NixOS's own binary cache; the machine
 builds TorqOS's few small pieces itself, in minutes — no service for the project to run. Ease of use
@@ -103,7 +108,7 @@ first.
       QEMU, Proxmox), log in. The config repo and ledger are created on first boot. *aarch64 done:
       installed in UTM from the image (2026-11-02). x86_64 and aarch64 (qcow2, and a VMDK for ESXi)
       built by CI (the `image` workflow, and with each release); the x86_64 VMDK booted on ESXi 8.0.3
-      (torq5, 2026-11-02).*
+      (the dev host of the day, 2026-11-02).*
 - [x] **First-boot setup**, like a network device's initial configuration dialog: host name,
       time zone, the owner's account and password, how to log in remotely (password, SSH key, or
       both), asked once at the console, committed as change #1. No default password ships;
@@ -116,16 +121,16 @@ first.
       and bcache's left out of a machine without a screen, ~45 MB.)*
 - [x] **Releases** (`v0.1.0`, …) at one URL machines fetch from; `request system update` moves to
       the newest one. *Built (2026-11-02, ADR-028): signed commits in the public
-      `netstacks/torqos-releases`, `stable` moved forward to each tested release; machines take it
+      `torqosorg/torqos-releases` (moved there from `netstacks/` on 2026-11-11), `stable` moved forward to each tested release; machines take it
       as git and check each commit's signature before loading it; an image machine's first update
-      moves it there. v0.1.0 out (2026-11-02), checked from outside. Done: `torq5`, installed from
+      moves it there. v0.1.0 out (2026-11-02), checked from outside. Done: the dev host of the day, installed from
       the image, had its first update move its source from the image's own store path to
       `git+…/torqos-releases?ref=stable` as one ledgered change, and runs a release.*
-- [x] **CI (GitHub Actions):** *test* on pull requests, by hand and in every release (not on every push since 2026-11-05: the dev host runs it before each merge) (`nix flake check`: tree
+- [x] **CI (GitHub Actions):** *test* on pull requests, by hand and in every release (not on every push to `main` since 2026-11-05) (`nix flake check`: tree
       checks and the VM tests, with KVM); *(the `test` workflow, 2026-11-02, with the DCO
       sign-off check on pull requests)* *nixpkgs bump* weekly, as a pull request the tests run
       on *(the `bump` workflow, 2026-11-02: one branch, `bump/nixpkgs`, replaced each week until
-      merged)*; *release* on a `v*` tag: the images built on x86_64 and arm64 runners, checksums, a
+      merged)*; *release* on a `v*` tag: the images built on an x86_64 runner (arm64 was built until v0.2.0 and is off now, ADR-030), checksums, a
       GitHub Release, the tagged source copied to the release repo and `stable` moved *(the
       `release` workflow, 2026-11-02; the key an Actions secret for now, ADR-028)*. The move to the
       next NixOS release (every six months) stays a person's.
@@ -163,7 +168,7 @@ first.
       ADR-025: "SSH keys only" is a default TorqOS applies however SSH is turned on; root never
       logging in over SSH is an invariant.)
 
-### M3 — Trust: the account, the door, the record (ADR-035, ADR-036)  ← next
+### M3 — Trust: the account, the door, the record (ADR-035, ADR-036)  ✓ done (v0.3.x)
 Before an agent exists it needs an identity the kernel vouches for, and before a machine is a URL
 its record has to live off the machine. Both faces want this: a server's ledger anchored in git is
 the sysadmin's audit trail; a laptop's is what makes the agent's access safe.
@@ -185,12 +190,15 @@ the sysadmin's audit trail; a laptop's is what makes the agent's access safe.
 - [x] **Strict mode and `torq break-glass`** (ADR-035): sudoers limited to TorqOS's commands; a root
       shell only after a ledger entry, anchored. A VM test that a shell leaves its entry.
 - [x] **Data snapshots before each system change** (ADR-038) on btrfs, in new images; restored by a person, with `request system snapshot restore`. The
-      backup is built too (2026-11-07, under M4's data item); offering data at `rollback` is not.
+      backup is built too (2026-11-07, under M4's data item).
+- [ ] Offering the data's snapshot at `rollback` (not built).
 - [x] Ledger hardening carried over: N3 (a torn append), M3 (password change in one transaction),
       the `Ledger-Entry` trailer cross-check.
 
-### M3.5 — The install: one console UI, real hardware, recipes (ADR-046, ADR-047, ADR-048)
+### M3.5 — The install: one console UI, real hardware, recipes (ADR-046, ADR-047, ADR-048)  ← partly built
 Before M4: it serves CLI and desktop installs alike. The owner's laptop (HARDWARE.md) is the target.
+Built: the offline first build, network-first setup, the laptop install. Not built: the console UI,
+the answers file, recipes, the installer's other ways, the hardware profiles.
 
 - [ ] **Real hardware** (ADR-046): the installer's hardware file turns on redistributable firmware and,
       where it finds a wireless interface, iwd; hardware profiles chosen by DMI (`hardware/`), the
@@ -217,49 +225,64 @@ Before M4: it serves CLI and desktop installs alike. The owner's laptop (HARDWAR
       image's boot from the carried firmware and joined with iwd), the repository offered only online, the restart
       on real hardware from the broker's unit, the failure's cause on screen, the version shown.
 
-### M4 — The desktop as a configuration (ADR-034, ADR-037, ADR-038, ADR-045)
+### M4 — The desktop as a configuration (ADR-034, ADR-037, ADR-038, ADR-045)  ← largely built, on main, not released
 Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. COSMIC, and only COSMIC
 (ADR-045). Needs `torq-wire` (ADR-044) first.
 
-- [ ] **`torqos-desktop`**: COSMIC and cosmic-greeter through NixOS's modules, its portal, Flatpak on;
+- [x] **`torqos-desktop`** (2026-11-09, COSMIC 1.11 from nixos-unstable, ADR-045 amended; `tests/desktop.nix`): COSMIC and cosmic-greeter through NixOS's modules, its portal, Flatpak on;
       `modules/desktop.nix` rewritten as its module set (niri, tuigreet, Quickshell, foot, fuzzel go).
       Loaded with `load override` on an image machine, or adopted at setup (M3). A VM test that it
-      boots to a COSMIC session; smoothness judged on real hardware (.37).
-- [ ] **TorqOS Settings** (`settings/`, libcosmic; ADR-045 2): the tree, the candidate, commit,
+      boots to a COSMIC session; smoothness judged on real hardware (the owner's laptop, the only
+      physical machine it has run on).
+- [x] **TorqOS Settings** (2026-11-09; torqcli's own sessions, ADR-045 amended; every action checked against the grammar): the tree, the candidate, commit,
       history, rollback, pending proposals, alarms, backups — a client of the broker's socket only,
       its words the broker's. A VM test that each action it offers is the torqcli request it names.
+- [x] **TorqOS in COSMIC's panel** (2026-11-09, ADR-049): `torq-applet`, what a switch needs, notifications, the menu refreshed.
+- [x] **SSH tunnels in the panel** (2026-11-10, ADR-050; `tests/tunnels.nix`): the person's tunnels in
+      their home, kept up by their own systemd, failing closed on an unknown host key; `torq-tunnels`, a
+      panel applet to start, stop and add them.
+- [x] **A change waiting for a person survives a desktop save** (2026-11-10, ADR-053; `tests/desktop.nix`): approved on
+      a moved configuration, it is re-checked there and applied only if it does exactly what was shown.
 - [ ] **COSMIC Settings wrapped** (ADR-045 3): the pages that change what the tree owns (time zone,
       host name, users, …) hand the change to TorqOS Settings as a proposal; a patch in the overlay.
-- [ ] **The person's COSMIC settings** (ADR-045 4): tree defaults, drift in `show | compare`,
-      `request users <name> desktop save`; the tree's COSMIC words generated from cosmic-config's keys.
+- [x] **The person's COSMIC settings, saved** (ADR-045 4, amended 2026-11-10): `request system desktop save`
+      and `request system desktop saving automatic|manual`, `show system desktop`; kept in
+      `users/<name>/desktop.json`, the panel applet saving every 15 minutes by default (`cli/src/desktop.rs`).
+      COSMIC's own settings only, and a save only when the person changed one (KNOWN-GAPS 6zx, 6zy, fixed
+      2026-11-11; what was saved before stays in the history).
+- [ ] **The person's COSMIC settings, the rest** (ADR-045 4): tree defaults, drift in `show | compare`; the
+      tree's COSMIC words generated from cosmic-config's keys.
+- [x] **Applications** (2026-11-09: the Apps page, per person, remembered in `users <name> flatpaks`; ADR-037 amended).
 - [ ] **Applications by rung** (ADR-037): `users <name> flatpaks` reconciled at switch (only what it names); the COSMIC Store per user, its installs shown in `show | compare` and kept with `… flatpaks keep` (ADR-037 amended); the design
       for a person's own builds in the tree (`users <name> projects`), user tier; what TorqOS refuses
       (`curl | sh`, self-updaters) said where it can see it.
-- [ ] **Data declared** (ADR-038): `services syncthing` and a sync mount as tree settings; the
-      backup (`services restic backups`) with its key outside the repo and `request system restore`
-      (built 2026-11-07: `request system backup key`, `show system backups`, `tests/backup.nix`; KNOWN-GAPS 6zm);
-      the restore step in setup's from-a-repository path.
-- [ ] **Approval as a dialog** (ADR-045 5): a system-tier commit on a desktop asks through polkit and
-      COSMIC's agent (`org.torqos.approve`, `auth_self`), with the person's password; the same prompt
-      text torqcli prints. Its two open questions settled first.
+- [x] **The declared backup** (ADR-038; built 2026-11-07): `services restic backups` with its key outside the
+      repo, `request system backup key`, `request system restore`, `show system backups`, `tests/backup.nix`; KNOWN-GAPS 6zm.
+- [ ] **Data declared, the rest** (ADR-038): `services syncthing` and a sync mount as tree settings; the
+      restore step in setup's from-a-repository path.
+- [x] **Approval as a dialog** (2026-11-09; `tests/desktop.nix` drives the real one) (ADR-045 5): a system-tier commit on a desktop asks through polkit and
+      COSMIC's agent (`org.torqos.approve`, `auth_self`), with the person's password; the broker's facts as its text
+      (not torqcli's prompt word for word). Its two open questions settled by the owner.
 - [ ] **Releases carry the desktop configuration** as a second artifact, versioned with TorqOS.
 
-### M5 — The agent (AI-LAYER.md)
-On the account M3 made, over the configuration M4 made. The three scenarios of ADR-034 are the
+### M5 — The agent (AI-LAYER.md)  ← the non-GUI half is built (v0.3.x), experimental
+Experimental: doctor mode is off by default, no model ships, and no real model has been tried (the
+tests use a scripted endpoint). The resident agent, torq-mcp and ADR-051 are parked on `work/agents`
+until after 0.4.0-rc1. On the account M3 made, over the configuration M4 made. The three scenarios of ADR-034 are the
 acceptance tests, each a VM test.
 
-- [x] **Doctor mode** (built 2026-11-07 on `work/w3`, ADR-042; `agent/`, `tests/doctor.nix` written,
-      not yet run): `torq doctor "why is my wifi flaky?"` — `torq-doctor` as `torq-agent`, read-only
+- [x] **Doctor mode** (built 2026-11-07 on `work/w3`, ADR-042; `agent/`, `tests/doctor.nix`, green in CI in the v0.3.2 release run;
+      no real model has ever been tried, the tests use a scripted endpoint): `torq doctor "why is my wifi flaky?"` — `torq-doctor` as `torq-agent`, read-only
       tools only (the journal, hardware, `show configuration`, the ledger, alarms, NixOS option docs);
       explains, proposes nothing; the session tainted once it reads untrusted text. Local model by
       default (ADR-005, llama-server on a unix socket); a remote one as a setting.
-- [x] **Proposals**, non-GUI (built 2026-11-07 on `work/w5`, ADR-042 6 as amended; `tests/agent-proposals.nix`
-      written, not yet run): `torq agent propose "<ask>"` — the doctor with `propose_change`, structured
+- [x] **Proposals**, non-GUI (built 2026-11-07 on `work/w5`, ADR-042 6 as amended; `tests/agent-proposals.nix`, green in CI in the v0.3.2 release run):
+      `torq agent propose "<ask>"` — the doctor with `propose_change`, structured
       words of the tree, through torqcli as the agent, which proposes and stops; the allow-list enforced
       at the broker; the taint held by the broker (sessions, `broker/src/session.rs`), sessionless
       proposals tainted; `request system apply` says why one is tainted; an agent's change to the
-      network, SSH, units, /etc, boot, hardware, the console or the display applied only as a `commit confirmed`. Left: the
-      desktop dialog (M4); a VM test of the doctor's own commit (KNOWN-GAPS 6zq).
+      network, SSH, units, /etc, boot, hardware, the console or the display applied only as a `commit confirmed`.
+- [ ] Proposals, what is not built: the desktop dialog for applying a proposal (M4); a VM test of the doctor's own propose step (KNOWN-GAPS 6zq).
 - [x] **Session trust**, non-GUI (built 2026-11-07 on `work/w5`, ADR-042 7 as amended): `request system
       agent trust <minutes>` (at most 60, the person's password, their own folder) and `… revoke`;
       ledgered (grant, each apply under it, revoke, expiry), shown in `show system alarms`, never system
@@ -270,13 +293,23 @@ acceptance tests, each a VM test.
       session and ledgered; remote input checked first. In the person's session; the agent's
       tooling, not the broker's.
 
-## After 0.3.0: first in the next cycle
+### Secrets the agent may use and never read (ADR-052; on `work/secrets`, for 0.4.0, not released)
+- [x] **Steps 1 to 3** (built 2026-11-10; `tests/secrets.nix`): the values and their rules (`request system
+      secret …`, `show system secrets`, kept encrypted, root's alone, never in the ledger); the daemon
+      `torq-secrets` that uses a secret in an HTTPS request for a program that never reads it; SSH.
+- [ ] **Step 4**: approvals and taint (a person asked before the agent uses a secret; until then the
+      agent may use only a secret that asks for no approval, from an untainted session).
+- [ ] **Step 5**: the Secrets page in TorqOS Settings.
 
-- [ ] **One vocabulary for the socket and the ledger** (ADR-044, KNOWN-GAPS 6zp): the crate `torq-wire`
-      (`Request`, `Frame`, the exit codes; `Entry`, `Kind`, `Tier`, `Actor` with an `Unknown` case;
-      `CommitId`, `StorePath`, `SnapshotLabel`) used by broker, torqcli and the agent. Fixture ledgers
-      from today's broker first, each round-tripping byte for byte; then the socket's types, then the
-      kinds, then the newtypes. Typed `data` per kind and splitting `broker/src/lib.rs` after that.
+## After 0.3.0: in the next cycle
+
+- [x] **One vocabulary for the socket and the ledger, steps 0 and 1** (ADR-044, KNOWN-GAPS 6zp; built
+      2026-11-09): the crate `torq-wire` (`wire/`, check `wire`), with the ledger's fixtures and the
+      socket's types and exit codes, used by the broker and torqcli.
+- [ ] **The rest of it**: the kinds, tiers and actors (`Entry`, `Kind`, `Tier`, `Actor` with an `Unknown`
+      case), then the newtypes (`CommitId`, `StorePath`, `SnapshotLabel`), in the broker, torqcli and
+      the agent; the fixtures need the ledger lines no `cargo test` writes first (6zp). Typed `data` per
+      kind and splitting `broker/src/lib.rs` after that.
 
 ## Later (not planned now): boot security, and limits on root
 

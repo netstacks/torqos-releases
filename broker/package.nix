@@ -4,7 +4,15 @@ rustPlatform.buildRustPackage {
   pname = "torq-broker";
   # One place: Cargo.toml (scripts/bump-version sets it).
   version = (lib.importTOML ./Cargo.toml).package.version;
-  src = lib.cleanSource ./.;
+  # This crate and torq-wire (ADR-044), nothing else of the repository: a change elsewhere rebuilds nothing.
+  src = lib.fileset.toSource {
+    root = ../.;
+    # Not a build left in the working tree (a `path:` source, in development, copies it).
+    fileset = lib.fileset.difference (lib.fileset.unions [ ./. ../wire ])
+      (lib.fileset.unions [ (lib.fileset.maybeMissing ./target) (lib.fileset.maybeMissing ../wire/target) ]);
+  };
+  cargoRoot = "broker";
+  buildAndTestSubdir = "broker";
 
   # Generate once with `cargo generate-lockfile` in broker/ and commit Cargo.lock.
   cargoLock.lockFile = ./Cargo.lock;

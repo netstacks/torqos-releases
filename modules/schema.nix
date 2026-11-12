@@ -13,7 +13,7 @@
 #   key      leaf: its key in that file's JSON object (a leaf-list is the whole file, a JSON list)
 #   tier     system | user (what the broker will call a change to it)
 #   values   the allowed values, if a closed set: { value = "help"; } (completion and checking)
-#   type     otherwise what a value must look like: package | host-name | user-name (checked by
+#   type     otherwise what a value must look like: package | flatpak | host-name | user-name (checked by
 #            the module; for a list, what its entry names must look like — the shell checks a
 #            name against it before putting it into a path)
 #
@@ -33,7 +33,7 @@ let
       key = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; };
       tier = lib.mkOption { type = lib.types.enum [ "system" "user" ]; default = "system"; };
       values = lib.mkOption { type = lib.types.nullOr (lib.types.attrsOf lib.types.str); default = null; };
-      type = lib.mkOption { type = lib.types.nullOr (lib.types.enum [ "package" "host-name" "user-name" ]); default = null; };
+      type = lib.mkOption { type = lib.types.nullOr (lib.types.enum [ "package" "flatpak" "host-name" "user-name" ]); default = null; };
     };
   };
   clean = lib.mapAttrs (_: n: lib.filterAttrs (_: v: v != null) n);

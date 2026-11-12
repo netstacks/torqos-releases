@@ -32,7 +32,7 @@ The site is written to `site/` (ignored by git). `--strict` fails on broken link
 
 The site is deployed as static files on Cloudflare Workers; `wrangler.jsonc` points Cloudflare at
 the built `site/` folder. In the Cloudflare dashboard, **Workers & Pages → Create → Import a
-repository**, pick `netstacks/torqos`, and set:
+repository**, pick `torqosorg/torqos`, and set:
 
 | Setting | Value |
 |---|---|

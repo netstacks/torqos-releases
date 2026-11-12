@@ -29,6 +29,11 @@ pub trait Machine {
     /// Propose `diff` against `base` and apply it (with `confirm` minutes: commit confirmed). The
     /// broker's tier must be `tier`. Returns the applied ledger entry's number.
     fn commit(&self, diff: &str, base: &str, tier: &str, reason: &str, confirm: Option<u32>) -> Result<u64>;
+    /// What the running system needs before it is all in use (ADR-049), as a sentence; None: nothing, or not
+    /// a machine that can say.
+    fn needs(&self) -> Option<String> {
+        None
+    }
     /// A commit confirmed waiting, if there is one.
     fn pending_confirm(&self) -> Result<Option<Waiting>>;
     /// Keep the waiting commit confirmed.
@@ -91,6 +96,14 @@ pub trait Machine {
     fn backups(&self) -> Result<String>;
     /// `request system backup key <name>`: the key typed at the terminal, kept outside the configuration.
     fn backup_key(&self, name: &str, me: &str) -> Result<String>;
+    /// `request system secret set|delete|show <name> [user <user>]` (ADR-052): the value, at the broker. `set`
+    /// has it typed at the terminal; `show` gives it back. What happened, said.
+    fn secret_value(&self, name: &str, user: Option<&str>, act: &crate::secrets::Act, me: &str) -> Result<String>;
+    /// The secrets that have a value, as the broker lists them: never a value.
+    fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>>;
+    /// `host`'s keys as the person running this knows them (their known_hosts, port 22), as `<host> <type> <key>`
+    /// lines; none: they have not connected to it and checked it.
+    fn known_host_keys(&self, host: &str) -> Result<Vec<String>>;
     /// `request system restore`: put a path back from a backup (as `me`, with their password).
     fn restore_backup(&self, name: &str, snapshot: Option<&str>, path: &str, me: &str) -> Result<String>;
     /// `request system remote clear`: clear the remote's alarm (as `me`, with their password).
@@ -334,6 +347,8 @@ pub struct Session<'a> {
     pub schema: Schema,
     /// Every NixOS setting of the system (nixos.rs): the tree's paths.
     pub tree: crate::nixos::Tree,
+    /// The files the schema and the tree were read from, once `follow_schemas` has looked: a switch installs others.
+    schemas_read: Option<(PathBuf, PathBuf)>,
     pub repo: Repo,
     /// Where the candidate is kept between sessions; None: a private one (`torqcli -c`), discarded
     /// at the end.
@@ -447,7 +462,7 @@ fn word(out: &mut Vec<String>, w: String) -> Result<()> {
 
 impl<'a> Session<'a> {
     pub fn new(schema: Schema, tree: crate::nixos::Tree, repo: Repo, saved: Option<PathBuf>, machine: &'a dyn Machine, me: &str) -> Self {
-        Session { schema, tree, repo, saved, mode: Mode::Operational, edit: Vec::new(), candidate: None, machine, me: me.into(), screen: || None, fit: None, done: false, page: true, exclusive: None, print: None, cache: crate::evalcache::Cache::none(), asks: false, from_configuration: false }
+        Session { schema, tree, schemas_read: None, repo, saved, mode: Mode::Operational, edit: Vec::new(), candidate: None, machine, me: me.into(), screen: || None, fit: None, done: false, page: true, exclusive: None, print: None, cache: crate::evalcache::Cache::none(), asks: false, from_configuration: false }
     }
 
     /// The whole tree over both kinds of files (whole.rs).
@@ -517,6 +532,41 @@ impl<'a> Session<'a> {
         self.write_shared(|_, _| Ok(())).map(drop)
     }
 
+    /// The schema and the tree again, if the system running now has other files for them than those this
+    /// session read (a switch installed them): a session that stays open learns the settings of the system
+    /// it is on. The first call notes what was read. Whether they changed.
+    pub fn follow_schemas(&mut self, schema: &Path, nixos: &Path) -> bool {
+        let (Ok(a), Ok(b)) = (std::fs::canonicalize(schema), std::fs::canonicalize(nixos)) else { return false };
+        let now = (a, b);
+        match &self.schemas_read {
+            None => {
+                self.schemas_read = Some(now);
+                return false;
+            }
+            Some(was) if *was == now => return false,
+            Some(_) => {}
+        }
+        let read = |p: &Path| std::fs::read_to_string(p).map_err(anyhow::Error::from);
+        let (Ok(s), Ok(t)) = (read(&now.0).and_then(|j| Schema::parse(&j)), read(&now.1).and_then(|j| crate::nixos::Tree::parse(&j))) else {
+            return false;
+        };
+        self.schema = s;
+        self.tree = t;
+        self.schemas_read = Some(now);
+        // The candidate is read against the schema: read again, against this one.
+        self.reread();
+        true
+    }
+
+    /// Read the shared candidate again at the next command, as it is on disk now: for a session that lives
+    /// beside others changing it (TorqOS Settings), unless this one holds it alone.
+    pub fn reread(&mut self) {
+        if self.exclusive.is_none() {
+            self.candidate = None;
+            self.print = None;
+        }
+    }
+
     /// Run one command line; returns what to print.
     pub fn exec(&mut self, line: &str) -> Result<String> {
         self.exec_words(&words(line)?)
@@ -580,6 +630,16 @@ impl<'a> Session<'a> {
         format!("{}\n", self.ui().line("", text))
     }
 
+    /// What the running system needs now (ADR-049), after a change; `waiting`: that change still waits for
+    /// its confirmation, and a restart before it undoes it.
+    fn needs_note(&self, waiting: bool) -> String {
+        match self.machine.needs() {
+            Some(l) if waiting && l.starts_with("Restart") => self.said(&format!("{l} Confirm this change first: a restart undoes a change not yet confirmed.")),
+            Some(l) => self.said(&l),
+            None => String::new(),
+        }
+    }
+
     /// A sentence marked `! ` (paint.rs shows it as a warning).
     fn noted(&self, text: &str) -> String {
         format!("{}\n", self.ui().line("! ", text))
@@ -620,7 +680,7 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowSnapshots | Op::ShowBackups | Op::ShowRemote => {
+            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowSnapshots | Op::ShowBackups | Op::ShowSecrets | Op::ShowRemote | Op::ShowDesktop => {
                 self.show_operational(op)
             }
             Op::ClearCommit => self.clear_commit(),
@@ -1026,7 +1086,9 @@ impl<'a> Session<'a> {
             Op::ShowProposals => self.machine.proposals(self.fit),
             Op::ShowSnapshots => self.machine.snapshots(),
             Op::ShowBackups => self.machine.backups(),
+            Op::ShowSecrets => crate::secrets::shown(&self.repo, &self.machine.secrets_kept()?),
             Op::ShowRemote => self.machine.remote(),
+            Op::ShowDesktop => Ok(crate::desktop::shown(&crate::desktop::status(&self.repo, &self.me, &crate::desktop::Paths::of_home()?)?)),
             Op::ShowServices => {
                 // What the configuration in effect turns on: NixOS's services (`services <name> enable`,
                 // `virtualisation <name> enable`), and what the old list still turns on.
@@ -1239,6 +1301,42 @@ impl<'a> Session<'a> {
         out
     }
 
+    /// `request system secret …` (ADR-052). A person's own secret is theirs alone: no one else sets, reads or
+    /// changes the rule of it; an administrator may delete its value (the broker asks their password).
+    fn secret(&mut self, name: &str, user: Option<&str>, act: &crate::secrets::Act) -> Result<String> {
+        use crate::secrets::Act;
+        let theirs = user.is_some_and(|u| u != self.me);
+        if theirs && *act != Act::Delete {
+            bail!("{}'s secrets are theirs alone: no one else sets, reads or changes them", user.unwrap_or_default());
+        }
+        match act {
+            Act::Set | Act::SetFile(_) | Act::Show => self.machine.secret_value(name, user, act, &self.me),
+            Act::Delete => {
+                let kept = self.machine.secrets_kept()?.contains(&(user.map(String::from), name.to_string()));
+                let ruled = crate::secrets::read(&self.repo, &self.repo.head()?, user)?.contains_key(name);
+                if !kept && !ruled {
+                    bail!("there is no secret {name}{}", user.map(|u| format!(" of {u}'s")).unwrap_or_default());
+                }
+                // The rule first: a commit declined, or refused, leaves the value as it was too, and nothing half done.
+                let mut out = String::new();
+                if ruled && theirs {
+                    out.push_str(&format!("Its rule stays: {}'s to change.\n", user.unwrap_or_default()));
+                } else if ruled {
+                    out.push_str(&crate::secrets::changed(self.machine, &self.repo, name, user, act)?);
+                }
+                if kept {
+                    match self.machine.secret_value(name, user, act, &self.me) {
+                        Ok(said) => out.push_str(&said),
+                        Err(e) if !out.is_empty() => bail!("{}but its value was not deleted: {e:#}", out),
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(out)
+            }
+            _ => crate::secrets::changed(self.machine, &self.repo, name, user, act),
+        }
+    }
+
     fn request(&mut self, r: syntax::Request) -> Result<String> {
         match r {
             syntax::Request::Repair => self.machine.repair(),
@@ -1248,11 +1346,30 @@ impl<'a> Session<'a> {
             syntax::Request::Trust { minutes } => self.machine.trust(Some(minutes)),
             syntax::Request::TrustRevoke => self.machine.trust(None),
             syntax::Request::RemoteKey => self.machine.remote_key(),
+            syntax::Request::DesktopSave => {
+                let s = crate::app::sync_desktop(true)?;
+                let mut out = match s.saved {
+                    Some(seq) => format!("Saved your desktop in your configuration (change #{seq}).\n"),
+                    None => "Your desktop is saved: nothing has changed since.\n".to_string(),
+                };
+                if s.applied > 0 {
+                    out.push_str(&format!("{} settings from your configuration were put on this desktop.\n", s.applied));
+                }
+                if !s.failed.is_empty() {
+                    out.push_str(&format!("! Could not put these on the desktop: {}\n", s.failed.join(", ")));
+                }
+                Ok(out)
+            }
+            syntax::Request::DesktopSaving { automatic } => {
+                let how = if automatic { crate::desktop::Saving::Automatic } else { crate::desktop::Saving::Manual };
+                crate::app::desktop_saving(how)
+            }
             syntax::Request::RemoteClear => self.machine.remote_clear(&self.me),
             syntax::Request::LedgerAcknowledge => self.machine.acknowledge(&self.me),
             syntax::Request::RestoreData { change, path } => self.machine.restore_data(change, &path, &self.me),
             syntax::Request::SnapshotTake => self.machine.snapshot_take(&self.me),
             syntax::Request::BackupKey { name } => self.machine.backup_key(&name, &self.me),
+            syntax::Request::Secret { name, user, act } => self.secret(&name, user.as_deref(), &act),
             syntax::Request::Restore { name, snapshot, path } => self.machine.restore_backup(&name, snapshot.as_deref(), &path, &self.me),
             syntax::Request::SnapshotDelete { change } => self.machine.snapshot_delete(change, &self.me),
             syntax::Request::Pull => self.pull(),
@@ -1721,7 +1838,7 @@ impl<'a> Session<'a> {
                 bail!("change #{} is waiting for {} to confirm it; it rolls back at {} unless they do", w.seq, w.by.as_deref().unwrap_or("?"), w.deadline);
             }
             let n = self.machine.confirm()?;
-            return Ok(self.said(&format!("commit complete: change #{} confirmed (#{n})", w.seq)));
+            return Ok(self.said(&format!("commit complete: change #{} confirmed (#{n})", w.seq)) + &self.needs_note(false));
         }
         if let Some(w) = waiting {
             bail!(
@@ -1840,7 +1957,7 @@ impl<'a> Session<'a> {
                 self.said("commit complete")
             ),
             None => self.said(&format!("commit complete (change #{seq})")),
-        } + &kept)
+        } + &kept + &self.needs_note(confirm.is_some()))
     }
 
     /// The candidate discarded once it is committed (or proposed) — unless another session changed or
@@ -2637,6 +2754,11 @@ mod tests {
         lands_in: Option<PathBuf>,
         /// What happens in that repo once it has landed (another commit, the change amended).
         then_sh: Option<String>,
+        /// The secrets that have a value (ADR-052), and what was asked of their values.
+        kept: Vec<crate::secrets::Kept>,
+        secret_calls: RefCell<Vec<String>>,
+        /// The person's known_hosts lines.
+        known_hosts: Vec<String>,
     }
     impl Machine for Fake {
         /// One evaluation: the warnings a test gives, and SSH after the change — as the evaluator would:
@@ -2795,6 +2917,16 @@ mod tests {
         }
         fn backups(&self) -> Result<String> {
             Ok("no backups\n".into())
+        }
+        fn secret_value(&self, name: &str, user: Option<&str>, act: &crate::secrets::Act, me: &str) -> Result<String> {
+            self.secret_calls.borrow_mut().push(format!("{} {name} {user:?} by {me}", act.verb()));
+            Ok(format!("{} {name}\n", act.verb()))
+        }
+        fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>> {
+            Ok(self.kept.clone())
+        }
+        fn known_host_keys(&self, host: &str) -> Result<Vec<String>> {
+            Ok(self.known_hosts.iter().filter(|l| l.split(' ').next() == Some(host)).cloned().collect())
         }
         fn backup_key(&self, name: &str, me: &str) -> Result<String> {
             Ok(format!("key of {name} for {me}\n"))
@@ -3175,6 +3307,64 @@ mod tests {
     /// The test repo, then two commits of software: `OLD` (rollback 1), then `NOW` (rollback 0).
     const OLD: u64 = 1_790_000_000;
     const NOW: u64 = 1_793_000_000;
+    /// ADR-052: a person's own secret is theirs; its rules are commits of their own file, the system's of the
+    /// system's; no one else's is set, read or changed from here, and an administrator may delete only its value.
+    #[test]
+    fn a_secret_is_its_owners_and_its_rules_are_commits() {
+        let d = repo();
+        let m = Fake { kept: vec![(Some("dev".into()), "gh".into()), (Some("sam".into()), "x".into())], ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(s.exec("request system secret set gh user dev").unwrap(), "set gh\n");
+        assert_eq!(s.exec("request system secret show gh user dev").unwrap(), "show gh\n");
+        for line in ["request system secret set x user sam", "request system secret show x user sam", "request system secret allow x agent user sam"] {
+            let e = format!("{:#}", s.exec(line).unwrap_err());
+            assert!(e.contains("sam's secrets are theirs alone"), "{line}: {e}");
+        }
+        let out = s.exec("request system secret allow gh https api.github.com user dev").unwrap();
+        assert_eq!(out, "Changed what dev's secret gh may be used for (change #42).\n");
+        let (diff, _, tier, reason, _) = m.commits.borrow().last().unwrap().clone();
+        assert_eq!((tier.as_str(), reason.as_str()), ("user", "Secret gh: may be sent to api.github.com"));
+        assert!(diff.contains("+++ b/users/dev/secrets.json") && diff.contains("\"api.github.com\""), "{diff}");
+        // What a secret is for comes first; then who.
+        let e = format!("{:#}", s.exec("request system secret allow ci agent").unwrap_err());
+        assert!(e.contains("not used for anything yet"), "{e}");
+        s.exec("request system secret allow ci https api.github.com").unwrap();
+        let (diff, _, tier, _, _) = m.commits.borrow().last().unwrap().clone();
+        assert_eq!(tier, "system");
+        assert!(diff.contains("+++ b/secrets/system.json"), "{diff}");
+        // Deleting: its value, and for someone else's, only that.
+        assert_eq!(s.exec("request system secret delete x user sam").unwrap(), "delete x\n");
+        assert!(s.exec("request system secret delete none").is_err(), "nothing to delete");
+        assert_eq!(*m.secret_calls.borrow(), ["set gh Some(\"dev\") by dev", "show gh Some(\"dev\") by dev", "delete x Some(\"sam\") by dev"]);
+        let shown = s.exec("show system secrets").unwrap();
+        assert_eq!(shown, "dev's secrets:\n  gh                   has a value; used for nothing\nsam's secrets:\n  x                    has a value; used for nothing\n");
+    }
+
+    #[test]
+    fn the_secrets_rules_shown_as_the_repository_has_them() {
+        let d = repo();
+        sh(d.path(), "mkdir -p secrets users/dev && printf '%s' '{\"ci\":{\"kind\":\"token\",\"https\":{\"hosts\":[\"api.github.com\"]},\"actors\":[\"torq-agent\"]}}' > secrets/system.json \
+            && printf '%s' '{\"deploy\":{\"kind\":\"ssh-key\",\"ssh\":{\"hosts\":[\"github.com\"],\"known\":[\"github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\"]},\"approve\":\"never\"}}' > users/dev/secrets.json && git add -A && git commit -qm rules");
+        let gitlab = "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfuCHKVTjquxvt6CM6tdG4SLp1Btn/nOeHHE5UOzRdf".to_string();
+        let m = Fake { kept: vec![(None, "ci".into())], known_hosts: vec![gitlab.clone()], ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        let shown = s.exec("show system secrets").unwrap();
+        assert_eq!(
+            shown,
+            "The system's secrets:\n  ci                   token, has a value; https to api.github.com; the agent too, approved first-use\n                       use: http://127.0.0.1:7800/system/ci/api.github.com/\ndev's secrets:\n  deploy               SSH key, no value yet; ssh to github.com; not the agent\n"
+        );
+        // A change starts from what is there; an SSH host comes with its key, as the person knows it.
+        s.exec("request system secret allow deploy ssh gitlab.com user dev").unwrap();
+        let (diff, ..) = m.commits.borrow().last().unwrap().clone();
+        assert!(diff.contains("\"github.com\"") && diff.contains("+        \"gitlab.com\"") && diff.contains(&gitlab), "{diff}");
+        // A host the person never connected to and checked is not allowed.
+        let e = format!("{:#}", s.exec("request system secret allow deploy ssh bitbucket.org user dev").unwrap_err());
+        assert!(e.contains("no key of bitbucket.org is known"), "{e}");
+        s.exec("request system secret delete ci").unwrap();
+        let (diff, ..) = m.commits.borrow().last().unwrap().clone();
+        assert!(diff.contains("+++ /dev/null") || diff.contains("deleted file"), "the last rule gone, the file with it: {diff}");
+    }
+
     fn repo_with_software() -> tempfile::TempDir {
         let d = repo();
         sh(d.path(), &format!("printf '%s' '{}' > flake.lock && git add -A && git commit -qm old-software", lock(OLD)));
@@ -4398,6 +4588,29 @@ mod tests {
     }
 
     /// ADR-041: the agent's commit proposes and stops — no question (no one to ask), never applied;
+    /// A switch installs a new schema: a session left open takes it before its next line.
+    #[test]
+    fn a_session_left_open_learns_the_new_systems_settings() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        let files = tempfile::tempdir().unwrap();
+        let mut old: serde_json::Value = serde_json::from_str(include_str!("schema-fixture.json")).unwrap();
+        old["nodes"].as_object_mut().unwrap().remove("services");
+        let at = |n: &str| files.path().join(n);
+        std::fs::write(at("old.json"), old.to_string()).unwrap();
+        std::fs::write(at("new.json"), include_str!("schema-fixture.json")).unwrap();
+        std::fs::write(at("nixos.json"), include_str!("nixos-fixture.json")).unwrap();
+        std::os::unix::fs::symlink(at("old.json"), at("schema.json")).unwrap();
+        s.schema = Schema::parse(&old.to_string()).unwrap();
+        assert!(!s.follow_schemas(&at("schema.json"), &at("nixos.json")), "the first look notes what was read");
+        assert!(!s.follow_schemas(&at("schema.json"), &at("nixos.json")), "nothing changed");
+        assert!(!s.schema.nodes.contains_key("services"));
+        std::fs::remove_file(at("schema.json")).unwrap();
+        std::os::unix::fs::symlink(at("new.json"), at("schema.json")).unwrap();
+        assert!(s.follow_schemas(&at("schema.json"), &at("nixos.json")));
+        assert!(s.schema.nodes.contains_key("services"), "the new system's settings");
+    }
+
     /// a commit confirmed is not the agent's.
     #[test]
     fn the_agents_commit_proposes_and_stops() {

@@ -1,6 +1,6 @@
 [package]
 name = "torq-broker"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.89" # std::fs::File::try_lock
 description = "TorqOS privileged change broker: tiers, commits, rebuild, rollback, hash-chained ledger"
@@ -15,6 +15,7 @@ nonstick = "0.1.2"
 rustix = { version = "1.1.6", features = ["process", "fs", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+torq-wire = { path = "../wire" }
 sha2 = "0.10"
 
 [dev-dependencies]

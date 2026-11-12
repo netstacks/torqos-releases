@@ -1,7 +1,7 @@
 # Updates
 
 TorqOS releases are published to
-[netstacks/torqos-releases](https://github.com/netstacks/torqos-releases). Each release is signed
+[torqosorg/torqos-releases](https://github.com/torqosorg/torqos-releases). Each release is signed
 with the TorqOS release key, and the `stable` branch moves forward only to releases that passed the
 tests.
 

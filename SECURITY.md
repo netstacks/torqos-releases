@@ -2,12 +2,12 @@
 
 TorqOS's claims are written down: [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) says what it
 protects and how; [docs/KNOWN-GAPS.md](docs/KNOWN-GAPS.md) and the latest audit
-([docs/AUDIT-2026-11-04.md](docs/AUDIT-2026-11-04.md)) say what is known not to hold yet. A way
+([docs/AUDIT-2026-11-06.md](docs/AUDIT-2026-11-06.md)) say what is known not to hold yet. A way
 around a claim that is not already listed there is a vulnerability — please report it.
 
 ## Reporting
 
-Report privately, through GitHub: **[Report a vulnerability](https://github.com/netstacks/torqos/security/advisories/new)**
+Report privately, through GitHub: **[Report a vulnerability](https://github.com/torqosorg/torqos/security/advisories/new)**
 (the repository's Security tab). Please do not open a public issue or pull request for it.
 
 Say what you did, what you expected, and what happened — the TorqOS version
@@ -28,7 +28,7 @@ Fixes are not backported; a machine updates to the release that carries them.
 
 ## Especially wanted
 
-- A way for an unprivileged account (the agent's, when it comes) to change the system without the
+- A way for an unprivileged account (the agent's, which is experimental) to change the system without the
   broker, or to change the broker's ledger without `torq-broker verify` noticing.
 - A configuration change that slips past the settings fence (`modules/settings-fence.nix`).
 - A release a machine accepts that the release key did not sign.

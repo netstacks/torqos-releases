@@ -9,18 +9,15 @@
 
 use crate::policy::{self, Tier};
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+// The socket's words, shared with its callers (ADR-044).
+pub use torq_wire::socket::{Frame, Request, NEED_PASSWORD, SOCKET};
 
-/// Where the socket is (modules/broker.nix sets the unit to it).
-pub const SOCKET: &str = "/run/torq/broker.sock";
 /// The agent's account (ADR-035): whatever arrives from it is the agent.
 pub const AGENT: &str = "torq-agent";
 /// The PAM service a system change's password is checked against (modules/broker.nix).
 pub const PAM_SERVICE: &str = "torq-approve";
 /// The group whose members may approve a system change (with their password).
 pub const ADMINS: &str = "wheel";
-/// The exit code that says: this needs your password (none was sent, or it was wrong).
-pub const NEED_PASSWORD: i32 = 77;
 /// A request is a line, and no line is longer than this (a large diff, with room).
 pub const MAX_REQUEST: u64 = 8 << 20;
 /// The uids NixOS gives normal accounts (people): `isNormalUser` starts at 1000; Nix's build users
@@ -32,32 +29,6 @@ pub const FAILLOCK_DIR: &str = "/run/torq/faillock";
 /// How long a caller has to send its request, and to take each piece of the reply, in seconds.
 pub const TIMEOUT_SECONDS: u64 = 10;
 
-/// What a caller sends: the broker's arguments, without who it is or any file. A diff or a
-/// password hash comes in the request itself, never as a path for root to open (N16).
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Request {
-    pub args: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diff: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub password: Option<String>,
-    /// A backup's key (`backup-key`): its passphrase, kept root's alone, never in the ledger.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
-}
-
-/// What comes back, one JSON line at a time: the broker's standard output and error as they come,
-/// and how it ended, last.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Frame {
-    Out(String),
-    Err(String),
-    Exit(i32),
-}
 
 /// The account at the other end of the socket, as the kernel and the machine's own files say.
 #[derive(Debug, Clone, PartialEq)]
@@ -90,7 +61,7 @@ pub struct Change {
 /// asking and who approves (the kernel's), and files (they come in the request).
 const NOT_FROM_CALLERS: &[&str] = &[
     "--repo", "--state-dir", "--rebuild-cmd", "--build-cmd", "--activate-cmd", "--boot-cmd", "--schedule-cmd",
-    "--commit-at-cmd", "--commit-at-cancel-cmd", "--current-system", "--system-profile", "--actor", "--approved-by", "--diff", "--hash-file", "--key-file",
+    "--commit-at-cmd", "--commit-at-cancel-cmd", "--current-system", "--system-profile", "--actor", "--approved-by", "--diff", "--hash-file", "--key-file", "--value-file",
 ];
 
 /// Refuse arguments that name the caller, a file, or the broker's settings.
@@ -128,7 +99,7 @@ pub fn caller(uid: u32, passwd: &str, group: &str) -> Result<Caller> {
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
 /// password's hash is kept outside it).
-const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "snapshots", "backups", "scheduled", "session", "trust"];
+const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "snapshots", "backups", "scheduled", "session", "trust", "secrets"];
 
 /// What `cmd` needs from `who`: `change` is what it acts on (`apply`, `revert`), `user` whose
 /// password it sets (`password`). An `apply --confirm` is `apply-confirmed`: while it waits, no
@@ -141,6 +112,14 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
             Gate::Refused(format!("{} is not an administrator ({ADMINS}): a system change is theirs to approve", who.name))
         }
     };
+    // A use of a secret is the secrets daemon's to ask, and it asks nothing else (ADR-052): who the use is for,
+    // the broker reads from the kernel itself.
+    if who.name == torq_wire::secrets::DAEMON {
+        return if matches!(cmd, "secret-use" | "secret-agent") { Gate::Open } else { Gate::Refused("the secrets daemon asks for uses of secrets, and nothing else".into()) };
+    }
+    if matches!(cmd, "secret-use" | "secret-agent") {
+        return Gate::Refused("a use of a secret is asked by the secrets daemon, for the one connected to it".into());
+    }
     if OBSERVE.contains(&cmd) {
         return Gate::Open;
     }
@@ -156,6 +135,13 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
     // agent's, and every proposal stays in it for good.
     if !who.person {
         return Gate::Refused(format!("{} is not a person's account: only people, and the agent, propose changes", who.name));
+    }
+    // A person's secrets' rules are theirs alone (ADR-052): an administrator's password applies, schedules or
+    // undoes no change to anyone else's. What the agent may do with a secret is its owner's to say.
+    if let (Some(c), "apply" | "apply-confirmed" | "revert" | "schedule") = (change, cmd) {
+        if let Some(f) = c.files.iter().find(|f| others_secret_rules(&who.name, f)) {
+            return Gate::Refused(format!("{f}: a person's secrets are theirs alone to change"));
+        }
     }
     match cmd {
         "propose" => Gate::Open,
@@ -184,6 +170,13 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
         // A commit at, by the one who approved it (`user`: theirs); anyone else's, an administrator's.
         "cancel-scheduled" if user == Some(who.name.as_str()) => Gate::Open,
         "cancel-scheduled" => admins_only(),
+        // A secret's value (ADR-052): a person's own is theirs, as their own settings are; reading it back
+        // takes their password, so no program of their session reads it unseen. No one else sets or reads
+        // it, an administrator included, who may only delete it. The system's are an administrator's.
+        "secret-set" | "secret-delete" if user == Some(who.name.as_str()) => Gate::Open,
+        "secret-show" if user == Some(who.name.as_str()) => Gate::Password,
+        "secret-set" | "secret-show" if user.is_some() => Gate::Refused("a person's secret is theirs alone: no one else sets or reads it, an administrator included".into()),
+        "secret-set" | "secret-delete" | "secret-show" => admins_only(),
         "password" | "confirm" | "reconcile" | "repair" | "remote-key" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-key" | "backup-restore" => admins_only(),
         other => Gate::Refused(format!("`{other}` is not run over the socket (it is the machine's own, as root)")),
     }
@@ -208,6 +201,11 @@ pub fn account(name: &str, passwd: &str, group: &str) -> Result<Caller> {
         bail!("{name:?} shares its uid with {:?}: not one account", c.name);
     }
     Ok(c)
+}
+
+/// Whether `file` is someone other than `name`'s secrets' rules (`users/<other>/secrets.json`).
+fn others_secret_rules(name: &str, file: &str) -> bool {
+    file.strip_prefix("users/").and_then(|r| r.split_once('/')).is_some_and(|(n, leaf)| leaf == torq_wire::secrets::PERSON_RULES && n != name)
 }
 
 /// Whether `file` is in `name`'s own folder of the configuration.
@@ -237,6 +235,12 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
             a.extend(["--key-file".into(), key.context("a backup's key comes in the request")?.into()]);
             a.extend(["--approved-by".into(), who.name.clone()]);
         }
+        // A secret's value comes as a backup's key does: in the request's `key`.
+        "secret-set" => {
+            a.extend(["--value-file".into(), key.context("a secret's value comes in the request")?.into()]);
+            a.extend(["--approved-by".into(), who.name.clone()]);
+        }
+        "secret-delete" | "secret-show" => a.extend(["--approved-by".into(), who.name.clone()]),
         "apply" | "revert" | "schedule" | "cancel-scheduled" | "trust-grant" | "trust-revoke" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-restore" => a.extend(["--approved-by".into(), who.name.clone()]),
         _ => {}
     }
@@ -272,11 +276,47 @@ pub fn password_ok(name: &str, password: &str) -> bool {
         && t.items().user().is_ok_and(|u| u.as_deref() == Some(OsStr::new(name)))
 }
 
+/// The polkit action a desktop's approval of a system change is (modules/desktop.nix; `auth_self`: the
+/// caller's own password, asked by COSMIC's agent, every time).
+pub const APPROVE_ACTION: &str = "org.torqos.approve";
+
+/// A value of a logind record (`KEY=value` lines).
+fn record<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+}
+
+fn graphical(session: &str) -> bool {
+    matches!(record(session, "TYPE"), Some("wayland" | "x11"))
+}
+
+/// Whether a process belongs to a person's graphical session (ADR-045 5): in the session itself, or among
+/// the applications of a user manager whose person has one logged in. Anything else (a text console, SSH, a
+/// system service) is as it was: its own record says so. `cgroup` is /proc/<pid>/cgroup, `session` reads
+/// logind's record of a session, and `user` is logind's record of the caller's account.
+pub fn on_the_desktop(cgroup: &str, session: impl Fn(&str) -> Option<String>, user: Option<&str>) -> bool {
+    let Some(path) = cgroup.lines().find_map(|l| l.strip_prefix("0::")) else { return false };
+    for part in path.split('/') {
+        if let Some(id) = part.strip_prefix("session-").and_then(|s| s.strip_suffix(".scope")) {
+            return session(id).is_some_and(|s| graphical(&s));
+        }
+        if part.starts_with("user@") && part.ends_with(".service") {
+            return user.and_then(|u| record(u, "SESSIONS")).is_some_and(|ids| ids.split_whitespace().any(|id| session(id).is_some_and(|s| graphical(&s))));
+        }
+    }
+    false
+}
+
+/// When a process started, from its /proc/<pid>/stat: with its pid and uid, what polkit names it by, so
+/// that a pid used again is not taken for it. (After the name, which may hold anything: the last `)`.)
+pub fn start_time(stat: &str) -> Option<u64> {
+    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nviper:x:1000:100::/home/viper:/bin/zsh\nsam:x:1001:100::/home/sam:/bin/zsh\ntorq-agent:x:990:990::/var/empty:/run/current-system/sw/bin/nologin\nnobody:x:65534:65534::/var/empty:/run/current-system/sw/bin/nologin\nsshd:x:998:998::/var/empty:/run/current-system/sw/bin/nologin\n";
+    const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nviper:x:1000:100::/home/viper:/bin/zsh\nsam:x:1001:100::/home/sam:/bin/zsh\ntorq-agent:x:990:990::/var/empty:/run/current-system/sw/bin/nologin\nnobody:x:65534:65534::/var/empty:/run/current-system/sw/bin/nologin\nsshd:x:998:998::/var/empty:/run/current-system/sw/bin/nologin\ntorq-secrets:x:989:989::/var/empty:/run/current-system/sw/bin/nologin\n";
     const GROUP: &str = "root:x:0:\nwheel:x:1:viper\nusers:x:100:sam\n";
 
     fn who(uid: u32) -> Caller {
@@ -342,6 +382,52 @@ mod tests {
         assert!(matches!(gate(&who(1000), "apply", None, None), Gate::Refused(_)), "no such change");
     }
 
+    /// ADR-052: a person's own secret is theirs alone; the system's an administrator's; none of it the agent's.
+    #[test]
+    fn a_secret_is_its_owners() {
+        assert_eq!(gate(&who(1001), "secret-set", None, Some("sam")), Gate::Open);
+        assert_eq!(gate(&who(1001), "secret-delete", None, Some("sam")), Gate::Open);
+        assert_eq!(gate(&who(1001), "secret-show", None, Some("sam")), Gate::Password, "read back with their password");
+        // No one else sets or reads it, an administrator included, who may only delete it.
+        for cmd in ["secret-set", "secret-show"] {
+            assert!(matches!(gate(&who(1000), cmd, None, Some("sam")), Gate::Refused(_)), "{cmd}");
+            assert!(matches!(gate(&who(1001), cmd, None, Some("viper")), Gate::Refused(_)), "{cmd}");
+        }
+        assert_eq!(gate(&who(1000), "secret-delete", None, Some("sam")), Gate::Password);
+        assert!(matches!(gate(&who(1001), "secret-delete", None, Some("viper")), Gate::Refused(_)));
+        for cmd in ["secret-set", "secret-delete", "secret-show"] {
+            assert_eq!(gate(&who(1000), cmd, None, None), Gate::Password, "{cmd}: the system's");
+            assert!(matches!(gate(&who(1001), cmd, None, None), Gate::Refused(_)), "{cmd}");
+            for user in [None, Some("torq-agent"), Some("sam")] {
+                assert!(matches!(gate(&who(990), cmd, None, user), Gate::Refused(_)), "{cmd} {user:?}: never the agent's");
+            }
+            assert!(matches!(gate(&who(65534), cmd, None, Some("nobody")), Gate::Refused(_)), "{cmd}: a service's account has none");
+        }
+        // Their rules too: an administrator's password changes no one else's, whatever else the change holds.
+        let sams = change(Tier::User, &["users/sam/secrets.json"]);
+        assert_eq!(gate(&who(1001), "apply", Some(&sams), None), Gate::Open);
+        for cmd in ["apply", "apply-confirmed", "revert", "schedule"] {
+            assert!(matches!(gate(&who(1000), cmd, Some(&sams), None), Gate::Refused(_)), "{cmd}");
+        }
+        let mixed = change(Tier::System, &["nixos/services.json", "users/sam/secrets.json"]);
+        assert!(matches!(gate(&who(1000), "apply", Some(&mixed), None), Gate::Refused(_)));
+        assert_eq!(gate(&who(1000), "apply", Some(&change(Tier::User, &["users/viper/secrets.json"])), None), Gate::Open, "their own, as any of theirs");
+        // A use is the daemon's to ask, and it asks nothing else; no one else asks one, a person nor the agent.
+        assert_eq!(gate(&who(989), "secret-use", None, None), Gate::Open);
+        assert_eq!(gate(&who(989), "secret-agent", None, None), Gate::Open);
+        for cmd in ["log", "secret-show", "secret-set", "propose", "apply"] {
+            assert!(matches!(gate(&who(989), cmd, None, Some("sam")), Gate::Refused(_)), "{cmd}");
+        }
+        for uid in [1000, 1001, 990, 65534] {
+            assert!(matches!(gate(&who(uid), "secret-use", None, None), Gate::Refused(_)), "{uid}");
+            assert!(matches!(gate(&who(uid), "secret-agent", None, None), Gate::Refused(_)), "{uid}");
+        }
+        let s = with_identity(&["secret-set".into(), "--name=t".into(), "--user=sam".into()], "secret-set", &who(1001), None, None, Some("/run/v")).unwrap();
+        assert_eq!(s, ["secret-set", "--name=t", "--user=sam", "--value-file", "/run/v", "--approved-by", "sam"]);
+        assert!(with_identity(&["secret-set".into()], "secret-set", &who(1001), None, None, None).is_err(), "a value comes in the request");
+        assert!(check_args(&["secret-set".into(), "--value-file=/etc/shadow".into()]).is_err());
+    }
+
     #[test]
     fn a_password_is_the_persons_own_or_an_administrators() {
         assert_eq!(gate(&who(1001), "password", None, Some("sam")), Gate::Password);
@@ -349,6 +435,38 @@ mod tests {
         assert_eq!(gate(&who(1000), "password", None, Some("sam")), Gate::Password);
     }
 
+
+    #[test]
+    fn who_is_on_the_desktop() {
+        let session = |id: &str| match id {
+            "7" => Some("TYPE=wayland\nCLASS=user\n".to_string()),
+            "4" => Some("TYPE=unspecified\nCLASS=manager\n".to_string()),
+            "9" => Some("TYPE=tty\nREMOTE=1\n".to_string()),
+            _ => None,
+        };
+        let cg = |p: &str| format!("0::{p}\n");
+        let logged_in = "NAME=viper\nSESSIONS=7 4\n";
+        // In the graphical session, and among its applications.
+        assert!(on_the_desktop(&cg("/user.slice/user-1000.slice/session-7.scope"), session, Some(logged_in)));
+        assert!(on_the_desktop(&cg("/user.slice/user-1000.slice/user@1000.service/app.slice/app-cosmic.scope"), session, Some(logged_in)));
+        // SSH and the text console stay as they were, even with a desktop logged in beside them.
+        assert!(!on_the_desktop(&cg("/user.slice/user-1000.slice/session-9.scope"), session, Some(logged_in)));
+        // A user manager with no desktop logged in: a server's.
+        assert!(!on_the_desktop(&cg("/user.slice/user-1000.slice/user@1000.service/app.slice/x.service"), session, Some("NAME=viper\nSESSIONS=9 4\n")));
+        assert!(!on_the_desktop(&cg("/user.slice/user-1000.slice/user@1000.service/app.slice/x.service"), session, None));
+        // A system service; a session no record names; nothing to read.
+        assert!(!on_the_desktop(&cg("/system.slice/backdoor.service"), session, Some(logged_in)));
+        assert!(!on_the_desktop(&cg("/user.slice/user-1000.slice/session-77.scope"), session, Some(logged_in)));
+        assert!(!on_the_desktop("", session, Some(logged_in)));
+    }
+
+    #[test]
+    fn a_process_is_named_by_when_it_started() {
+        let rest: Vec<String> = (3..=30).map(|n| n.to_string()).collect();
+        // A name with spaces and a `)` in it does not move the fields.
+        assert_eq!(start_time(&format!("42 (ev)il na me) {}", rest.join(" "))), Some(22));
+        assert_eq!(start_time("nonsense"), None);
+    }
     #[test]
     fn the_agent_proposes_and_nothing_more() {
         let a = who(990);

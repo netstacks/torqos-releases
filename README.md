@@ -14,8 +14,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/netstacks/torqos-releases/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/netstacks/torqos-releases?label=release&color=FF7A1A&labelColor=101216"></a>
-  <a href="https://github.com/netstacks/torqos/actions/workflows/test.yml"><img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/netstacks/torqos/test.yml?branch=main&label=tests&labelColor=101216"></a>
+  <a href="https://github.com/torqosorg/torqos-releases/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/torqosorg/torqos-releases?label=release&color=FF7A1A&labelColor=101216"></a>
+  <a href="https://github.com/torqosorg/torqos/actions/workflows/test.yml"><img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/torqosorg/torqos/test.yml?branch=main&label=tests&labelColor=101216"></a>
   <a href="LICENSE"><img alt="Licence: Apache 2.0" src="https://img.shields.io/badge/licence-Apache%202.0-5B6270?labelColor=101216"></a>
   <img alt="Platform: x86_64" src="https://img.shields.io/badge/platform-x86__64-8A93A3?labelColor=101216">
   <img alt="Built on NixOS 26.05" src="https://img.shields.io/badge/built%20on-NixOS%2026.05-7EE2A8?labelColor=101216">
@@ -24,7 +24,7 @@
 <p align="center">
   <a href="https://torqos.org"><strong>torqos.org</strong></a> &nbsp;·&nbsp;
   <a href="https://docs.torqos.org">Documentation</a> &nbsp;·&nbsp;
-  <a href="https://github.com/netstacks/torqos-releases/releases/latest">Download</a> &nbsp;·&nbsp;
+  <a href="https://github.com/torqosorg/torqos-releases/releases/latest">Download</a> &nbsp;·&nbsp;
   <a href="docs/INSTALL.md">Install</a> &nbsp;·&nbsp;
   <a href="docs/ROADMAP.md">Roadmap</a> &nbsp;·&nbsp;
   <a href="branding/README.md">Brand</a>
@@ -56,21 +56,25 @@ It has **one base and two faces**:
       <h4>🖥️&nbsp; The server, as code</h4>
       A machine defined in code, in git, driven by <code>torqcli</code> and rebuilt from its
       repository anywhere. Every change reviewed with <code>show | compare</code>, applied with
-      <code>commit</code>, undone with <code>rollback</code>. <b>This is TorqOS today.</b>
+      <code>commit</code>, undone with <code>rollback</code>. <b>This is what the released
+      versions are.</b>
     </td>
     <td width="50%" valign="top">
       <h4>🤖&nbsp; The machine an AI can drive</h4>
-      The same base with a desktop configuration on it, where an agent <i>proposes</i>, a person
-      approves, and anything it did can be undone. The agent never gets root and never bypasses
-      the broker. <b>Being built:</b> M3–M5 of the <a href="docs/ROADMAP.md">roadmap</a>.
+      The same base with an optional desktop (COSMIC) on it, where an agent <i>proposes</i>, a
+      person approves, and anything it did can be undone. The agent never gets root and never
+      bypasses the broker. <b>Experimental:</b> the desktop is on the main branch and not yet in a
+      release; the agent exists, but no model ships with it. See
+      <a href="#project-status">Project status</a> and the <a href="docs/ROADMAP.md">roadmap</a>.
     </td>
   </tr>
 </table>
 
 > [!NOTE]
-> **Status:** early releases (`v0.1.x`). The configuration layer is complete and in daily use; the
-> images, first-boot setup, signed releases and the ISO installer are new. See
-> [Project status](#project-status).
+> **Status:** early releases. The latest is `v0.3.2` (2026-11-09). The configuration layer is
+> complete, and its owner has used it daily since 2026-10-30; no one outside the project has
+> tested it yet. A `0.4.0` release candidate (the desktop, and secrets for the agent) is in
+> preparation and is not released. See [Project status](#project-status).
 
 ## Contents
 
@@ -93,13 +97,13 @@ It has **one base and two faces**:
 | | |
 |---|---|
 | 🌳 **One configuration tree** | Every NixOS setting, generated from the system's own options, with `?` help, Tab completion and abbreviations. `show configuration` is the whole machine; what is not a value (a hardware file, a module of your own) is a plain Nix file attached to the tree. |
-| 🔁 **A network device's commit model** | Edit a private candidate, compare it with what runs, `commit check` to build without switching, `commit` to apply. `commit confirmed 5` rolls itself back unless you confirm it: the safe way to change SSH or networking on a remote machine. |
+| 🔁 **A network device's commit model** | Edit a private candidate, compare it with what runs, `commit check` to evaluate the candidate (it does not build it, and does not switch), `commit` to build and apply. `commit confirmed 5` rolls itself back unless you confirm it: the safe way to change SSH or networking on a remote machine. |
 | ⏪ **Everything reversible** | `rollback <n>` loads any earlier configuration into the candidate; `request system revert #85` undoes one recorded change; the boot menu keeps every generation, and a commit confirmed that a power cut interrupts is rolled back at the next start. |
-| 🔗 **A tamper-evident history** | Each proposal and change is a line in a hash-chained ledger: who asked, who approved, what changed, the system it produced. The machine checks at boot and every 15 minutes that it is what the ledger says. |
-| ✍️ **One writer** | Only the broker writes the configuration repository. NixOS's tools for changing a machine are not on it, and a machine that drifts from its ledger says so. |
+| 🔗 **A tamper-evident history** | Each proposal and change is a line in a hash-chained ledger: who asked, who approved, what changed, the system it produced. The machine checks at boot and every 15 minutes that it is what the ledger says. Against someone with root on the same machine this holds only if the configuration is also pushed to a remote, which is off by default. |
+| ✍️ **One writer** | Only the broker writes the configuration repository. NixOS's tools for changing a machine are not on it, and a machine that drifts from its ledger says so. Root can still go around the broker: the machine then reports the drift afterwards; it does not prevent it. |
 | 🔒 **Secure by default** | Nothing listens on the network until you ask. Root is locked. SSH, once on, is keys only unless passwords are allowed, the owner only, never root, with password guessing blocked. |
 | 📦 **Signed releases** | Images come with signed checksums, and a machine checks the release key's signature on every update before loading it. Nothing unfree is in an image, and each release says where its source is. |
-| 🪶 **Thin** | No desktop, no graphical stack, no installer tools on an installed machine: a new machine's system is held under a size budget CI enforces. |
+| 🪶 **Thin** | The base has no desktop and no graphical stack, and no installer tools on an installed machine: a new machine's system is held under a size budget CI enforces. A desktop (COSMIC) exists as an opt-in configuration, not as part of the base. |
 
 ## A first session
 
@@ -146,7 +150,7 @@ The full design is in [docs/CLI-DESIGN.md](docs/CLI-DESIGN.md), the tree in
 
 TorqOS is installed from an image: download it, check it, boot it, answer a few questions.
 
-**1. Download** from the [latest release](https://github.com/netstacks/torqos-releases/releases/latest):
+**1. Download** from the [latest release](https://github.com/torqosorg/torqos-releases/releases/latest):
 
 | File | For |
 |---|---|
@@ -154,8 +158,9 @@ TorqOS is installed from an image: download it, check it, boot it, answer a few 
 | `torqos-x86_64-linux.vmdk.gz` | VMware ESXi (x86_64); `gunzip` it first |
 | `torqos-x86_64-linux.iso` | A real machine: the installer, written to a USB stick as it is (from `v0.2.0`) |
 
-x86_64 only while TorqOS is in development; aarch64 images come back with the first stable
-release (v0.2.0 and earlier have them too).
+x86_64 only while TorqOS is in development. There are no aarch64 downloads for v0.3.x (v0.2.0 and
+earlier have them); nothing builds or tests aarch64 now, and aarch64 images are planned to return
+with the first stable release.
 
 **2. Check it**, with the release's `SHA256SUMS`, `SHA256SUMS.sig` and `allowed_signers`, using only
 OpenSSH and coreutils:
@@ -174,16 +179,21 @@ it lists the machine's disks, never its own, asks you to name the one to erase, 
 reads it back, and leaves the machine's detected hardware for setup. The image has no user account,
 root is locked, SSH is off and nothing listens on the network: the console shows first-boot setup.
 
-**4. Answer setup's questions**, asked once, like a network device's initial dialog: the machine's
-name and time zone, your user name and password, and whether to allow logging in from other
-machines (not at all, by password, by SSH key, or both; the default is not at all). Setup writes the
-configuration, the broker builds and switches to it, and records it as change #1.
+**4. Answer setup's questions**, asked once, like a network device's initial dialog. Setup first
+looks at the network (a cable is used as it is; for Wi-Fi it lists the networks it sees and joins
+the one you choose; you may skip it). If it is online it asks whether this is a new machine or
+should start from a configuration repository of yours (to become the machine that repository
+describes); offline, it is a new machine. For a new machine it asks the machine's name and time
+zone, your user name and password, and whether to allow logging in from other machines (not at
+all, by password, by SSH key, or both; the default is not at all). Setup writes the configuration,
+the broker builds and switches to it, and records it as change #1. A setup cut short before that
+starts again from the beginning.
 
 Step by step, for each hypervisor and for real hardware: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Updates
 
-Releases are published to [netstacks/torqos-releases](https://github.com/netstacks/torqos-releases):
+Releases are published to [torqosorg/torqos-releases](https://github.com/torqosorg/torqos-releases):
 each a git commit signed with the TorqOS release key, with `stable` moved forward only to releases
 that passed the tests. On a machine:
 
@@ -205,7 +215,7 @@ pre-built and signed from NixOS's binary cache; the machine builds only TorqOS's
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
 │ torqcli      the shell: the tree, the candidate, compare, commit │
-│              (people today; later, proposals from an agent)      │
+│              (people; an agent's proposals, experimental)        │
 ├──────────────────────────────────────────────────────────────────┤
 │ torq-broker  the only writer of the configuration repository:    │
 │              checks, commits, builds, switches, confirms,        │
@@ -244,12 +254,18 @@ that imports a TorqOS release and holds that machine's settings, written only by
   connection, the owner only (changeable), never root; with passwords, addresses that keep guessing
   are blocked at the firewall. A commit that changes who can log in shows it, and is refused if it
   would leave nobody able to.
-- **The configuration cannot reach the broker.** Settings that would change what the broker runs, its
-  files in `/etc`, its units, or TorqOS itself are refused when the system is evaluated, however they
-  are spelled.
+- **The configuration is fenced from the broker, with limits.** A list of settings that would change
+  what the broker runs, its files in `/etc`, its units, or TorqOS itself are refused when the system
+  is evaluated, however they are spelled. The fence is a list: plain Nix files attached to the tree,
+  and other settings that run code as root, can still change the broker. What stands there is an
+  administrator reading and approving the change (KNOWN-GAPS 3 and 6m).
 - **Signed releases**, for images and for updates, checked with OpenSSH alone.
-- **An auditable history.** The ledger is hash-chained; `torq-broker verify` detects an entry edited, added or removed inside the chain (root can still rewrite it whole, or cut its newest entries: anchoring it off the machine is M3).
-- **Privileged code is small Rust**, with `unsafe` and dead code forbidden by the compiler.
+- **An auditable history.** The ledger is hash-chained; `torq-broker verify` detects an entry edited, added or removed inside the chain (root can still rewrite it whole, or cut its newest entries). Pushing the configuration and the ledger to a remote repository catches that (built: `set torq remote url`), but it is off by default, so on a default machine the ledger does not hold against root.
+- **The broker is Rust, and not all of what runs as root is.** The broker is about 9,000 lines under
+  `broker/src` (tests excluded, comments and blank lines counted), with `unsafe` and dead code
+  forbidden by the compiler. Also run as root: a few shell scripts in `modules/` (the agent's
+  launcher, break-glass, the data snapshots, the lid handler on a desktop) and `torqcli` itself at
+  setup and install. The broker's own systemd units are not sandboxed yet (KNOWN-GAPS N5 and 6zf).
 
 The threat model, what is and is not protected today, and the plan for owner-rooted boot security are
 in [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md); open issues are tracked openly in
@@ -261,20 +277,23 @@ maintainers rather than in a public issue.
 | Milestone | | State |
 |---|:---:|---|
 | **M1** — the trust loop: propose, apply, rebuild, ledger, one-command rollback | ✅ | Done |
-| **M1.5** — `torqcli`: the tree, the candidate, the commit model | ✅ | Done; a usability study with new users is next |
-| **M2** — install: images, first-boot setup, signed releases, the ISO installer, a thin base | 🟧 | Built and tested: images (qcow2, VMDK; x86_64, aarch64), setup, signed releases, CI, the ISO installer, the skeleton base, the boot-menu test, the source statement and the unfree check. Left: the end-of-milestone audit, then `v0.2.0` |
-| **M3** — trust: identity from the kernel, the agent's account, the config repo's remote, strict mode | ⬜ | Designed (ADR-035, ADR-036) |
-| **M4** — the desktop as a configuration, applications, data | ⬜ | Designed (ADR-034, ADR-037, ADR-038) |
-| **M5** — the agent: doctor mode, proposals, session trust | ⬜ | Designed ([docs/AI-LAYER.md](docs/AI-LAYER.md)) |
-| Later — owner-rooted boot security: the owner's Secure Boot keys, TPM2 | ⬜ | Designed (ADR-033, [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md)) |
+| **M1.5** — `torqcli`: the tree, the candidate, the commit model | ✅ | Done. A usability study with new users is still to do: no one outside the project has tested it |
+| **M2** — install: images, first-boot setup, signed releases, the ISO installer, a thin base | ✅ | Done; released as `v0.2.0` |
+| **M3** — trust: identity from the kernel, the agent's account, the config repo's remote (off by default), strict mode, data snapshots | ✅ | Done; in `v0.3.x` |
+| **M3.5** — the install on real hardware | 🟧 | Partly: an offline first build, network-first setup, and TorqOS installed on the owner's laptop. Not built: the console UI, an answers file for unattended installs, recipes (shared configuration repositories), the installer's other ways (beside another system, a partition) |
+| **M4** — the desktop as a configuration, applications, data | 🟧 | Largely built, on the main branch and not released: COSMIC, TorqOS Settings, a panel applet, SSH tunnels, approval as a dialog. It has run on one physical machine, the owner's laptop. Not built: wrapping COSMIC's own settings pages, applications by rung, syncing data |
+| **M5** — the agent: doctor mode, proposals, session trust | 🟧 | The non-GUI half is built, in `v0.3.x`, and is experimental: the doctor is off by default, no model ships with it, and no real model has been tried (the tests use a scripted one). The rest is parked until after `0.4.0` |
+| Later — owner-rooted boot security: the owner's Secure Boot keys, TPM2, disk encryption | ⬜ | Designed (ADR-033, [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md)); not built |
 
+Released: `v0.1.0` to `v0.3.2`. Not released: `0.4.0-rc1`, in preparation, which is the desktop and
+secrets (ADR-052, which lets the agent use a token or key without being able to read it).
 The roadmap is [docs/ROADMAP.md](docs/ROADMAP.md); design decisions and their reasons are recorded as
 ADRs in [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Building from source
 
-You need Nix with flakes, on Linux (x86_64 or aarch64). The VM tests need KVM to run quickly; they
-fall back to emulation without it.
+You need Nix with flakes, on x86_64 Linux. The flake still evaluates for aarch64, but nothing builds
+or tests aarch64 now. The VM tests need KVM to run quickly; they fall back to emulation without it.
 
 ```sh
 nix flake check                                  # everything below
@@ -283,6 +302,7 @@ nix build .#iso                                  # the ISO installer
 nix build .#checks.x86_64-linux.trust-loop       # one VM test
 nix develop -c sh -c 'cd cli && cargo test'      # torqcli's unit tests
 nix develop -c sh -c 'cd broker && cargo test'   # the broker's unit tests
+nix develop -c sh -c 'cd wire && cargo test'     # torq-wire, the words the three share
 ```
 
 | Check | What it proves |
@@ -301,11 +321,22 @@ nix develop -c sh -c 'cd broker && cargo test'   # the broker's unit tests
 | `installer` | The ISO from a USB stick to a chosen disk, and that disk's first boot |
 | `boot` | The boot menu on a real EFI partition: a commit's entry, an older one chosen, a power cut mid-commit |
 | `free`, `size` | Nothing unfree in an image or the ISO; a new machine within its size budget |
+| `first-build-offline` | A first boot's configuration builds from what the installer carries, with nothing downloaded |
+| `commit-at` | `commit at`: a change approved now lands at its time, as the person who approved it; a cancelled one does not |
+| `doctor` | Doctor mode against a scripted model: it reads, a hostile log line taints the session, a tool that writes is refused, nothing is proposed |
+| `agent-proposals` | The broker holds each session's taint; a tainted proposal says why; a change that could cut the machine off applies only as a commit confirmed; session trust is bounded |
+| `release-path` | What a changed `flake.lock` builds is what it names; TorqOS's own releases must be signed by the release key |
+| `backup` | The declared backup: its key kept outside the configuration, a restore as the folder's owner, every restore in the ledger |
+| `desktop` | The desktop boots to COSMIC's greeter and logs in; the approval dialog works (software rendering; smoothness is judged on real hardware) |
+| `tunnels` | A person's SSH tunnels come up, listen on 127.0.0.1 only, refuse an unknown host key, and turn nothing in their file into an ssh option |
+| `secrets` | A secret is used by a program and never read by it (ADR-052) |
+| `cosmic-modules`, `cosmic-prebuilt`, `wire` | The COSMIC modules are nixpkgs' unchanged; COSMIC is built from the cache unless the owner turns custom compiling on; the wire crate's own tests |
 | `broker` | The broker's own tests, in the build sandbox |
 
-They run on the dev host before every merge; CI runs them for pull requests and every release,
-builds the x86_64 images, and publishes a release on each `v*` tag. Developing
-TorqOS in a VM: [docs/DEV-SETUP.md](docs/DEV-SETUP.md).
+CI's `test` workflow runs `nix flake check` on pull requests, when started by hand, and inside each
+release; it does not run on every push to `main`. The `image` workflow builds the x86_64 images, and
+the `release` workflow tests, builds, signs and publishes a release on each `v*` tag. Developing
+TorqOS: [docs/DEV-SETUP.md](docs/DEV-SETUP.md).
 
 ## Repository layout
 
@@ -314,6 +345,10 @@ flake.nix          the entry point: packages, images, the ISO, VM tests, the mac
 modules/           the distribution, as NixOS modules (torq.* options)
 cli/               torqcli, the shell, and the ISO's installer (Rust)
 broker/            torq-broker, the privileged writer, ledger and rollback (Rust)
+agent/             torq-doctor, the agent's program: doctor mode and proposals (Rust; experimental)
+wire/              torq-wire, the words of the broker's socket and the ledger, shared by the three (Rust)
+settings/          TorqOS Settings, the panel applet and the SSH-tunnels applet for the desktop (Rust)
+scripts/           the release helpers (bump-version) and the COSMIC update helper
 templates/config/  the configuration repository each machine starts from
 hosts/             the image, the ISO installer, a development VM
 tests/             NixOS VM tests and the configuration tree's checks

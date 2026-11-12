@@ -142,6 +142,37 @@ fn under_trust_a_clean_proposal_in_the_persons_folder_applies() {
     b.revert(a.body.seq, "casey").unwrap();
 }
 
+/// ADR-053 (f): trust's automatic apply takes the same re-check as a person's. The configuration moved on
+/// in another file: applied, re-checked; the same file made since, so the diff would do something else:
+/// refused, nothing applied.
+#[test]
+fn under_trust_a_moved_configuration_is_rechecked() {
+    let (dir, b) = setup(&[]);
+    session::grant(&b, "casey", 30).unwrap();
+    let s = session::start(&b).unwrap();
+    let p = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
+    let night = dir.path().join("night.diff");
+    fs::write(&night, "--- a/desktop.nix\n+++ b/desktop.nix\n@@ -1 +1 @@\n-{ }\n+{ nightLight = true; }\n").unwrap();
+    let o = b.propose(&night, "night", Actor::User, false).unwrap();
+    b.apply(o.body.seq, "casey", false).unwrap();
+    let moved = b.repo.head().unwrap();
+    let a = session::apply_trusted(&b, &p).unwrap().expect("applied under trust");
+    assert_eq!(a.body.data["rechecked_on"], json!(moved));
+
+    let (dir, b) = setup(&[]);
+    session::grant(&b, "casey", 30).unwrap();
+    let s = session::start(&b).unwrap();
+    let q = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
+    // The same file, made by the person meanwhile: the agent's diff, which creates it, would now do
+    // something else (here: nothing at all, it no longer applies).
+    let mine = diff(dir.path(), "mine.diff", "users/casey/packages.json", "[\"git\"]");
+    let m = b.propose(&mine, "mine", Actor::User, false).unwrap();
+    b.apply(m.body.seq, "casey", false).unwrap();
+    let err = format!("{:#}", session::apply_trusted(&b, &q).unwrap_err());
+    assert!(err.contains("would now do something different"), "{err}");
+    assert_eq!(fs::read_to_string(b.repo.root().join("users/casey/packages.json")).unwrap(), "[\"git\"]\n");
+}
+
 #[test]
 fn trust_never_covers_a_tainted_or_sessionless_or_system_proposal() {
     let (dir, b) = setup(&["services.openssh", "networking"]);

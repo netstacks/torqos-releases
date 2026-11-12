@@ -47,7 +47,7 @@ alice@torq# commit confirmed 5 comment "SSH on, keys only; htop"
 alice@torq# commit
 ```
 
-- `commit check` builds the new system without switching to it.
+- `commit check` evaluates the new configuration, which catches most mistakes early. It does not build the system or switch to it; building happens at `commit`.
 - `commit confirmed 5` shows the comparison and the keys that will be able to log in, asks, applies
   the change, and **rolls it back by itself in five minutes** unless you confirm it.
 - The second `commit` confirms it.
